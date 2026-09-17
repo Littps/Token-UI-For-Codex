@@ -137,10 +137,13 @@ const report = {};
 // ---- F5：错误吞噬与日志截断 ----
 {
   const monitorSource = fs.readFileSync(new URL("../token-stats.mjs", import.meta.url), "utf8");
-  const guardianSource = fs.readFileSync(new URL("../guardian.ps1", import.meta.url), "utf8");
+  // guardian.ps1 已在「自启架构调整」中移除；只有文件仍存在时才检查该项，避免脚本因缺文件而中断。
+  const guardianFile = new URL("../guardian.ps1", import.meta.url);
+  const guardianSource = fs.existsSync(guardianFile) ? fs.readFileSync(guardianFile, "utf8") : "";
   report.F5_error_swallowing = {
     emptyCatchCount: (monitorSource.match(/catch\s*\{\s*\}/g) || []).length,
     catchWithEmptyBlockAll: (monitorSource.match(/catch\s*\([^)]*\)\s*\{\s*\}/g) || []).length,
+    guardianPresent: guardianSource.length > 0,
     guardianRedirectsStdOut: /RedirectStandardOutput/.test(guardianSource),
     logTruncationRisk: /RedirectStandardOutput/.test(guardianSource),
   };

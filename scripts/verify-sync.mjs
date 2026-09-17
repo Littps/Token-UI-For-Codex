@@ -45,7 +45,8 @@ function newestPluginDir(root) {
 const pluginCacheDir = newestPluginDir(pluginCacheRoot);
 const deployPluginDir = deployRoot ? path.join(deployRoot, "plugins", "tokens-ui-for-codex") : null;
 
-const CHECKED_FILES = ["token-stats.mjs", "codex-token-spend-panel.js", "protocol.mjs", "guardian.ps1", "install-autostart.ps1", "uninstall-autostart.ps1"];
+// 注意：launch-silent.vbs 由安装脚本按本机路径生成，各副本内容必然不同，因此不纳入一致性比对。
+const CHECKED_FILES = ["token-stats.mjs", "codex-token-spend-panel.js", "protocol.mjs", "install-autostart.ps1", "uninstall-autostart.ps1"];
 
 const copies = [
   { name: "源码", root: sourceRoot },
