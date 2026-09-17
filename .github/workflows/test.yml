@@ -22,7 +22,8 @@ jobs:
         shell: pwsh
         run: |
           $errors = $null
-          foreach ($file in @('guardian.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1')) {
+          foreach ($file in @('install.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1')) {
+            if (-not (Test-Path -LiteralPath $file)) { throw "PowerShell file missing: $file" }
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$null, [ref]$errors) | Out-Null
             if ($errors) { throw "PowerShell parse failed: $file" }
           }
