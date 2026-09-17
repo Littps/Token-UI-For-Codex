@@ -1,0 +1,225 @@
+{
+  "schemaVersion": 1,
+  "note": "行为基线：只记录命令行输出的哈希与字节数，不含任何会话内容、路径或线程 ID。",
+  "generatedAt": "2026-09-17T07:23:49.831Z",
+  "caseCount": 31,
+  "cases": [
+    {
+      "key": "4f0b60ac35a01e17",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 1976,
+      "sha256": "e11bf74e51b739f08d3e42a7422fd34a657252fda4df8628031880093cd25ae2"
+    },
+    {
+      "key": "f05d4882b12455a4",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 306,
+      "sha256": "f3db379b838b4a7caeccfadb3b0df679f65494af9dc3428c3a82d927460b0bc1"
+    },
+    {
+      "key": "5ecb062a652c7642",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 306,
+      "sha256": "c863976dc576391b5a5aeff9f9af177c1a839ba1e283ef5f6bbab957d89f325f"
+    },
+    {
+      "key": "f291ff8c2db8b573",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 306,
+      "sha256": "1b113b986fee8b0077ce39e4aa735bf577668fabb6be57a1ef7cceae4515e460"
+    },
+    {
+      "key": "0fd10d45e2797fa8",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 655,
+      "sha256": "14508979a1709343f9f38728600050f4385d8ad4003d414e179ffc90bcf58f9a"
+    },
+    {
+      "key": "92b20e0b7dbfb728",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 711,
+      "sha256": "7a1b59a0c09d71c43ac6f5a0c610e69e26d24c733aa3b24b17b47406feb06eaf"
+    },
+    {
+      "key": "659e6a427ac288b5",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 1704,
+      "sha256": "ffcfafa72fdc84b6fa0d27e8a93cb51269f8244d91f4482ab710b3a90e6e8df5"
+    },
+    {
+      "key": "33048e84690c6897",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 306,
+      "sha256": "319db4776a919a04bb52fd75e579e1150f6c9519f1171fa1d824daa8c2460193"
+    },
+    {
+      "key": "337ff79ef1124d3b",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 501,
+      "sha256": "452ca8163e9bb968bf6c7afde14b5663dd5c87f9f20edf4e891172e8e57351ba"
+    },
+    {
+      "key": "1e26912b29cb72e3",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 1349,
+      "sha256": "22721e231bced249b553c309509586c20b8d7ae1e239af8b6d6524a381f7ac9a"
+    },
+    {
+      "key": "e667b5244064cd7d",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 6474,
+      "sha256": "31d6590dc1b5b90a6d53f4deb41adb7a1d51bb466fec998393e398a5dccf1f00"
+    },
+    {
+      "key": "e007a7e509ed036c",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 448,
+      "sha256": "0d0aee69e8ab3191494aca435602c0285e22ab309790c16be2beedd1535ea50c"
+    },
+    {
+      "key": "fae928ba2a158eb6",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 583,
+      "sha256": "15a4437039f11e91dec929815a77401b42e2a1e98411a4ed81c62b0fd0405b1c"
+    },
+    {
+      "key": "92403766b68cce55",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 922,
+      "sha256": "c83abaaa1e52b1535082b12c99ad9dc39664cf800d2679e2cbb8d5b76977e65f"
+    },
+    {
+      "key": "faad3cf86301fc1c",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 721,
+      "sha256": "618e3046f0ed5ac0846e431309095990d7a03c2d690d9b9039dce78b57e87f86"
+    },
+    {
+      "key": "2910b28ddfbcce9d",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 584,
+      "sha256": "471b7003014b2ab7a11c34e8117cd9f3c620e2c3ad4867aaa836b0c27678388e"
+    },
+    {
+      "key": "1a398eff23296900",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 789,
+      "sha256": "0104512f9b313f112ae83f5a7ca2d7a94b2f584ee609f0814da4471459c90def"
+    },
+    {
+      "key": "d1c5042515151dc9",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 995,
+      "sha256": "e1a3f9837c48ae609b4bffcfaf55082062c2b3bb8a29bd42feb5ce628634ae74"
+    },
+    {
+      "key": "e94f23adb4cb8a8e",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 515,
+      "sha256": "6798b3c3af343bb205a4bd9d6df0ee982ef12b507e18997f1a75d0e6ddb8ee09"
+    },
+    {
+      "key": "e391bba2004fb168",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 653,
+      "sha256": "6b9240df544efaf6380a86f15acc5fa6970d566e0684ccf070cc419654038174"
+    },
+    {
+      "key": "773701a200c45b38",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 450,
+      "sha256": "e08fa9cd1f4153d69b0fc3fd4a41e9c35b008a25752996cfa3f8be863f06d774"
+    },
+    {
+      "key": "6945c104d3c40d81",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 857,
+      "sha256": "e7b7b0ed5667953145185016af6edd062644a8d3ca3952c0fa23ea6cea15ce8d"
+    },
+    {
+      "key": "375ebccb9aaeb5b1",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 927,
+      "sha256": "f6a69f46a7ee7560a751b632624eafc8d577a7c984e998dc3b0d6fd806505d7d"
+    },
+    {
+      "key": "2a544f0e57255aa8",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 448,
+      "sha256": "f846faa485a5da0d65e065816b7e430d81be5f553bf68f74078e2e60baf0c841"
+    },
+    {
+      "key": "c7bac944100b6bf2",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 723,
+      "sha256": "1da98a2d556dff410c93828645e2f146c5f01633ac98425923bfbb1d7a79f9d2"
+    },
+    {
+      "key": "c3052f1d6ab29a88",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 450,
+      "sha256": "5c8ffa774dffd9b57e452d2206b7119d5ae8c621fae26f9f917717d04be2dd00"
+    },
+    {
+      "key": "62c076229842d501",
+      "kind": "thread",
+      "exitCode": 0,
+      "bytes": 753,
+      "sha256": "4742b06efa848b26b0ea8e57705b8d054a1090001f08defa755ab78e42ec3376"
+    },
+    {
+      "key": "all-threads",
+      "kind": "all",
+      "exitCode": 0,
+      "bytes": 1896,
+      "sha256": "758b256a93a0be52154a2a8130dfd09bc594a93af148ccc89011f80afd07bd86"
+    },
+    {
+      "key": "33048e84690c6897:detail",
+      "kind": "detail",
+      "exitCode": 0,
+      "bytes": 306,
+      "sha256": "319db4776a919a04bb52fd75e579e1150f6c9519f1171fa1d824daa8c2460193"
+    },
+    {
+      "key": "337ff79ef1124d3b:detail",
+      "kind": "detail",
+      "exitCode": 0,
+      "bytes": 549,
+      "sha256": "2fd7cd5f79a8da45477aa7d8aae537e829a5f0c3aef2a912d147ce79f14ac3f4"
+    },
+    {
+      "key": "f05d4882b12455a4:detail",
+      "kind": "detail",
+      "exitCode": 0,
+      "bytes": 306,
+      "sha256": "f3db379b838b4a7caeccfadb3b0df679f65494af9dc3428c3a82d927460b0bc1"
+    }
+  ]
+}

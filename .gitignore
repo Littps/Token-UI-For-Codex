@@ -1,0 +1,18 @@
+# 依赖与构建产物
+node_modules/
+build/
+dist/
+release/
+
+# 本地备份（含部署副本、插件缓存快照）
+backups/
+
+# 备份 / 临时文件
+*.bak
+*.log
+*.tmp
+*~
+
+# 系统与编辑器杂项
+.DS_Store
+Thumbs.db

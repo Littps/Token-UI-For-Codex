@@ -1,0 +1,62 @@
+title: "[测试报告] 我的运行环境"
+labels: ["测试报告"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢参与测试！请填写以下信息，帮助项目收集兼容性数据（按模板填写即可，无需额外格式）。
+  - type: dropdown
+    id: release-version
+    attributes:
+      label: Release 版本号
+      description: 你使用的是哪个发布版本？
+      options:
+        - v1.2-node（Node 版，脚本方式）
+        - v1.2-exe（内置 Node 版，免安装）
+        - 其他 / 不确定
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      description: 你的系统版本
+      options:
+        - Windows 10
+        - Windows 11
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex 桌面版版本号
+      description: 例如 26.727.6591.0
+      placeholder: 26.727.6591.0
+    validations:
+      required: true
+  - type: input
+    id: codexpp-version
+    attributes:
+      label: Codex++ 版本号
+      description: 例如 1.2.44
+      placeholder: 1.2.44
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: 是否成功运行
+      options:
+        - 成功
+        - 部分功能异常
+        - 失败
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: 补充说明（可选）
+      description: 遇到的问题、现象、截图、watch.log 位置等
+      placeholder: 描述你遇到的问题或想补充的信息
+      render: markdown
