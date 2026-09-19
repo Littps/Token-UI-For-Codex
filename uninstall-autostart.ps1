@@ -15,10 +15,18 @@
 param(
   [switch]$PurgeState,
   [switch]$RemoveUserScript,
-  [switch]$RemovePlugin
+  [switch]$RemovePlugin,
+  # 一键全清：等价于同时指定上面三个开关，并额外清理插件缓存与 marketplace 注册
+  [switch]$Full
 )
 
 $ErrorActionPreference = "Continue"
+
+if ($Full) {
+  $PurgeState = $true
+  $RemoveUserScript = $true
+  $RemovePlugin = $true
+}
 
 $stateDir = Join-Path $env:LOCALAPPDATA "tokens-ui-for-codex"
 $legacyStateDir = Join-Path $env:LOCALAPPDATA "ccm-token-spend"
@@ -132,20 +140,70 @@ if ($RemoveUserScript) {
 }
 
 if ($RemovePlugin) {
-  $codex = Get-Command codex -ErrorAction SilentlyContinue
-  if ($codex) {
-    try {
-      & $codex.Source plugin remove tokens-ui-for-codex@tokens-ui-for-codex-local
-      Write-Ok "已请求摘除 Codex 插件。"
-    } catch {
-      Write-Note ("摘除插件失败：" + $_.Exception.Message)
-    }
-  } else {
-    Write-Note "未找到 codex 命令，请手动执行：codex plugin remove tokens-ui-for-codex@tokens-ui-for-codex-local"
+# 动态定位 codex CLI（共用逻辑，见插件根目录 find-codex.ps1）
+$locator = Join-Path $PSScriptRoot "find-codex.ps1"
+if (Test-Path -LiteralPath $locator) { . $locator }
+$codexPath = if (Get-Command Resolve-CodexCli -ErrorAction SilentlyContinue) { Resolve-CodexCli } else { $null }
+
+if ($codexPath) {
+  try {
+    & $codexPath plugin remove tokens-ui-for-codex@tokens-ui-for-codex-local 2>&1 | ForEach-Object { Write-Info $_ }
+    Write-Ok "已摘除 Codex 插件。"
+  } catch {
+    Write-Note ("摘除插件失败：" + $_.Exception.Message)
   }
+
+  # 摘除后验证插件缓存是否真的消失（不能只信命令返回值）
+  $pluginCache = Join-Path $env:USERPROFILE ".codex\plugins\cache\tokens-ui-for-codex-local"
+  if (Test-Path -LiteralPath $pluginCache) {
+    Remove-Item -LiteralPath $pluginCache -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $pluginCache) { Write-Note ("插件缓存仍残留（可能被占用）：" + $pluginCache) }
+    else { Write-Ok "已清理插件缓存目录。" }
+  } else {
+    Write-Info "插件缓存目录不存在，跳过。"
+  }
+
+  # 摘除本地 marketplace 注册（install 时用 codex plugin marketplace add 注册的）
+  try {
+    & $codexPath plugin marketplace remove tokens-ui-for-codex-local 2>&1 | ForEach-Object { Write-Info $_ }
+    Write-Ok "已摘除本地 marketplace 注册。"
+  } catch {
+    Write-Note ("摘除 marketplace 失败（可手动执行 codex plugin marketplace list 查看）：" + $_.Exception.Message)
+  }
+} else {
+  Write-Bad "未找到 codex 命令（已搜索 PATH、Codex 桌面版 bin 目录、npm 全局目录）。"
+  Write-Note "插件与本机注册未摘除，请手动执行："
+  Write-Note "  codex plugin remove tokens-ui-for-codex@tokens-ui-for-codex-local"
+  Write-Note "  codex plugin marketplace remove tokens-ui-for-codex-local"
+  Write-Note ("或手动删除目录：" + (Join-Path $env:USERPROFILE ".codex\plugins\cache\tokens-ui-for-codex-local"))
+}
 } else {
   Write-Info "未指定 -RemovePlugin，保留 Codex 插件。"
 }
+
+Write-Host "`n== 残留自检" -ForegroundColor Cyan
+
+$leftTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($leftTask) { Write-Note ("计划任务仍在：" + $taskName) } else { Write-Ok "计划任务：已清除" }
+
+$leftProc = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -match 'token-stats\.mjs' })
+if ($leftProc.Count -gt 0) { Write-Note ("监控进程仍在运行：PID " + $leftProc[0].ProcessId) }
+else { Write-Ok "监控进程：已停止" }
+
+$leftScript = Join-Path $env:APPDATA "Codex++\user_scripts\codex-token-spend-panel.js"
+if (Test-Path -LiteralPath $leftScript) { Write-Info "Codex++ 用户脚本：保留（未指定 -RemoveUserScript）" }
+else { Write-Ok "Codex++ 用户脚本：已删除" }
+
+$leftCache = Join-Path $env:USERPROFILE ".codex\plugins\cache\tokens-ui-for-codex-local"
+if (Test-Path -LiteralPath $leftCache) { Write-Note ("插件缓存仍在：" + $leftCache) }
+else { Write-Ok "插件缓存：已清除" }
+
+if (Test-Path -LiteralPath $stateDir) { Write-Info ("状态目录：" + $stateDir + "（未指定 -PurgeState 时保留）") }
+else { Write-Ok "状态目录：已清除" }
+
+# 唯一无法自动清理的就是安装包目录本身
+Write-Info ("安装包目录需要你手动删除：" + $PSScriptRoot)
 
 Write-Host ""
 Write-Host "已移除登录自启并停止监控进程。" -ForegroundColor Green

@@ -28,11 +28,33 @@
     "sessionInput": { "type": ["number", "null"], "minimum": 0 },
     "sessionCached": { "type": ["number", "null"], "minimum": 0 },
     "sessionOutput": { "type": ["number", "null"], "minimum": 0 },
+    "sessionCacheHitRate": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "会话缓存命中率，0–1 的比例（页面负责 ×100 显示）；输入为 0 或缓存缺失时为 null"
+    },
+    "sessionTps": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "会话加权平均生成速度（Σ输出 ÷ Σ纯生成耗时，tokens/秒）；无有效耗时数据时为 null"
+    },
     "contextUsed": { "type": ["number", "null"], "minimum": 0 },
     "turnTotal": { "type": "number", "minimum": 0 },
     "turnInput": { "type": "number", "minimum": 0 },
     "turnCached": { "type": ["number", "null"], "minimum": 0 },
     "turnOutput": { "type": "number", "minimum": 0 },
+    "turnCacheHitRate": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "当前提问缓存命中率，0–1 的比例；输入为 0 或缓存缺失时为 null"
+    },
+    "lastRequestTps": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "最后一次有耗时数据的请求的生成速度（tokens/秒）：输出 ÷ 纯生成耗时；无数据时为 null"
+    },
     "currentTurnIndex": { "type": "number", "minimum": 0 },
     "turnTotalCount": { "type": "number", "minimum": 0 },
     "turnsTruncated": { "type": "boolean" },

@@ -97,8 +97,12 @@
     for (const key of ["sessionTotal", "contextUsed", "modelContextWindow", "sessionInput", "sessionCached", "sessionOutput", "turnCached"]) {
       if (!isNullableNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
     }
-    if (!Array.isArray(data.turns) || data.turns.length > 200) return { ok: false, error: "轮次摘要超出限制" };
-    if (!Array.isArray(data.requestDetails) || data.requestDetails.length > 100) return { ok: false, error: "请求明细超出限制" };
+  // 这两个上限原本写成「等于监控侧上限」，形成隐藏耦合：
+  // 一旦监控侧放宽上限而面板未同步，面板会拒收整个负载 → 统计条什么数字都不显示，极难排查。
+  // 因此这里只拦「荒谬值」（防御异常/恶意负载），正常超限由监控侧负责截断。
+  // 监控侧对应常量：MAX_TURN_SUMMARIES / MAX_REQUEST_DETAILS（改动时无需同步本行）。
+  if (!Array.isArray(data.turns) || data.turns.length > 1000) return { ok: false, error: "轮次摘要超出限制" };
+  if (!Array.isArray(data.requestDetails) || data.requestDetails.length > 1000) return { ok: false, error: "请求明细超出限制" };
     for (const turn of data.turns) {
       if (!turn || !Number.isInteger(turn.index) || turn.index < 1 || typeof turn.startLabel !== "string" || !isNonNegativeNumber(turn.requests)) {
         return { ok: false, error: "轮次摘要字段无效" };
@@ -224,6 +228,31 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
+/* ---- 主题 token：先用宿主变量，取不到时按深浅主题回退 ---- */
+#${ROOT_ID}, #${DIALOG_ID} {
+  --ccm-surface: var(--color-background-primary, var(--background-primary, #ffffff));
+  --ccm-surface-2: var(--color-background-secondary, rgba(127, 127, 127, .08));
+  --ccm-surface-3: var(--color-background-tertiary, rgba(127, 127, 127, .16));
+  --ccm-hover: var(--color-background-hover, rgba(127, 127, 127, .12));
+  --ccm-border: var(--color-border, var(--border-color, rgba(127, 127, 127, .28)));
+  --ccm-text: var(--color-text, var(--text-primary, #1f2328));
+  --ccm-text-dim: var(--color-text-secondary, var(--color-text, currentColor));
+  --ccm-shadow: 0 16px 42px rgba(0, 0, 0, .22), 0 3px 12px rgba(0, 0, 0, .14);
+  color-scheme: light;
+}
+/* 深色：用从 Codex 深色界面实测取到的颜色
+   （主内容 #181818 / 浮层 #2d2d2d / 文字 #ffffff / 边框 rgba(255,255,255,.084)） */
+#${ROOT_ID}[data-ccm-theme="dark"], #${DIALOG_ID}[data-ccm-theme="dark"] {
+  --ccm-surface: var(--color-surface-elevated-secondary, var(--color-surface, #2d2d2d));
+  --ccm-surface-2: var(--color-background-secondary, rgba(255, 255, 255, .08));
+  --ccm-surface-3: var(--color-background-tertiary, rgba(255, 255, 255, .14));
+  --ccm-hover: var(--color-background-hover, rgba(255, 255, 255, .08));
+  --ccm-border: var(--color-border, rgba(255, 255, 255, .12));
+  --ccm-text: var(--color-text, #ffffff);
+  --ccm-text-dim: var(--color-text-secondary, rgba(255, 255, 255, .65));
+  --ccm-shadow: 0 16px 42px rgba(0, 0, 0, .55), 0 3px 12px rgba(0, 0, 0, .38);
+  color-scheme: dark;
+}
 #${ROOT_ID} {
   display: inline-flex;
   flex: 0 0 auto;
@@ -234,7 +263,7 @@
   justify-content: center;
   gap: 0;
   margin: 0 4px 0 0;
-  color: var(--color-text-secondary, var(--color-text, currentColor));
+  color: var(--ccm-text-dim);
   font-family: inherit;
   font-size: 11px;
   line-height: 14px;
@@ -248,7 +277,7 @@
   outline: none;
   transition: background-color .12s ease, opacity .12s ease;
 }
-#${ROOT_ID}:hover { background: var(--color-background-hover, rgba(127, 127, 127, .12)); }
+#${ROOT_ID}:hover { background: var(--ccm-hover); }
 #${ROOT_ID}:focus-visible {
   outline: 2px solid var(--color-accent, var(--color-primary, #6ea8fe));
   outline-offset: 2px;
@@ -265,12 +294,12 @@
   text-overflow: ellipsis;
 }
 #${ROOT_ID} .ccm-ts-native-primary {
-  color: var(--color-text, currentColor);
+  color: var(--ccm-text);
   font-size: 11px;
   font-weight: 500;
 }
 #${ROOT_ID} .ccm-ts-native-secondary {
-  color: var(--color-text-tertiary, var(--color-text-secondary, currentColor));
+  color: var(--ccm-text-dim);
   font-size: 10px;
   line-height: 12px;
   opacity: .9;
@@ -297,11 +326,11 @@
   max-height: min(560px, calc(100vh - 24px));
   flex-direction: column;
   overflow: hidden;
-  color: var(--color-text, var(--text-primary, #1f2328));
-  background: var(--color-background-primary, var(--background-primary, #ffffff));
-  border: 1px solid var(--color-border, var(--border-color, rgba(127, 127, 127, .28)));
+  color: var(--ccm-text);
+  background: var(--ccm-surface);
+  border: 1px solid var(--ccm-border);
   border-radius: 12px;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, .22), 0 3px 12px rgba(0, 0, 0, .14);
+  box-shadow: var(--ccm-shadow);
   font-family: inherit;
   font-size: 12px;
   line-height: 1.4;
@@ -314,12 +343,12 @@
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px 12px;
-  border-bottom: 1px solid var(--color-border, var(--border-color, rgba(127, 127, 127, .2)));
+  border-bottom: 1px solid var(--ccm-border);
 }
 #${DIALOG_ID} .ccm-ts-dialog-title { font-size: 14px; font-weight: 650; }
 #${DIALOG_ID} .ccm-ts-dialog-subtitle {
   margin-top: 2px;
-  color: var(--color-text-tertiary, var(--color-text-secondary, currentColor));
+  color: var(--ccm-text-dim);
   font-size: 11px;
 }
 #${DIALOG_ID} .ccm-ts-dialog-close {
@@ -341,8 +370,8 @@
 }
 #${DIALOG_ID} .ccm-ts-dialog-close:hover,
 #${DIALOG_ID} .ccm-ts-dialog-close:focus-visible {
-  color: var(--color-text, currentColor);
-  background: var(--color-background-hover, rgba(127, 127, 127, .14));
+  color: var(--ccm-text);
+  background: var(--ccm-hover);
   outline: none;
 }
 #${DIALOG_ID} .ccm-ts-dialog-body {
@@ -369,12 +398,12 @@
 #${DIALOG_ID} .ccm-ts-dialog-card {
   min-width: 0;
   padding: 9px 10px;
-  background: var(--color-background-secondary, rgba(127, 127, 127, .08));
+  background: var(--ccm-surface-2);
   border: 1px solid var(--color-border, var(--border-color, rgba(127, 127, 127, .16)));
   border-radius: 8px;
 }
 #${DIALOG_ID} .ccm-ts-dialog-card-label {
-  color: var(--color-text-tertiary, var(--color-text-secondary, currentColor));
+  color: var(--ccm-text-dim);
   font-size: 10px;
 }
 #${DIALOG_ID} .ccm-ts-dialog-card-value {
@@ -385,7 +414,7 @@
 }
 #${DIALOG_ID} .ccm-ts-dialog-card-note {
   margin-top: 2px;
-  color: var(--color-text-tertiary, var(--color-text-secondary, currentColor));
+  color: var(--ccm-text-dim);
   font-size: 10px;
   white-space: nowrap;
   overflow: hidden;
@@ -408,7 +437,7 @@
 }
 #${DIALOG_ID} .ccm-ts-dialog-context {
   padding: 10px;
-  background: var(--color-background-secondary, rgba(127, 127, 127, .08));
+  background: var(--ccm-surface-2);
   border-radius: 8px;
 }
 #${DIALOG_ID} .ccm-ts-dialog-context-top {
@@ -422,7 +451,7 @@
   height: 6px;
   margin-top: 8px;
   overflow: hidden;
-  background: var(--color-background-tertiary, rgba(127, 127, 127, .16));
+  background: var(--ccm-surface-3);
   border-radius: 999px;
 }
 #${DIALOG_ID} .ccm-ts-dialog-context-fill {
@@ -446,9 +475,9 @@
   border-bottom: 1px solid var(--color-border, var(--border-color, rgba(127, 127, 127, .12)));
 }
 #${DIALOG_ID} .ccm-ts-dialog-list-item:last-child { border-bottom: 0; }
-#${DIALOG_ID} .ccm-ts-dialog-list-item-current { background: var(--color-background-secondary, rgba(127, 127, 127, .08)); }
+#${DIALOG_ID} .ccm-ts-dialog-list-item-current { background: var(--ccm-surface-2); }
 #${DIALOG_ID} .ccm-ts-dialog-list-index {
-  color: var(--color-text-tertiary, var(--color-text-secondary, currentColor));
+  color: var(--ccm-text-dim);
   font-variant-numeric: tabular-nums;
   font-size: 10px;
 }
@@ -456,19 +485,19 @@
 #${DIALOG_ID} .ccm-ts-dialog-list-title { font-weight: 550; }
 #${DIALOG_ID} .ccm-ts-dialog-list-note {
   margin-top: 1px;
-  color: var(--color-text-tertiary, var(--color-text-secondary, currentColor));
+  color: var(--ccm-text-dim);
   font-size: 10px;
 }
 #${DIALOG_ID} .ccm-ts-dialog-list-total { font-variant-numeric: tabular-nums; font-weight: 550; text-align: right; }
 #${DIALOG_ID} .ccm-ts-dialog-muted {
-  color: var(--color-text-tertiary, var(--color-text-secondary, currentColor));
+  color: var(--ccm-text-dim);
   font-size: 11px;
 }
 #${DIALOG_ID} .ccm-ts-dialog-notice {
   margin: 0 0 12px;
   padding: 8px 10px;
   color: var(--color-text-secondary, currentColor);
-  background: var(--color-background-secondary, rgba(127, 127, 127, .08));
+  background: var(--ccm-surface-2);
   border-radius: 8px;
   font-size: 11px;
 }
@@ -511,20 +540,17 @@
 
     const secondary = document.createElement("span");
     secondary.className = "ccm-ts-native-secondary";
+    // 命中率放在第二行最前面（最近一轮的缓存命中率）
+    const hitRate = makeMetric("命中率", "ccm-ts-native-hitrate");
     const cached = makeMetric("命中", "ccm-ts-native-cached");
     const uncached = makeMetric("未命中", "ccm-ts-native-uncached");
     const output = makeMetric("输出", "ccm-ts-native-output");
-    secondary.append(cached.span, uncached.span, output.span);
+    secondary.append(hitRate.span, cached.span, uncached.span, output.span);
 
     root.append(primary, secondary);
-    root.__ccmMetrics = { session, turn, requests, cached, uncached, output };
+    root.__ccmMetrics = { session, turn, requests, hitRate, cached, uncached, output };
     root.addEventListener("click", (event) => {
       if (event.button != null && event.button !== 0) return;
-      event.preventDefault();
-      openDetails();
-    });
-    root.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       openDetails();
     });
@@ -540,7 +566,15 @@
   function dialogCard(label, value, note) {
     const card = textNode("div", "ccm-ts-dialog-card");
     card.append(textNode("div", "ccm-ts-dialog-card-label", label));
-    card.append(textNode("div", "ccm-ts-dialog-card-value", value));
+    // value 既可以是字符串，也可以已是 DOM 节点（例如可点击展开的「输入/缓存命中」单元格）。
+    // 只对节点走 append 分支，其它情况保持原有行为不变。
+    if (value && value.nodeType === 1) {
+      const holder = textNode("div", "ccm-ts-dialog-card-value");
+      holder.append(value);
+      card.append(holder);
+    } else {
+      card.append(textNode("div", "ccm-ts-dialog-card-value", value));
+    }
     if (note) card.append(textNode("div", "ccm-ts-dialog-card-note", note));
     return card;
   }
@@ -551,16 +585,300 @@
     return grid;
   }
 
-  function dialogList(items, renderItem) {
-    const list = textNode("div", "ccm-ts-dialog-list");
+  // ---------------------------------------------------------------------------
+  // 详情框：骨架构建 + 增量更新
+  //
+  // 背景：原实现每次数据变化都对详情框主体做 replaceChildren 全量重建
+  //（实测单次约 17ms，且会丢失滚动位置与「输入/缓存命中」的展开状态）。
+  // 现在改为：
+  //   1. 骨架（六个分区）只在打开详情框、或从「无数据」恢复时构建一次；
+  //   2. 数据变化走增量更新：固定区直接改文本（不重建节点）；
+  //   3. 列表区按「结构指纹」判断（条数、首尾序号、截断标志、总数），
+  //      只有结构真正变化才重建列表；
+  //   4. 结构未变时只更新最后一行（会话进行中通常只有最后一行在变化）。
+  // 参考 web.dev《Avoid large, complex layouts and layout thrashing》：
+  // 避免无谓的强制同步布局 —— 增量路径不重新定位（尺寸未变）。
+  // ---------------------------------------------------------------------------
+
+  function setCellText(node, text) {
+    if (node && node.textContent !== text) node.textContent = text;
+  }
+
+  // 「输入/缓存命中」单元格：默认缩写（xxk/xxk），单击展开为完整数字，再次单击切回。
+  // 展开状态存放在详情框级对象（pairState）里，因此不会因更新/重建而丢失。
+  function makePairCell(pairState, key, inputValue, cachedValue) {
+    const node = textNode("span", "ccm-ts-dialog-pair");
+    node.style.cursor = "pointer";
+    node.title = "单击查看完整数字";
+    node.__ccmPairValue = { input: inputValue, cached: cachedValue };
+    const render = () => {
+      const value = node.__ccmPairValue;
+      node.textContent = pairState[key]
+        ? tokenText(value.input) + "/" + tokenText(value.cached)
+        : fmtShort(value.input) + "/" + fmtShort(value.cached);
+    };
+    node.__ccmPairUpdate = (nextInput, nextCached) => {
+      node.__ccmPairValue = { input: nextInput, cached: nextCached };
+      render();
+    };
+    node.addEventListener("click", (event) => {
+      event.stopPropagation();
+      pairState[key] = !pairState[key];
+      render();
+    });
+    render();
+    return node;
+  }
+
+  function updatePairCell(holder, inputValue, cachedValue) {
+    const cell = holder && holder.firstChild;
+    if (cell && cell.__ccmPairUpdate) cell.__ccmPairUpdate(inputValue, cachedValue);
+  }
+
+  // 用 items 填充已有的列表节点；返回行元素数组（供「只更新最后一行」复用）。
+  function fillList(listNode, items, renderItem) {
     if (!items.length) {
-      list.append(textNode("div", "ccm-ts-dialog-muted", "暂无可展示的数据"));
-      return list;
+      listNode.replaceChildren(textNode("div", "ccm-ts-dialog-muted", "暂无可展示的数据"));
+      return [];
     }
-    for (let index = 0; index < items.length; index += 1) {
-      list.append(renderItem(items[index], index));
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < items.length; index += 1) fragment.append(renderItem(items[index], index));
+    listNode.replaceChildren(fragment);
+    return [...listNode.children];
+  }
+
+  function requestNoteText(request) {
+    return `${request.time || "时间未知"} · 输入 ${fmtShort(request.input)} · 命中 ${fmtShort(request.cached)} · 未命中 ${fmtShort(request.uncached)} · 输出 ${fmtShort(request.output)}`;
+  }
+
+  function buildRequestRow(request) {
+    const row = textNode("div", "ccm-ts-dialog-list-item");
+    const index = request.index || "--";
+    const main = textNode("div", "ccm-ts-dialog-list-main");
+    const note = textNode("div", "ccm-ts-dialog-list-note", requestNoteText(request));
+    const total = textNode("div", "ccm-ts-dialog-list-total", fmtShort(request.total));
+    main.append(textNode("div", "ccm-ts-dialog-list-title", `第 ${index} 次请求`), note);
+    row.append(textNode("div", "ccm-ts-dialog-list-index", `#${index}`), main, total);
+    row.__ccmFields = { note, total };
+    return row;
+  }
+
+  function updateRequestRow(row, request) {
+    if (!row || !row.__ccmFields) return;
+    setCellText(row.__ccmFields.note, requestNoteText(request));
+    setCellText(row.__ccmFields.total, fmtShort(request.total));
+  }
+
+  function turnNoteText(turn) {
+    return `${turn.startLabel || "时间未知"} · ${fmtInt(turn.requests)} 次请求 · 输入 ${fmtShort(turn.input)} · 输出 ${fmtShort(turn.output)}`;
+  }
+
+  function buildTurnRow(turn, index, isCurrent) {
+    const row = textNode("div", "ccm-ts-dialog-list-item" + (isCurrent ? " ccm-ts-dialog-list-item-current" : ""));
+    const main = textNode("div", "ccm-ts-dialog-list-main");
+    const note = textNode("div", "ccm-ts-dialog-list-note", turnNoteText(turn));
+    const total = textNode("div", "ccm-ts-dialog-list-total", fmtShort(turn.total));
+    const label = isCurrent ? `第 ${turn.index || index + 1} 轮 · 当前` : `第 ${turn.index || index + 1} 轮`;
+    main.append(textNode("div", "ccm-ts-dialog-list-title", label), note);
+    row.append(textNode("div", "ccm-ts-dialog-list-index", `T${turn.index || index + 1}`), main, total);
+    row.__ccmFields = { note, total };
+    return row;
+  }
+
+  function updateTurnRow(row, turn) {
+    if (!row || !row.__ccmFields) return;
+    setCellText(row.__ccmFields.note, turnNoteText(turn));
+    setCellText(row.__ccmFields.total, fmtShort(turn.total));
+  }
+
+  // 列表区增量更新：指纹不变时只更新最后一行，指纹变化才重建列表。
+  // 返回 true 表示发生了结构重建（调用方据此决定是否需要重新定位/恢复滚动）。
+  function applyListUpdate(listState, options) {
+    if (listState.fingerprint === options.fingerprint) {
+      const lastIndex = options.items.length - 1;
+      if (lastIndex >= 0 && options.updateRow) {
+        options.updateRow(listState.rows[lastIndex], options.items[lastIndex], lastIndex);
+      }
+      return false;
     }
-    return list;
+    // 重建会改变内容高度并重置滚动位置，这里先记录、后恢复。
+    const body = listState.list.closest ? listState.list.closest(".ccm-ts-dialog-body") : null;
+    const scrollTop = body ? body.scrollTop : 0;
+    if (listState.notice && listState.notice.parentElement) listState.notice.remove();
+    listState.notice = null;
+    if (options.noticeText) {
+      listState.notice = textNode("div", "ccm-ts-dialog-notice", options.noticeText);
+      listState.section.insertBefore(listState.notice, listState.list);
+    }
+    listState.rows = fillList(listState.list, options.items, options.buildRow);
+    listState.fingerprint = options.fingerprint;
+    if (body && scrollTop > 0) body.scrollTop = scrollTop;
+    return true;
+  }
+
+  // 构建详情框骨架（只在打开详情框或从「无数据」恢复时执行一次）。
+  function buildDetailsParts(data) {
+    const m = detailMetrics(data);
+    const parts = { pairState: {}, sections: [] };
+
+    // 会话累计
+    const sessionGrid = dialogGrid([
+      ["总量", tokenText(data.sessionTotal)],
+      ["请求", fmtInt(data.requestCount)],
+      ["输入/缓存命中", makePairCell(parts.pairState, "session", m.sessionInput, m.sessionCached)],
+      ["速度", data.sessionTps == null ? "--" : data.sessionTps.toFixed(1) + "Tokens/s"],
+      ["缓存未命中", tokenText(m.sessionUncached)],
+      ["输出", tokenText(data.sessionOutput)],
+    ]);
+    const sessionCells = [...sessionGrid.querySelectorAll(".ccm-ts-dialog-card-value")];
+    parts.session = {
+      total: sessionCells[0], requests: sessionCells[1], pair: sessionCells[2],
+      tps: sessionCells[3], uncached: sessionCells[4], output: sessionCells[5],
+    };
+    parts.sections.push(dialogSection("会话累计", sessionGrid));
+
+    // 当前提问统计
+    const turnGrid = dialogGrid([
+      ["总量", tokenText(m.turnTotal)],
+      ["请求", fmtInt(m.currentRequestCount)],
+      ["输入/缓存命中", makePairCell(parts.pairState, "turn", m.turnInput, m.turnCached)],
+      ["速度", data.lastRequestTps == null ? "--" : data.lastRequestTps.toFixed(1) + "Tokens/s"],
+      ["缓存未命中", tokenText(m.turnUncached)],
+      ["输出", tokenText(m.turnOutput)],
+    ]);
+    const turnCells = [...turnGrid.querySelectorAll(".ccm-ts-dialog-card-value")];
+    parts.turn = {
+      total: turnCells[0], requests: turnCells[1], pair: turnCells[2],
+      tps: turnCells[3], uncached: turnCells[4], output: turnCells[5],
+    };
+    parts.sections.push(dialogSection("当前提问统计", turnGrid));
+
+    // 上下文使用
+    const contextValue = textNode("span", "ccm-ts-dialog-context-value", tokenText(m.contextUsed));
+    const contextLimit = textNode("span", "ccm-ts-dialog-muted", m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`);
+    const contextTop = textNode("div", "ccm-ts-dialog-context-top");
+    contextTop.append(contextValue, contextLimit);
+    const contextFill = textNode("div", "ccm-ts-dialog-context-fill");
+    const contextPercent = percent(m.contextUsed, m.modelContextWindow);
+    contextFill.style.width = contextPercent == null ? "0%" : `${contextPercent}%`;
+    const contextBar = textNode("div", "ccm-ts-dialog-context-bar");
+    contextBar.append(contextFill);
+    const contextBox = textNode("div", "ccm-ts-dialog-context");
+    contextBox.append(contextTop, contextBar);
+    parts.context = { value: contextValue, limit: contextLimit, fill: contextFill };
+    parts.sections.push(dialogSection("上下文使用", contextBox));
+
+    // 运行状态
+    const health = data.health || {};
+    const healthGrid = dialogGrid([
+      ["状态", healthLabel(health)],
+      ["监控", health.monitorRunning === false ? "未运行" : "运行中"],
+      ["页面连接", health.pageAttached ? "已连接" : "等待连接"],
+      ["数据", health.dataFresh ? "最新" : "等待更新"],
+      ["窗口选择", health.targetSelection === "required" ? "需要指定窗口" : (health.targetSelection || "自动")],
+      ["模型切换", fmtInt(data.modelSwitchCount) + " 次"],
+      ["累计重置", fmtInt(data.cumulativeResetCount) + " 次"],
+      ["恢复", health.recoveryState === "recovered" ? "已恢复" : (health.recoveryState || "正常")],
+    ]);
+    const healthCells = [...healthGrid.querySelectorAll(".ccm-ts-dialog-card-value")];
+    parts.health = {
+      status: healthCells[0], monitor: healthCells[1], page: healthCells[2], data: healthCells[3],
+      target: healthCells[4], modelSwitches: healthCells[5], resets: healthCells[6], recovery: healthCells[7],
+    };
+    parts.sections.push(dialogSection("运行状态", healthGrid));
+
+    // 当前提问请求明细（列表内容由 applyListUpdate 填充）
+    const requestSection = textNode("div", "ccm-ts-dialog-section");
+    requestSection.append(textNode("div", "ccm-ts-dialog-section-title", "当前提问请求明细"));
+    const requestList = textNode("div", "ccm-ts-dialog-list");
+    requestSection.append(requestList);
+    parts.requestList = { section: requestSection, list: requestList, notice: null, rows: [], fingerprint: "" };
+    parts.sections.push(requestSection);
+
+    // 各轮摘要（标题与列表内容由 updateDetailsParts 填充）
+    const turnSection = textNode("div", "ccm-ts-dialog-section");
+    const turnTitle = textNode("div", "ccm-ts-dialog-section-title");
+    const turnList = textNode("div", "ccm-ts-dialog-list");
+    turnSection.append(turnTitle, turnList);
+    parts.turnList = { section: turnSection, title: turnTitle, list: turnList, notice: null, rows: [], fingerprint: "" };
+    parts.sections.push(turnSection);
+
+    return parts;
+  }
+
+  // 增量更新：只改文本/宽度，不重建节点。返回 true 表示列表发生了结构重建。
+  function updateDetailsParts(parts, data) {
+    const m = detailMetrics(data);
+
+    setCellText(parts.session.total, tokenText(data.sessionTotal));
+    setCellText(parts.session.requests, fmtInt(data.requestCount));
+    updatePairCell(parts.session.pair, m.sessionInput, m.sessionCached);
+    setCellText(parts.session.tps, data.sessionTps == null ? "--" : data.sessionTps.toFixed(1) + "Tokens/s");
+    setCellText(parts.session.uncached, tokenText(m.sessionUncached));
+    setCellText(parts.session.output, tokenText(data.sessionOutput));
+
+    setCellText(parts.turn.total, tokenText(m.turnTotal));
+    setCellText(parts.turn.requests, fmtInt(m.currentRequestCount));
+    updatePairCell(parts.turn.pair, m.turnInput, m.turnCached);
+    setCellText(parts.turn.tps, data.lastRequestTps == null ? "--" : data.lastRequestTps.toFixed(1) + "Tokens/s");
+    setCellText(parts.turn.uncached, tokenText(m.turnUncached));
+    setCellText(parts.turn.output, tokenText(m.turnOutput));
+
+    setCellText(parts.context.value, tokenText(m.contextUsed));
+    setCellText(parts.context.limit, m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`);
+    const contextPercent = percent(m.contextUsed, m.modelContextWindow);
+    const contextWidth = contextPercent == null ? "0%" : `${contextPercent}%`;
+    if (parts.context.fill.style.width !== contextWidth) parts.context.fill.style.width = contextWidth;
+
+    const health = data.health || {};
+    setCellText(parts.health.status, healthLabel(health));
+    setCellText(parts.health.monitor, health.monitorRunning === false ? "未运行" : "运行中");
+    setCellText(parts.health.page, health.pageAttached ? "已连接" : "等待连接");
+    setCellText(parts.health.data, health.dataFresh ? "最新" : "等待更新");
+    setCellText(parts.health.target, health.targetSelection === "required" ? "需要指定窗口" : (health.targetSelection || "自动"));
+    setCellText(parts.health.modelSwitches, fmtInt(data.modelSwitchCount) + " 次");
+    setCellText(parts.health.resets, fmtInt(data.cumulativeResetCount) + " 次");
+    setCellText(parts.health.recovery, health.recoveryState === "recovered" ? "已恢复" : (health.recoveryState || "正常"));
+
+    const requests = Array.isArray(data.requestDetails) ? data.requestDetails : [];
+    const requestRebuilt = applyListUpdate(parts.requestList, {
+      fingerprint: [
+        requests.length,
+        requests.length ? requests[0].index || 0 : 0,
+        requests.length ? requests[requests.length - 1].index || 0 : 0,
+        data.requestDetailsTruncated ? 1 : 0,
+        data.requestDetailTotal == null ? "" : String(data.requestDetailTotal),
+      ].join("|"),
+      noticeText: data.requestDetailsTruncated
+        ? `当前提问共 ${fmtInt(data.requestDetailTotal)} 次请求，页面展示最近 100 条。`
+        : "",
+      items: requests,
+      buildRow: (request) => buildRequestRow(request),
+      updateRow: (row, request) => updateRequestRow(row, request),
+    });
+
+    const turns = Array.isArray(data.turns) ? data.turns : [];
+    const turnTotalCount = data.turnTotalCount != null ? data.turnTotalCount : turns.length;
+    setCellText(parts.turnList.title, data.turnsTruncated
+      ? "各轮摘要（" + fmtInt(turnTotalCount) + " 轮）"
+      : `各轮摘要（${fmtInt(turns.length)} 轮）`);
+    const turnRebuilt = applyListUpdate(parts.turnList, {
+      fingerprint: [
+        turns.length,
+        turns.length ? turns[0].index || 0 : 0,
+        turns.length ? turns[turns.length - 1].index || 0 : 0,
+        data.turnsTruncated ? 1 : 0,
+        String(turnTotalCount),
+      ].join("|"),
+      noticeText: data.turnsTruncated
+        ? "会话共 " + fmtInt(turnTotalCount) + " 轮，页面展示最近 200 轮。"
+        : "",
+      items: turns,
+      buildRow: (turn, index) => buildTurnRow(turn, index, index === turns.length - 1),
+      updateRow: (row, turn) => updateTurnRow(row, turn),
+    });
+
+    return requestRebuilt || turnRebuilt;
   }
 
   function formatUpdatedAt(value) {
@@ -602,116 +920,34 @@
     };
   }
 
+  // 详情框渲染入口：首次构建骨架，之后一律走增量更新。
+  // 返回 true 表示发生了结构性重建（调用方据此决定是否需要重新定位）。
   function renderDetails() {
-    if (!state.dialog || !state.dialog.__ccmBody) return;
-    const body = state.dialog.__ccmBody;
+    if (!state.dialog || !state.dialog.__ccmBody) return false;
+    const dialog = state.dialog;
+    const body = dialog.__ccmBody;
     const data = state.data;
-    if (state.dialog.__ccmSubtitle) state.dialog.__ccmSubtitle.textContent = formatSubtitle(data);
-    state.dialog.__ccmRenderedDataKey = dataKeyOf(data);
-    body.replaceChildren();
+    if (dialog.__ccmSubtitle) setCellText(dialog.__ccmSubtitle, formatSubtitle(data));
+    dialog.__ccmRenderedDataKey = dataKeyOf(data);
+
     if (!data) {
-      body.append(textNode("div", "ccm-ts-dialog-notice", state.protocolError
+      // 无数据：丢弃骨架并显示提示；数据恢复后重建（此路径开销可忽略）。
+      dialog.__ccmParts = null;
+      body.replaceChildren(textNode("div", "ccm-ts-dialog-notice", state.protocolError
         ? "统计协议与监控程序不匹配，请重新加载 Codex++ 用户脚本和监控进程。"
         : "监控数据尚未到达。统计条会在监控进程连接后自动更新。"));
-      return;
+      return true;
     }
 
-    const m = detailMetrics(data);
-    const sessionTotal = data.sessionTotal;
-    const sessionOutput = data.sessionOutput;
-    const turns = Array.isArray(data.turns) ? data.turns : [];
-    const requests = Array.isArray(data.requestDetails) ? data.requestDetails : [];
-
-    body.append(dialogSection("会话累计", dialogGrid([
-      ["总量", tokenText(sessionTotal)],
-      ["请求", fmtInt(data.requestCount)],
-      ["输入", tokenText(m.sessionInput)],
-      ["缓存命中", tokenText(m.sessionCached)],
-      ["缓存未命中", tokenText(m.sessionUncached)],
-      ["输出", tokenText(sessionOutput)],
-    ])));
-
-    body.append(dialogSection("当前提问统计", dialogGrid([
-      ["总量", tokenText(m.turnTotal)],
-      ["请求", fmtInt(m.currentRequestCount)],
-      ["输入", tokenText(m.turnInput)],
-      ["缓存命中", tokenText(m.turnCached)],
-      ["缓存未命中", tokenText(m.turnUncached)],
-      ["输出", tokenText(m.turnOutput)],
-    ])));
-
-    const context = textNode("div", "ccm-ts-dialog-context");
-    const contextTop = textNode("div", "ccm-ts-dialog-context-top");
-    contextTop.append(
-      textNode("span", "ccm-ts-dialog-context-value", tokenText(m.contextUsed)),
-      textNode("span", "ccm-ts-dialog-muted", m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`),
-    );
-    const contextBar = textNode("div", "ccm-ts-dialog-context-bar");
-    const contextFill = textNode("div", "ccm-ts-dialog-context-fill");
-    const contextPercent = percent(m.contextUsed, m.modelContextWindow);
-    contextFill.style.width = contextPercent == null ? "0%" : `${contextPercent}%`;
-    contextBar.append(contextFill);
-    context.append(contextTop, contextBar);
-    body.append(dialogSection("上下文使用", context));
-
-    const health = data.health || {};
-    body.append(dialogSection("运行状态", dialogGrid([
-      ["状态", healthLabel(health)],
-      ["监控", health.monitorRunning === false ? "未运行" : "运行中"],
-      ["页面连接", health.pageAttached ? "已连接" : "等待连接"],
-      ["数据", health.dataFresh ? "最新" : "等待更新"],
-      ["窗口选择", health.targetSelection === "required" ? "需要指定窗口" : (health.targetSelection || "自动")],
-      ["模型切换", fmtInt(data.modelSwitchCount) + " 次"],
-      ["累计重置", fmtInt(data.cumulativeResetCount) + " 次"],
-      ["恢复", health.recoveryState === "recovered" ? "已恢复" : (health.recoveryState || "正常")],
-    ])));
-
-    const requestSection = textNode("div", "ccm-ts-dialog-section");
-    requestSection.append(textNode("div", "ccm-ts-dialog-section-title", "当前提问请求明细"));
-    if (data.requestDetailsTruncated) {
-      requestSection.append(textNode("div", "ccm-ts-dialog-notice", `当前提问共 ${fmtInt(data.requestDetailTotal)} 次请求，页面展示最近 100 条。`));
+    let parts = dialog.__ccmParts;
+    let rebuilt = false;
+    if (!parts) {
+      parts = dialog.__ccmParts = buildDetailsParts(data);
+      body.replaceChildren(...parts.sections);
+      rebuilt = true;
     }
-    requestSection.append(dialogList(requests, (request) => {
-      const row = textNode("div", "ccm-ts-dialog-list-item");
-      const index = request.index || "--";
-      const main = textNode("div", "ccm-ts-dialog-list-main");
-      main.append(
-        textNode("div", "ccm-ts-dialog-list-title", `第 ${index} 次请求`),
-        textNode("div", "ccm-ts-dialog-list-note", `${request.time || "时间未知"} · 输入 ${fmtShort(request.input)} · 命中 ${fmtShort(request.cached)} · 未命中 ${fmtShort(request.uncached)} · 输出 ${fmtShort(request.output)}`),
-      );
-      row.append(
-        textNode("div", "ccm-ts-dialog-list-index", `#${index}`),
-        main,
-        textNode("div", "ccm-ts-dialog-list-total", fmtShort(request.total)),
-      );
-      return row;
-    }));
-    body.append(requestSection);
-
-   const turnSection = textNode("div", "ccm-ts-dialog-section");
-   turnSection.append(textNode("div", "ccm-ts-dialog-section-title", `各轮摘要（${fmtInt(turns.length)} 轮）`));
-    const turnTotalCount = data.turnTotalCount != null ? data.turnTotalCount : turns.length;
-    if (data.turnsTruncated) {
-      turnSection.firstChild.textContent = "各轮摘要（" + fmtInt(turnTotalCount) + " 轮）";
-      turnSection.append(textNode("div", "ccm-ts-dialog-notice", "会话共 " + fmtInt(turnTotalCount) + " 轮，页面展示最近 200 轮。"));
-    }
-    turnSection.append(dialogList(turns, (turn, index) => {
-      const current = index === turns.length - 1;
-      const row = textNode("div", "ccm-ts-dialog-list-item" + (current ? " ccm-ts-dialog-list-item-current" : ""));
-      const main = textNode("div", "ccm-ts-dialog-list-main");
-      const label = current ? `第 ${turn.index || index + 1} 轮 · 当前` : `第 ${turn.index || index + 1} 轮`;
-      main.append(
-        textNode("div", "ccm-ts-dialog-list-title", label),
-        textNode("div", "ccm-ts-dialog-list-note", `${turn.startLabel || "时间未知"} · ${fmtInt(turn.requests)} 次请求 · 输入 ${fmtShort(turn.input)} · 输出 ${fmtShort(turn.output)}`),
-      );
-      row.append(
-        textNode("div", "ccm-ts-dialog-list-index", `T${turn.index || index + 1}`),
-        main,
-        textNode("div", "ccm-ts-dialog-list-total", fmtShort(turn.total)),
-      );
-      return row;
-    }));
-    body.append(turnSection);
+    if (updateDetailsParts(parts, data)) rebuilt = true;
+    return rebuilt;
   }
 
   function buildDialog() {
@@ -757,20 +993,12 @@
     state.dialog.style.top = `${Math.round(top)}px`;
   }
 
-  // 点击外部关闭：这是主要的关闭方式（宿主会拦截 Escape，不能作为唯一依赖）。
+  // 点击外部关闭：主要关闭方式之一（另有详情框右上角的关闭按钮）。
   function onDocumentPointerDown(event) {
     if (!state.dialog) return;
     const target = event.target;
     if (state.dialog.contains(target)) return;
     if (state.root && state.root.contains(target)) return;
-    closeDetails();
-  }
-
-  function onDocumentKeydown(event) {
-    // 兼容不同内核/输入法的键名；不阻断 Codex 自身的按键处理，只做关闭。
-    if (event.key !== "Escape" && event.key !== "Esc") return;
-    if (!state.dialog) return;
-    event.preventDefault();
     closeDetails();
   }
 
@@ -781,6 +1009,7 @@
       state.previousFocus = document.activeElement;
       state.dialog = buildDialog();
       document.body.appendChild(state.dialog);
+    applyTheme();
     }
     state.dialog.setAttribute("data-open", "true");
     state.dialog.style.visibility = "hidden";
@@ -794,11 +1023,6 @@
     document.addEventListener("pointerdown", onDocumentPointerDown, true);
     // mousedown 兜底：个别环境不派发 PointerEvent 时仍能点击外部关闭。
     document.addEventListener("mousedown", onDocumentPointerDown, true);
-    // Escape 仅作增强：Codex 宿主可能先消费该按键，点击外部与关闭按钮始终可用。
-    window.addEventListener("keydown", onDocumentKeydown, true);
-    window.addEventListener("keyup", onDocumentKeydown, true);
-    document.addEventListener("keydown", onDocumentKeydown, true);
-    document.addEventListener("keyup", onDocumentKeydown, true);
     window.addEventListener("resize", positionDialog, { passive: true });
     window.addEventListener("scroll", positionDialog, { passive: true, capture: true });
     requestAnimationFrame(positionDialog);
@@ -808,10 +1032,6 @@
     if (!state.dialog) return;
     document.removeEventListener("pointerdown", onDocumentPointerDown, true);
     document.removeEventListener("mousedown", onDocumentPointerDown, true);
-    window.removeEventListener("keydown", onDocumentKeydown, true);
-    window.removeEventListener("keyup", onDocumentKeydown, true);
-    document.removeEventListener("keydown", onDocumentKeydown, true);
-    document.removeEventListener("keyup", onDocumentKeydown, true);
     window.removeEventListener("resize", positionDialog);
     window.removeEventListener("scroll", positionDialog, true);
    const dialog = state.dialog;
@@ -827,6 +1047,53 @@
       }
     }
     state.previousFocus = null;
+  }
+
+  // ---- 主题判定 ----
+  // 首选 Codex 自己在 <html> 上打的 data-theme；其次 color-scheme、文字亮度、系统偏好。
+  const THEME_ATTR = "data-ccm-theme";
+  function luminanceOf(colorText) {
+    if (!colorText) return null;
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(colorText.trim());
+    let r, g, b;
+    if (hex) {
+      let h = hex[1];
+      if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+      r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+    } else {
+      const rgb = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i.exec(colorText);
+      if (!rgb) return null;
+      r = Number(rgb[1]); g = Number(rgb[2]); b = Number(rgb[3]);
+    }
+    if (![r, g, b].every(Number.isFinite)) return null;
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  }
+
+  function detectTheme() {
+    const root = document.documentElement;
+    const explicit = String(root.getAttribute("data-theme") || "").toLowerCase();
+    if (explicit === "dark" || explicit === "light") return explicit;
+    const scheme = String(getComputedStyle(root).colorScheme || "").toLowerCase();
+    if (scheme.includes("dark") && !scheme.includes("light")) return "dark";
+    if (scheme.includes("light") && !scheme.includes("dark")) return "light";
+    const lum = luminanceOf(getComputedStyle(root).getPropertyValue("--color-text"));
+    if (lum != null) return lum > 0.5 ? "dark" : "light";
+    try { return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; } catch (e) { return "light"; }
+  }
+
+  function setThemeAttr(el, theme) {
+    if (el && el.getAttribute(THEME_ATTR) !== theme) el.setAttribute(THEME_ATTR, theme);
+  }
+
+  // 注意：不能因为「本次主题与上次相同」就提前返回。
+  // 弹层是懒创建的（用户首次点击才生成），晚于统计条出现；
+  // 提前返回会导致它永远拿不到主题属性，回退到浅色 token（踩过一次）。
+  function applyTheme() {
+    const theme = detectTheme();
+    state.theme = theme;
+    setThemeAttr(state.root, theme);
+    setThemeAttr(state.dialog, theme);
+    return theme;
   }
 
   function findContextRing() {
@@ -861,6 +1128,7 @@
 
   function render() {
     if (!state.root) return;
+    applyTheme();
     const metrics = state.root.__ccmMetrics;
     const d = state.data;
     const hasData = !!d;
@@ -876,8 +1144,12 @@
     setMetric(metrics.session, hasData ? fmtShort(d.sessionTotal) : "--");
     setMetric(metrics.turn, hasData ? fmtShort(turnTotal) : "--");
     setMetric(metrics.requests, hasData ? fmtInt(d.requestCount) : "--");
-    setMetric(metrics.cached, hasData ? fmtShort(turnCached) : "--");
-    setMetric(metrics.uncached, hasData ? fmtShort(turnUncached) : "--");
+        setMetric(metrics.cached, hasData ? fmtShort(turnCached) : "--");
+        setMetric(
+          metrics.hitRate,
+          hasData && d.turnCacheHitRate != null ? (d.turnCacheHitRate * 100).toFixed(1) + "%" : "--",
+        );
+        setMetric(metrics.uncached, hasData ? fmtShort(turnUncached) : "--");
     setMetric(metrics.output, hasData ? fmtShort(turnOutput) : "--");
 
     const sessionSplit = cacheSplit(d && d.sessionInput, d && d.sessionCached);
@@ -894,11 +1166,12 @@
     state.root.classList.toggle("ccm-ts-native-error", !!state.protocolError || !!(d && d.health && ["failed", "protocol-mismatch", "target-selection-required"].includes(d.health.status)));
     if (state.dialog) {
       if (state.dialog.__ccmRenderedDataKey !== dataKeyOf(state.data)) {
-        renderDetails();
+        // 只有发生结构性重建（骨架/列表）时详情框尺寸才可能变化，才需要重新定位；
+        // 增量更新不改尺寸，原地重新定位会白白触发一次强制同步布局。
+        if (renderDetails()) positionDialog();
       } else if (state.dialog.__ccmSubtitle) {
-        state.dialog.__ccmSubtitle.textContent = formatSubtitle(state.data);
+        setCellText(state.dialog.__ccmSubtitle, formatSubtitle(state.data));
       }
-      positionDialog();
     }
   }
 
@@ -927,6 +1200,19 @@
     const ring = findContextRing();
     const point = ring ? findMountPoint(ring) : null;
     if (!point) {
+      // 诊断线索：Codex 大更新可能改掉锚点的 aria-label 或挂载容器结构，
+      // 导致统计条挂载不上。这里把原因明确写进页面，用来区分
+      // 「Codex 页面结构变化」与「插件没装好 / 监控没运行」这两类完全不同的故障。
+      const reason = ring ? "mount-point-missing" : "anchor-missing";
+      if (window.__ccmTokenSpendStatus !== reason) {
+        window.__ccmTokenSpendStatus = reason;
+        window.__ccmTokenSpendStatusAt = new Date().toISOString();
+        console.warn(
+          "[Tokens UI For Codex] 统计条未挂载: " + reason +
+            " —— 多为 Codex 页面结构调整所致（例如上下文圆圈的 aria-label 或输入区容器变了）。" +
+            "Codex 本体不受影响；可在 Codex 中让 Agent 读取本状态并更新选择器。",
+        );
+      }
       if (state.dialog) closeDetails({ restoreFocus: false });
       if (state.root) state.root.remove();
       state.root = null;
@@ -935,9 +1221,33 @@
       return;
     }
 
+    // 挂载成功：清除上一次的诊断状态
+    if (window.__ccmTokenSpendStatus) {
+      window.__ccmTokenSpendStatus = "";
+      window.__ccmTokenSpendStatusAt = "";
+    }
+
     if (!state.root) state.root = buildRoot();
     if (state.root.parentElement !== point.container || state.root.nextSibling !== point.before) {
-      point.container.insertBefore(state.root, point.before);
+      // insertBefore 的参考节点必须是容器的「直接子节点」，否则抛 NotFoundError
+      // （浏览器原文：The node before which the new node is to be inserted is not a child of this node）。
+      // 两种会踩中的真实场景：
+      //   1) 上下文圆圈的父亲恰好就是容器 —— 此时 ref === container，等于「插到自己前面」；
+      //   2) buildRoot() 期间 React 重渲染把 ref 移出 DOM，此时 ref.parentElement === null。
+      // 处置：参考节点无效就改传 null —— MDN 明确「null 时元素仍会被追加到父节点末尾」，
+      // 即统计条仍会显示，只是位置从「圆圈左侧」退化为「行末」，属于可接受的优雅降级。
+      const before = point.before && point.before.parentElement === point.container ? point.before : null;
+      try {
+        point.container.insertBefore(state.root, before);
+      } catch (error) {
+        window.__ccmTokenSpendStatus = "insert-failed";
+        window.__ccmTokenSpendStatusAt = new Date().toISOString();
+        console.warn(
+          "[Tokens UI For Codex] 统计条插入失败，已降级为追加到容器末尾: " +
+            (error && error.message ? error.message : error),
+        );
+        try { point.container.appendChild(state.root); } catch {}
+      }
     }
     observeContainer(point.container);
     render();
@@ -946,7 +1256,24 @@
   function queueMount() {
     if (state.mountQueued) return;
     state.mountQueued = true;
-    requestAnimationFrame(mount);
+    // 兜底保护：mount() 内部（installStyle / findMountPoint / buildRoot /
+    // observeContainer / render 等）任何一处抛异常，都由插件自己接住 ——
+    // 写诊断状态 + 带指引的日志，而不是把异常穿透到 rAF 调度层成为裸的未捕获错误。
+    // 这里显式复位 mountQueued 属于纵深防御：mount() 第一行虽然也会复位，
+    // 但那是隐式依赖；一旦将来有人重排首行，队列就会永久卡死。
+    requestAnimationFrame(() => {
+      try {
+        mount();
+      } catch (error) {
+        state.mountQueued = false;
+        window.__ccmTokenSpendStatus = "mount-crashed";
+        window.__ccmTokenSpendStatusAt = new Date().toISOString();
+        console.error(
+          "[Tokens UI For Codex] 挂载过程异常（已记录，将在下次页面变化时自动重试）: " +
+            (error && error.message ? error.message : error),
+        );
+      }
+    });
   }
 
   function installObservers() {
@@ -965,8 +1292,15 @@
           return [...record.addedNodes, ...record.removedNodes].some((node) => {
             if (!node || node.nodeType !== 1) return false;
             const label = node.getAttribute && node.getAttribute("aria-label");
-            return (typeof label === "string" && /上下文用量|上下文窗口|context usage|context window/i.test(label)) ||
-              !!(node.querySelector && node.querySelector('[aria-label*="上下文用量"], [aria-label*="上下文窗口"], [aria-label*="Context usage" i], [aria-label*="Context window" i]'));
+            // 廉价判断优先（性能优化 1）：先只读节点自身的 aria-label（廉价），
+            // 仅当自身未命中、且节点确实存在元素子节点时，才做子树查询 ——
+            // querySelector() 是深度优先遍历整个子树，成本随子树规模增长。
+            // 语义等价：没有元素子节点的节点不可能存在后代元素，跳过子树查询是安全的。
+            return (
+              (typeof label === "string" && /上下文用量|上下文窗口|context usage|context window/i.test(label)) ||
+              (node.childElementCount > 0 &&
+                !!(node.querySelector && node.querySelector('[aria-label*="上下文用量"], [aria-label*="上下文窗口"], [aria-label*="Context usage" i], [aria-label*="Context window" i]')))
+            );
           });
         }
         return false;
@@ -1001,7 +1335,10 @@
 
   const start = () => {
     installObservers();
-    mount();
+    // 初始挂载统一走 queueMount：与后续重挂载共用同一层异常保护与诊断状态。
+    // 直接调用 mount() 时，初始异常只是一条裸的未捕获错误、且不写诊断状态，
+    // 排障时无法区分「锚点缺失（Codex 改版）」与「插件自身抛错」。
+    queueMount();
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
   else start();

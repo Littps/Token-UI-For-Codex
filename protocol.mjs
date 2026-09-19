@@ -70,6 +70,8 @@ export function makeHealth(overrides = {}) {
     lastErrorCode: null,
     lastErrorAt: null,
     monitorRunning: true,
+    // 已废弃：守护进程在「自启架构调整」中移除，此字段自那时起恒为 null。
+    // 保留是为了向后兼容——旧页面会读它，schema 也仍然声明它。
     guardianRunning: null,
     autostartInstalled: null,
     installationState: "ready",

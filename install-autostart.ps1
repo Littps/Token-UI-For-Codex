@@ -58,15 +58,22 @@ Write-Host "Tokens UI For Codex —— 安装登录自启" -ForegroundColor Whit
 # ---------------------------------------------------------------- 1) 环境检查
 Write-Host "`n== 1/5 检查运行环境" -ForegroundColor Cyan
 
+# 动态定位 Node：PATH → Codex 自带运行时 → 常见安装位置。
+# 共用逻辑见插件根目录 find-codex.ps1（实测 Codex 自带的是 Node v24，
+# 所以用户机器即使没单独装 Node，监控也能跑起来）。
+$nodeLocator = Join-Path $scriptDir "find-codex.ps1"
+if (Test-Path -LiteralPath $nodeLocator) { . $nodeLocator }
 $nodePath = $null
 $nodeMajor = 0
-$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
-if ($nodeCmd) {
-  $nodePath = $nodeCmd.Source
-  try {
-    $nodeVersion = (& $nodePath --version 2>$null).Trim()
-    if ($nodeVersion -match "^v(\d+)") { $nodeMajor = [int]$Matches[1] }
-  } catch {}
+if (Get-Command Resolve-NodeCli -ErrorAction SilentlyContinue) {
+  $nodeInfo = Resolve-NodeCli
+  if ($nodeInfo) {
+    $nodePath = $nodeInfo.path
+    $nodeMajor = $nodeInfo.major
+    if ($nodeInfo.source -eq "fallback") {
+      Write-Note ("PATH 中未找到 Node，已改用后备运行时：" + $nodeInfo.path + "（" + $nodeInfo.version + "）")
+    }
+  }
 }
 
 if (-not $nodePath -or $nodeMajor -lt 22) {
@@ -176,13 +183,20 @@ sh.Run "$vbsCommand", 0, True
 }
 
 # ------------------------------------------------------- 4) 立即启动（可选）
+# 触发策略：安装完毕立即执行一次；之后由"每 5 分钟兜底巡检"维护；
+# 登录时另有 AtLogOn 触发器。启动失败必须显式报告（自动重试 1 次），不能静默。
 Write-Host "`n== 4/5 立即启动监控" -ForegroundColor Cyan
 
-$running = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -and $_.CommandLine -like ("*" + $statsScript + "*") })
+function Get-MonitorProcesses {
+  param([string]$ScriptPath)
+  return @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like ("*" + $ScriptPath + "*") })
+}
+
+$running = Get-MonitorProcesses -ScriptPath $statsScript
 
 if ($SkipStart) {
-  Write-Note "按参数要求跳过立即启动；下次登录时会自动运行。"
+  Write-Note "按参数要求跳过立即启动；登录触发与 5 分钟兜底巡检仍会照常拉起。"
 } else {
   # 先停掉已在运行的旧实例：脚本内容可能在本次更新中已变化，而运行中的进程仍使用内存里的旧代码。
   if ($running.Count -gt 0) {
@@ -196,15 +210,28 @@ if ($SkipStart) {
     }
     Start-Sleep -Milliseconds 800
   }
-  try {
-    Start-ScheduledTask -TaskName $taskName
+
+  $started = $false
+  for ($attempt = 1; $attempt -le 2; $attempt += 1) {
+    try {
+      Start-ScheduledTask -TaskName $taskName
+    } catch {
+      Write-Note ("第 " + $attempt + " 次触发任务失败：" + $_.Exception.Message)
+    }
     Start-Sleep -Seconds 3
-    $after = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-      Where-Object { $_.CommandLine -and $_.CommandLine -like ("*" + $statsScript + "*") })
-    if ($after.Count -gt 0) { Write-Ok ("监控已启动（PID " + $after[0].ProcessId + "）") }
-    else { Write-Note "已触发任务，但暂未检测到监控进程；请稍后复查。" }
-  } catch {
-    Write-Note ("立即启动失败：" + $_.Exception.Message)
+    $after = Get-MonitorProcesses -ScriptPath $statsScript
+    if ($after.Count -gt 0) {
+      $attemptNote = if ($attempt -gt 1) { "，第 " + $attempt + " 次尝试成功" } else { "" }
+      Write-Ok ("监控已启动（PID " + $after[0].ProcessId + $attemptNote + "）")
+      $started = $true
+      break
+    }
+    if ($attempt -lt 2) { Write-Note "本次未检测到监控进程，3 秒后自动重试…" }
+  }
+  if (-not $started) {
+    Write-Bad "立即启动失败：触发任务后仍未检测到监控进程（已自动重试 1 次）。"
+    Write-Note ("可手动重试：Start-ScheduledTask -TaskName `"" + $taskName + "`"")
+    Write-Note "兜底巡检仍会每 5 分钟尝试拉起；如持续失败请检查任务状态与监控日志。"
   }
 }
 
@@ -224,8 +251,9 @@ Write-Host "`n== 5/5 完成" -ForegroundColor Cyan
 } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $stateDir "autostart-state.json") -Encoding UTF8
 
 Write-Host "后续说明：" -ForegroundColor White
-Write-Host "   1) 登录后由计划任务直接拉起 Node 监控，不经过 PowerShell，不需要管理员权限。"
-Write-Host "   2) Codex 不在运行时监控保持待命，不会退出；Codex 启动后自动开始上报。"
-Write-Host ("   3) 运行日志：" + (Join-Path $logDir "watch-YYYYMMDD.log"))
-Write-Host "   4) 卸载：运行 uninstall-autostart.ps1"
+Write-Host "   1) 触发方式：安装完成时立即启动一次；之后每 5 分钟兜底巡检（已在运行则自动跳过）；登录时也会启动。"
+Write-Host "   2) 计划任务直接拉起 Node 监控，不经过 PowerShell，不需要管理员权限。"
+Write-Host "   3) Codex 不在运行时监控保持待命，不会退出；Codex 启动后自动开始上报。"
+Write-Host ("   4) 运行日志：" + (Join-Path $logDir "watch-YYYYMMDD.log"))
+Write-Host "   5) 卸载：运行 uninstall-autostart.ps1"
 exit 0

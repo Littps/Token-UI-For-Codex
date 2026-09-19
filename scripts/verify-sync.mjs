@@ -30,14 +30,28 @@ function sha256(file) {
 
 function newestPluginDir(root) {
   try {
-    const versions = fs.readdirSync(root, { withFileTypes: true })
+    // 插件 cache 的真实层级是 <marketplace>/<插件名>/<版本>/（实测），
+    // 旧实现只探测了一层，导致"插件cache"长期为 null 而未被察觉。
+    // 这里对最多两层做探测，取包含 token-stats.mjs 的最新目录。
+    const levelOne = fs.readdirSync(root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort((a, b) => (a < b ? 1 : -1));
-    for (const version of versions) {
-      const candidate = path.join(root, version);
-      if (fs.existsSync(path.join(candidate, "token-stats.mjs"))) return candidate;
+      .map((entry) => path.join(root, entry.name));
+    const candidates = [];
+    for (const dir of levelOne) {
+      if (fs.existsSync(path.join(dir, "token-stats.mjs"))) candidates.push(dir);
+      let nested = [];
+      try {
+        nested = fs.readdirSync(dir, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => path.join(dir, entry.name));
+      } catch {}
+      for (const sub of nested) {
+        if (fs.existsSync(path.join(sub, "token-stats.mjs"))) candidates.push(sub);
+      }
     }
+    if (!candidates.length) return null;
+    candidates.sort();
+    return candidates[candidates.length - 1];
   } catch {}
   return null;
 }
@@ -46,7 +60,7 @@ const pluginCacheDir = newestPluginDir(pluginCacheRoot);
 const deployPluginDir = deployRoot ? path.join(deployRoot, "plugins", "tokens-ui-for-codex") : null;
 
 // 注意：launch-silent.vbs 由安装脚本按本机路径生成，各副本内容必然不同，因此不纳入一致性比对。
-const CHECKED_FILES = ["token-stats.mjs", "codex-token-spend-panel.js", "protocol.mjs", "install-autostart.ps1", "uninstall-autostart.ps1"];
+const CHECKED_FILES = ["token-stats.mjs", "codex-token-spend-panel.js", "protocol.mjs", "find-codex.ps1", "install.ps1", "install-autostart.ps1", "uninstall-autostart.ps1"];
 
 const copies = [
   { name: "源码", root: sourceRoot },

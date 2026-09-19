@@ -205,6 +205,53 @@ function modelValueFromEvent(event) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// 纯生成耗时（TPS 的分子分母之一）
+//
+// 口径：只累加「内容条目之间」的间隔，跨工具返回的间隔不计入。
+//   内容条目 = 模型产出的条目（reasoning / message / function_call）
+//   工具边界 = function_call_output（工具执行期间不属于模型生成）
+// 单段上限 5 分钟：超过视为空闲/挂起，避免把长时间无人操作的间隔算成生成时间。
+// ---------------------------------------------------------------------------
+const MAX_GEN_GAP_MS = 5 * 60 * 1000;
+
+function trackGenWindow(state, event, timestamp) {
+  const payload = event && event.payload;
+  if (!payload || !timestamp) return;
+  const itemType = payload.type;
+  // 记账类事件（item_completed 等）不代表模型产出，不能当作时间基准，
+  // 否则会把一整段真实生成切成几毫秒的碎片，TPS 会虚高到几千。
+  if (itemType === "item_completed") return;
+  if (itemType === "function_call_output") {
+    state.genToolBarrier = true;
+    state.genLastTs = timestamp;
+    return;
+  }
+  // 用户消息只推进基准（不累加）：这样"等待首字"的时间会计入下一次生成间隔。
+  if (itemType === "message" && payload.role === "user") {
+    state.genLastTs = timestamp;
+    return;
+  }
+  const isContentItem = itemType === "reasoning" || itemType === "message" || itemType === "function_call";
+  if (!isContentItem) return;
+  if (state.genLastTs && !state.genToolBarrier) {
+    const delta = Date.parse(timestamp) - Date.parse(state.genLastTs);
+    if (Number.isFinite(delta) && delta > 0 && delta < MAX_GEN_GAP_MS) state.genMs += delta;
+  }
+  state.genToolBarrier = false;
+  state.genLastTs = timestamp;
+}
+
+// 取走当前窗口的累计生成耗时并复位（由记录落库时调用）
+function takeGenWindow(state) {
+  const ms = state.genMs;
+  state.genMs = 0;
+  state.genToolBarrier = false;
+  // 注意：genLastTs 必须保留 —— 它就是下一个窗口的起始基准，
+  // 清掉会导致每次 token_count 之后的"等待首字"时间丢失。
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
 function processParserEvent(state, event) {
   if (!event || typeof event !== "object") return;
   const timestamp = typeof event.timestamp === "string" ? event.timestamp : "";
@@ -234,6 +281,10 @@ function processParserEvent(state, event) {
     }
   }
 
+  // 纯生成耗时跟踪：必须放在所有提前 return 之前（包括下面的用户消息分支），
+  // 否则窗口起始基准会丢失，"等待首字"的时间就统计不到。
+  trackGenWindow(state, event, timestamp);
+
   if (event.type === "response_item" && event.payload && event.payload.role === "user") {
     if (timestamp && !state.userMessageKeys.has(timestamp)) {
       state.userMessageKeys.add(timestamp);
@@ -260,6 +311,7 @@ function processParserEvent(state, event) {
     state.usageRecordTotals.set(recordKey, Number.isFinite(threadUsage.total_tokens) ? threadUsage.total_tokens : null);
     state.usageRecords.push({
       ts: timestamp,
+      genMs: takeGenWindow(state),
       responseId,
       turnId: typeof payload.turn_id === "string" ? payload.turn_id : "",
       model: state.currentModel,
@@ -299,6 +351,7 @@ function processParserEvent(state, event) {
   const last = info.last_token_usage || {};
   const count = {
     ts: timestamp,
+    genMs: takeGenWindow(state),
     total: info.total_token_usage && Number.isFinite(info.total_token_usage.total_tokens) ? info.total_token_usage.total_tokens : null,
     input: Number.isFinite(last.input_tokens) ? last.input_tokens : null,
     output: Number.isFinite(last.output_tokens) ? last.output_tokens : null,
@@ -335,6 +388,10 @@ class IncrementalRolloutParser {
     this.filePrefixFingerprint = "";
     this.lastTimestamp = "";
     this.counts = [];
+    // 纯生成耗时窗口（跨增量批次保持，否则每次读新增字节都会丢掉基准）
+    this.genMs = 0;
+    this.genLastTs = "";
+    this.genToolBarrier = false;
     this.usageRecords = [];
     this.usageRecordIds = new Set();
     // 同 response_id 的重复记录只算一次；但若两次的线程累计不同，说明是"真冲突"（非 0 即报警）。
@@ -638,6 +695,7 @@ function collectUnifiedRecords(parsed) {
     seenCounts.add(key);
     legacyRecords.push({
       source: "legacy",
+      genMs: count.genMs,
       ts: count.ts || "",
       turnId: "",
       responseId: "",
@@ -664,6 +722,7 @@ function collectUnifiedRecords(parsed) {
     seenRecords.add(key);
     newRecords.push({
       source: "record",
+      genMs: record.genMs,
       ts: record.ts || "",
       turnId: record.turnId || "",
       responseId: record.responseId || "",
@@ -895,6 +954,20 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
   }
 
   const threadUsage = latestThreadUsage || {};
+  // 纯生成耗时聚合：sessionTps = 会话加权平均（Σ输出 ÷ Σ生成耗时）；
+  // lastRequestTps = 最后一次"有耗时的请求"的速度（方案甲：详情页两个分区分别用它与会话均值）。
+  let genMsTotal = 0;
+  let genOutputTotal = 0;
+  let lastRequestTps = null;
+  for (const record of records) {
+    const genMs = Number.isFinite(record.genMs) ? record.genMs : 0;
+    if (genMs <= 0) continue;
+    const output = Number.isFinite(record.output) ? record.output : 0;
+    genMsTotal += genMs;
+    genOutputTotal += output;
+    if (output > 0) lastRequestTps = output / (genMs / 1000);
+  }
+  const sessionTps = genMsTotal > 0 && genOutputTotal > 0 ? genOutputTotal / (genMsTotal / 1000) : null;
   const cumulativeResetCount = threadCounters.resetEvents +
     [...turnCounters.values()].reduce((sum, counters) => sum + counters.resetEvents, 0);
 
@@ -910,6 +983,8 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
     sessionOutput: threadUsage.output != null ? threadUsage.output : null,
     modelSwitchCount: Math.max(0, (parsed.modelChanges || []).length - 1),
     cumulativeResetCount,
+    sessionTps,
+    lastRequestTps,
     formatConflictCount: collected.formatConflictCount,
     echoStats: collected.echoStats,
     replayStats: collected.replayStats,
@@ -957,7 +1032,10 @@ function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: t
   const requestSliceStart = Math.max(0, currentRequests.length - MAX_REQUEST_DETAILS);
   const requestIndexStart = Math.max(0, currentRequestTotal - currentRequests.length) + requestSliceStart;
   const turnStart = Math.max(0, stats.turns.length - MAX_TURN_SUMMARIES);
-  return {
+  // 注意：这里必须先赋值给 payload，不能直接 return ——
+  // 下面的 schema 校验以及最终的 return payload 都依赖这个变量。
+  // （历史缺陷：原先直接 return，导致校验整段成为不可达死代码、推送前校验形同虚设。）
+  const payload = {
     protocolName: PROTOCOL_NAME,
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
     capabilities: PROTOCOL_CAPABILITIES,
@@ -967,11 +1045,23 @@ function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: t
     sessionInput: stats.sessionInput,
     sessionCached: stats.sessionCached,
     sessionOutput: stats.sessionOutput,
+    // 命中率以 0–1 的比例下发（页面负责 ×100 显示）；输入为 0 或缓存缺失时为 null
+    sessionCacheHitRate:
+      Number.isFinite(stats.sessionInput) && stats.sessionInput > 0 && Number.isFinite(stats.sessionCached)
+        ? Math.min(1, Math.max(0, stats.sessionCached / stats.sessionInput))
+        : null,
+    sessionTps: Number.isFinite(stats.sessionTps) ? stats.sessionTps : null,
     contextUsed: stats.contextUsed,
     turnTotal: currentTurn ? currentTurn.total : 0,
     turnInput: currentTurn ? currentTurn.input : 0,
     turnCached: currentTurn ? currentTurn.cached : 0,
     turnOutput: currentTurn ? currentTurn.output : 0,
+    turnCacheHitRate: (() => {
+      const input = currentTurn ? currentTurn.input : null;
+      const cached = currentTurn ? currentTurn.cached : null;
+      return Number.isFinite(input) && input > 0 && Number.isFinite(cached) ? Math.min(1, Math.max(0, cached / input)) : null;
+    })(),
+    lastRequestTps: Number.isFinite(stats.lastRequestTps) ? stats.lastRequestTps : null,
     currentTurnIndex: currentTurn ? stats.turns.length : 0,
     turns: stats.turns.slice(turnStart).map((turn, index) =>
       turnPayloadFor(turn, turnStart + index),

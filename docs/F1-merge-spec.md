@@ -106,7 +106,7 @@
 ## 与参考脚本的复算对照（只读实测，2026-09-17）
 
 参考脚本：`%USERPROFILE%\.codex\.tmp\audit2\classify.cjs`（分类）与 `lag-methods.cjs`（四口径滞后）；
-实现侧对照脚本：`scripts/check-request-count.mjs`。三者在**同一份会话文件**（`rollout-2026-09-13T21-32-09…`，
+实现侧对照脚本：`scripts/check-request-count.mjs`。三者在**同一份会话文件**（`rollout-<日期>T<时间>-<线程ID>.jsonl`，
 modern 1135 / legacy 1292）上运行：
 
 | 指标 | 参考脚本 | 本实现 | 一致 |
