@@ -53,11 +53,11 @@
 
 - 环境：Node v24.x；脚本用 `.mjs` 结尾避免 require/await 冲突。
 - `token-stats.mjs` 支持 `CCM_TOKENS_AS_MODULE=1` 导入做单元测试，导出 `clientState`、`findNewestClientFileSince`、`findNewestUnclaimedFile` 等。
-- `npm test` 使用 Node 内置 `node:test`，覆盖截断、乱序、重复事件、上下文压缩、模型切换、累计重置、schema 校验和多窗口目标选择。
+- `npm test` 使用 Node 内置 `node:test`（当前 39 项），覆盖截断、乱序、重复事件、上下文压缩、模型切换、累计重置、schema 校验、多窗口目标选择、会话分片（归组/合并/后缀剥离）与停滞两级告警。
 - `npm run perf -- 20000` 运行本地脱敏性能基准；当前无第三方运行时依赖，不需要安装 Playwright 才能执行核心测试。
 - `npm run verify:live` 做本机实机验收（协议、统计条位置、分区顺序、外部点击关闭）；附加 `-- --refresh` 可实测 5 秒固定刷新。
 - `npm run reload` 用于更新 Codex++ 用户脚本后重载 Codex 渲染页面；重载不会修改会话数据或配置。
-- `npm test` 只跑单元测试；`npm run test:live` 跑 Playwright 实机测试（需要 Codex 桌面版与 CDP 端口在线，且必须带 `--test-force-exit`，否则 CDP 连接会阻止进程退出）。
+- `npm test` 只跑单元测试；`npm run test:live` 跑 Playwright 实机测试（当前 13 个用例：11 通过 + 2 个真实输入用例按安全约定跳过；需要 Codex 桌面版与 CDP 端口在线，且必须带 `--test-force-exit`，否则 CDP 连接会阻止进程退出）。Esc 相关用例断言"不关闭弹层"——键盘监听已按用户要求移除。
 - 排查用只读脚本：`node scripts/check-page-state.mjs`（页面与负载状态）、`node scripts/close-detail-dialog.mjs`（仅用 DOM 事件关闭弹层）、`node scripts/reset-page-input-state.mjs`（清理诊断残留并关闭焦点模拟）。
 - 严禁在默认测试流程里注入真实键鼠：CDP 注入的 Escape 会被 Codex 当作“停止回答”，字符注入会污染输入框；真实输入测试必须显式设置 `CCM_ALLOW_REAL_INPUT=1`。
 - 统计口径以 `docs/F1-merge-spec.md` 为准：A（token_count）与 B（token_usage_record）统一合并，累计量走 reset-aware 归一化，**禁止单调递增假设**。

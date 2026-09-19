@@ -37,6 +37,19 @@ const THREAD_PROBE_INTERVAL_MS = 2000;
 // 数据变化时立即推送；无变化时按固定周期推送，保证页面每 5 秒至少刷新一次。
 const HEARTBEAT_INTERVAL_MS = 5000;
 const STALE_DATA_AFTER_MS = 15000;
+// 数据停滞两级告警：文件超过 WARN 阈值先只写日志（早期诊断信号，不动面板）；
+// 继续超过 AFTER 阈值才把健康度降级为 stale-data（面板显示"数据暂未更新"）。
+// 分级的意义：空闲会话（用户离开）只会留下一条日志而不会把面板变灰；
+// 真正的"读错文件"类停滞（2026-09-19 实测 4 小时静默）则会被面板直接暴露。
+// 背景：宿主对超大会话做「分片」（新文件名带 _<uuid> 后缀、换日期目录），
+// 监控若读到已停更的旧分片，会持续解析"成功"但数字停滞。
+// 阈值可用环境变量覆盖（单位：分钟，供测试）：CCM_FILE_STALL_WARN_MINUTES / CCM_FILE_STALL_MINUTES。
+function minutesEnvOrDefault(name, fallbackMinutes) {
+  const override = Number(process.env[name]);
+  return Number.isFinite(override) && override > 0 ? override * 60 * 1000 : fallbackMinutes * 60 * 1000;
+}
+const FILE_STALL_WARN_MS = minutesEnvOrDefault("CCM_FILE_STALL_WARN_MINUTES", 5);
+const FILE_STALL_AFTER_MS = minutesEnvOrDefault("CCM_FILE_STALL_MINUTES", 15);
 // 错峰回声属正常现象（legacy 流落后于新格式流），只做健康度观测：同内容（回声）的两条事件
 // 时间差超过该阈值才算"信号"，否则算噪声。本机实测：>5s 是噪声量级，>60s 才值得看，故取 60 秒。
 const ECHO_LAG_THRESHOLD_MS = 60000;
@@ -173,7 +186,12 @@ function rolloutNameMatch(file) {
 
 function threadIdOf(file) {
   const matched = rolloutNameMatch(file);
-  return matched ? matched[2] : null;
+  if (!matched) return null;
+  const raw = matched[2];
+  // 宿主会在会话文件过大时「分片」：新文件名格式为 <threadId>_<分段UUID>.jsonl。
+  // 剥离下划线后缀，让新旧两种命名都能归并到同一个线程 ID（2026-09-19 实测）。
+  const separator = raw.indexOf("_");
+  return separator > 0 ? raw.slice(0, separator) : raw;
 }
 
 function fileDate(file) {
@@ -1602,6 +1620,61 @@ function locateThreadFile(files, threadId) {
   return null;
 }
 
+// 收集同一会话的「全部分片」并按时间升序返回。
+// 分片命名以时间戳开头（rollout-<时间>-<threadId>[_<分段UUID>].jsonl），字符串排序即先后顺序。
+function locateThreadFiles(files, threadId) {
+  const matched = [];
+  for (const candidate of files) {
+    if (threadIdOf(candidate) === threadId) matched.push(candidate);
+  }
+  matched.sort((left, right) => {
+    const leftDate = fileDate(left) || "";
+    const rightDate = fileDate(right) || "";
+    if (leftDate !== rightDate) return leftDate < rightDate ? -1 : 1;
+    return left < right ? -1 : 1;
+  });
+  return matched;
+}
+
+// 诊断辅助：找出「文件名里含本会话 ID 前缀、但没有被正常识别」的文件。
+// 宿主若再一次变更分片命名（后缀分隔方式变化），这些文件会落网，由日志预警提示排查。
+function findSuspectFiles(files, threadId) {
+  const prefix = String(threadId || "").slice(0, 8);
+  if (!prefix) return [];
+  const suspects = [];
+  for (const candidate of files) {
+    if (threadIdOf(candidate) === threadId) continue;
+    if (path.basename(candidate).includes(prefix)) suspects.push(candidate);
+  }
+  return suspects;
+}
+
+// 把多个分片的解析结果合并为一个 parsed。
+// 统计层（collectUnifiedRecords）按内容键跨记录去重，因此分片之间的重叠区不会重复计数。
+function mergeSegments(parsedParts) {
+  const valid = (parsedParts || []).filter((part) => part);
+  if (!valid.length) return null;
+  const latest = valid[valid.length - 1];
+  let modelContextWindow = null;
+  for (let index = valid.length - 1; index >= 0; index -= 1) {
+    if (valid[index].modelContextWindow != null) {
+      modelContextWindow = valid[index].modelContextWindow;
+      break;
+    }
+  }
+  return {
+    file: latest.file,
+    threadId: latest.threadId,
+    date: latest.date,
+    counts: valid.flatMap((part) => part.counts),
+    usageRecords: valid.flatMap((part) => part.usageRecords),
+    userMessages: valid.flatMap((part) => part.userMessages),
+    modelContextWindow,
+    modelChanges: valid.flatMap((part) => part.modelChanges),
+    formatConflicts: valid.reduce((sum, part) => sum + (part.formatConflicts || 0), 0),
+  };
+}
+
 // 未指定 thread 时取「最近写入」的那个会话文件
 function newestRolloutFile(files) {
   let newest = null;
@@ -2001,8 +2074,6 @@ function createWatchSession(args) {
     lastKey: "",
     lastPushAt: 0,
     lastRealThreadId: "",
-    lastStatsFile: "",
-    lastParsed: null,
     lastStats: null,
     lastPayload: null,
     lastPayloadJson: "",
@@ -2014,8 +2085,18 @@ function createWatchSession(args) {
     lastConflictLogKey: 0,
     health: monitorHealthFor(args),
     lastGoodPushAt: 0,
-    parser: null,
-    parserFile: "",
+    // 会话分片支持：每个分片文件一个增量解析器（segmentParsers）；
+    // lastSegmentParts 记录各分片上一轮解析快照（引用未变时跳过重复聚合）；
+    // observedFile / observedFileMtime 供数据停滞告警使用（取最新分片）。
+    segmentParsers: new Map(),
+    lastSegmentParts: null,
+    lastMerged: null,
+    observedFile: "",
+    observedFileMtime: 0,
+    fileStallWarned: false,    // 一级（预警）是否已记录
+    fileStallNotified: false,  // 二级（降级）是否已记录（避免日志刷屏）
+    lastLocateLogKey: "",      // 定位失败日志去重键
+    lastSuspectKey: "",        // 疑似「命名变化」文件预警的去重键
   };
 }
 
@@ -2057,41 +2138,79 @@ async function resolveWatchThread(args, session, rawThread) {
 }
 
 // 会话文件切换时重置增量解析器与统计缓存
-function resetParserForFile(session, file) {
-  session.parserFile = file || "";
-  session.parser = file ? new IncrementalRolloutParser(file) : null;
-  session.lastStatsFile = "";
-  session.lastParsed = null;
-  session.lastStats = null;
-  session.lastPayload = null;
-  session.lastPayloadJson = "";
-}
-
+// 读取当前会话的统计。同一会话可能有多个「分片」文件（宿主在会话文件过大时切分，
+// 新文件名追加 _<分段UUID> 后缀、换日期目录）：这里为每个分片维护独立的增量解析器，
+// 合并后再统计 —— 统计层按内容键跨分片去重，分片重叠区不会重复计数。
+// （背景：2026-09-19 实测「分片」导致监控持续读取已停更的旧分片、数字停滞 4 小时。）
 function readWatchStats(session, thread) {
   // 没有真实对话（空白新对话、占位对话未学习、页面尚未加载完）时统一显示 0
   if (!thread || thread === NEW_THREAD) return { file: null, parsed: null, stats: emptyStats(null, null) };
 
-  const file = resolveFile(thread);
-  if (file !== session.parserFile) resetParserForFile(session, file);
+  const allFiles = findRolloutFiles();
+  const files = locateThreadFiles(allFiles, thread);
+  if (!files.length) {
+    // 诊断：定位失败只记一次日志（面板状态由 15 秒 stale 兜底），并附目录最新文件样本，
+    // 便于快速区分「宿主命名规则又变了」与「会话确实不存在」。
+    const missKey = "miss:" + thread;
+    if (session.lastLocateLogKey !== missKey) {
+      session.lastLocateLogKey = missKey;
+      const samples = allFiles.slice(-3).map((candidate) => path.basename(candidate)).join(" / ");
+      monitorLog("定位失败: 未找到会话 " + String(thread).slice(0, 8) + "… 的任何文件；目录中最近的文件样本: " + (samples || "（无）"));
+    }
+    return { file: null, parsed: null, stats: emptyStats(thread, null) };
+  }
+  if (session.lastLocateLogKey) session.lastLocateLogKey = "";
 
-  const parsed = session.parser ? session.parser.readNew() : null;
-  if (!parsed) {
+  // 诊断：发现「疑似本会话但未被识别」的文件时预警一次（宿主分片命名可能再次变化）
+  const suspects = findSuspectFiles(allFiles, thread);
+  const suspectKey = suspects.length ? suspects.join("|") : "";
+  if (suspectKey && session.lastSuspectKey !== suspectKey) {
+    session.lastSuspectKey = suspectKey;
+    monitorLog("定位预警: 发现 " + suspects.length + " 个疑似本会话但未被识别的文件（宿主命名可能已变化）: " + suspects.slice(0, 3).map((candidate) => path.basename(candidate)).join(" / "));
+  }
+
+  // 分片新增时创建解析器、分片消失时清理
+  const activeFiles = new Set(files);
+  for (const segment of files) {
+    if (!session.segmentParsers.has(segment)) session.segmentParsers.set(segment, new IncrementalRolloutParser(segment));
+  }
+  for (const known of [...session.segmentParsers.keys()]) {
+    if (!activeFiles.has(known)) session.segmentParsers.delete(known);
+  }
+
+  const parts = files.map((segment) => session.segmentParsers.get(segment).readNew());
+  const latestFile = files[files.length - 1];
+  session.observedFile = latestFile;
+
+  // 数据停滞告警：观测「最新分片」的写入时间（最早的旧分片可能早已停更，不能作为判据）
+  try {
+    const latestStat = fs.statSync(latestFile, { throwIfNoEntry: false });
+    if (latestStat) session.observedFileMtime = latestStat.mtimeMs;
+  } catch {}
+
+  // 所有分片的解析快照引用都未变 → 复用上一轮统计，避免每秒重复聚合
+  const unchanged = session.lastSegmentParts
+    && session.lastSegmentParts.length === parts.length
+    && session.lastSegmentParts.every((prev, index) => prev.file === files[index] && prev.part === parts[index]);
+  if (unchanged && session.lastStats) {
+    return { file: latestFile, parsed: session.lastMerged, stats: session.lastStats };
+  }
+
+  session.lastSegmentParts = parts.map((part, index) => ({ file: files[index], part }));
+  const merged = mergeSegments(parts);
+  if (!merged) {
     // 对话存在但还没有数据 -> 显示 0
-    return { file, parsed: null, stats: emptyStats(thread, file) };
+    session.lastMerged = null;
+    session.lastStats = null;
+    return { file: latestFile, parsed: null, stats: emptyStats(thread, latestFile) };
   }
 
-  // 解析结果对象未变时可以复用上一轮统计，避免每秒重复聚合
-  if (file === session.lastStatsFile && parsed === session.lastParsed && session.lastStats) {
-    return { file, parsed, stats: session.lastStats };
-  }
-
-  const stats = buildStats(parsed, { retainRequests: false });
-  session.lastStatsFile = file;
-  session.lastParsed = parsed;
-  session.lastStats = stats;
+  const watchStats = buildStats(merged, { retainRequests: false });
+  session.lastMerged = merged;
+  session.lastStats = watchStats;
   session.lastPayload = null;
   session.lastPayloadJson = "";
-  return { file, parsed, stats };
+  return { file: latestFile, parsed: merged, stats: watchStats };
 }
 
 function nextWatchHealth(args, session, parsed, rawThread, connectionState) {
@@ -2100,10 +2219,36 @@ function nextWatchHealth(args, session, parsed, rawThread, connectionState) {
   if (dataFresh) session.lastGoodPushAt = nowMs;
   // 有历史成功推送、但当前拿不到数据超过阈值 → stale-data（区别于「从未拿到数据」）
   const stale = !dataFresh && session.lastGoodPushAt > 0 && nowMs - session.lastGoodPushAt > STALE_DATA_AFTER_MS;
+  // 数据停滞两级告警：解析持续「成功」，但源文件长时间没有新增写入。
+  //   一级（>5 分钟）：只写日志 —— 早期诊断信号，不动面板（空闲会话属正常现象）；
+  //   二级（>15 分钟）：健康度降级为 stale-data —— 面板直接可见。
+  // 典型场景（2026-09-19 实测）：宿主对超大会话做分片，监控读到已停更的旧分片，
+  // 数字停滞数小时而健康度仍显示 healthy。
+  const stallMs = dataFresh && Number.isFinite(session.observedFileMtime) && session.observedFileMtime > 0
+    ? nowMs - session.observedFileMtime
+    : 0;
+  const stallWarn = stallMs > FILE_STALL_WARN_MS;
+  const stallDegrade = stallMs > FILE_STALL_AFTER_MS;
+  if (stallWarn && !session.fileStallWarned) {
+    session.fileStallWarned = true;
+    monitorLog("数据停滞预警: 会话文件已 " + Math.max(1, Math.round(stallMs / 60000)) +
+      " 分钟无新增（" + (session.observedFile || "?") + "）；超过 " + Math.round(FILE_STALL_AFTER_MS / 60000) +
+      " 分钟将降级面板状态");
+  }
+  if (stallDegrade && !session.fileStallNotified) {
+    session.fileStallNotified = true;
+    monitorLog("数据停滞: 会话文件已 " + Math.max(1, Math.round(stallMs / 60000)) +
+      " 分钟无新增（" + (session.observedFile || "?") + "），健康度降级为 stale-data");
+  }
+  if (!stallWarn && (session.fileStallWarned || session.fileStallNotified)) {
+    session.fileStallWarned = false;
+    session.fileStallNotified = false;
+    monitorLog("数据停滞已恢复：会话文件重新开始更新");
+  }
   const recovered = dataFresh && session.health.status !== "healthy" && session.health.status !== "starting";
   return monitorHealthFor(args, {
     status: dataFresh
-      ? "healthy"
+      ? (stallDegrade ? "stale-data" : "healthy")
       : stale
         ? "stale-data"
         : rawThread == null
@@ -2351,6 +2496,9 @@ export {
   hasConversationContent,
   findRolloutFiles,
   threadIdOf,
+  locateThreadFiles,
+  findSuspectFiles,
+  mergeSegments,
   resolveFile,
   emptyStats,
   IncrementalRolloutParser,
@@ -2362,5 +2510,6 @@ export {
   buildStats,
   payloadFor,
   monitorHealthFor,
+  nextWatchHealth,
   healthKeyOf,
 };

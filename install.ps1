@@ -174,7 +174,7 @@ if ($SkipPlugin -or -not $codex) {
   else { Write-Note "未在 plugin list 中确认到插件，请手动执行：codex plugin list" }
 }
 
-Write-Step "4/5 安装登录自启守护"
+Write-Step "4/5 安装登录自启（计划任务）"
 if ($SkipAutostart) {
   Write-Note "已跳过（-SkipAutostart）。可稍后运行 install-autostart.ps1。"
 } else {
@@ -248,5 +248,5 @@ Write-Host "   3) 左键单击统计条可打开详情；点击弹层外部或�
 Write-Host "   4) 如未安装自启，可手动启动监控："
 Write-Host ("      node `"" + $statsScript + "`" --watch --cdp")
 Write-Host ""
-Write-Host "卸载：运行 uninstall-autostart.ps1，并执行 codex plugin remove tokens-ui-for-codex@tokens-ui-for-codex-local" -ForegroundColor DarkGray
+Write-Host "卸载：运行 plugins\tokens-ui-for-codex\uninstall-autostart.ps1（加 -Full 为一键全清：计划任务、进程、用户脚本、插件与状态目录）" -ForegroundColor DarkGray
 exit 0

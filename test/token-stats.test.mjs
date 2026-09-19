@@ -687,3 +687,92 @@ test("F1-22 unique 自身重复：同内容 key 无本体时只补录一次", ()
   assert.equal(result.requestCount, 2, "本体 1 条 + unique 补录 1 条");
   assert.equal(result.sessionTotal, 300);
 });
+
+// ---------------------------------------------------------------------------
+// 会话分片（2026-09-19 实测：宿主在会话文件过大时切分，新文件名追加 _<分段UUID> 后缀）
+// ---------------------------------------------------------------------------
+
+test("分片：threadIdOf 剥离 _<分段UUID> 后缀并兼容旧命名", () => {
+  const legacy = path.join(testRoot, "rollout-2026-09-13T21-32-09-" + threadId + ".jsonl");
+  const segmented = path.join(testRoot, "rollout-2026-09-19T13-34-11-" + threadId + "_01a0b828-68a1-7662.jsonl");
+  assert.equal(stats.threadIdOf(legacy), threadId);
+  assert.equal(stats.threadIdOf(segmented), threadId, "分片后缀必须被剥离，否则定位不到新分片");
+});
+
+test("分片：locateThreadFiles 归组同一会话并按时间升序", () => {
+  const files = [
+    path.join(testRoot, "rollout-2026-09-19T13-34-11-" + threadId + "_seg2.jsonl"),
+    path.join(testRoot, "rollout-2026-09-13T21-32-09-" + threadId + ".jsonl"),
+    path.join(testRoot, "rollout-2026-09-18T10-00-00-other-thread.jsonl"),
+  ];
+  const matched = stats.locateThreadFiles(files, threadId);
+  assert.equal(matched.length, 2, "只归组本会话的分片，其他会话不混入");
+  assert.ok(matched[0].includes("2026-09-13"), "最早的分片排在最前");
+  assert.ok(matched[1].includes("2026-09-19"), "最新的分片排在最后");
+});
+
+test("分片：mergeSegments 拼接记录、取最新上下文窗口、汇总冲突计数", () => {
+  const first = {
+    file: "a.jsonl", threadId, date: "2026-09-13T21-32-09",
+    counts: [{}, {}], usageRecords: [{}], userMessages: [{}, {}],
+    modelContextWindow: 100000, modelChanges: [{}], formatConflicts: 1,
+  };
+  const second = {
+    file: "b.jsonl", threadId, date: "2026-09-19T13-34-11",
+    counts: [{}], usageRecords: [{}], userMessages: [{}],
+    modelContextWindow: 200000, modelChanges: [{}], formatConflicts: 2,
+  };
+  const merged = stats.mergeSegments([first, second]);
+  assert.equal(merged.file, "b.jsonl", "file 取最新分片");
+  assert.equal(merged.counts.length, 3);
+  assert.equal(merged.usageRecords.length, 2);
+  assert.equal(merged.userMessages.length, 3);
+  assert.equal(merged.modelContextWindow, 200000, "上下文窗口取最新非空值");
+  assert.equal(merged.formatConflicts, 3, "冲突计数跨分片求和");
+
+  const fallback = stats.mergeSegments([first, { ...second, modelContextWindow: null }]);
+  assert.equal(fallback.modelContextWindow, 100000, "最新分片缺失时回退到较早分片的值");
+  assert.equal(stats.mergeSegments([null, null]), null, "全为空时返回 null");
+});
+
+test("停滞两级告警：5 分钟只预警、15 分钟降级、恢复后回到 healthy", () => {
+  const session = {
+    health: { status: "healthy", recoveryState: "idle" },
+    lastGoodPushAt: 0,
+    observedFile: "sample.jsonl",
+    observedFileMtime: Date.now() - 6 * 60 * 1000, // 6 分钟：处于预警区间
+    fileStallWarned: false,
+    fileStallNotified: false,
+  };
+  const args = { target: "auto" };
+  const parsed = { counts: [{}] };
+
+  const warned = stats.nextWatchHealth(args, session, parsed, "thread-x", {});
+  assert.equal(warned.status, "healthy", "6 分钟只写日志、不降级面板");
+  assert.equal(session.fileStallWarned, true, "一级预警标志已记录");
+  assert.equal(session.fileStallNotified, false, "二级降级尚未触发");
+
+  session.observedFileMtime = Date.now() - 16 * 60 * 1000;
+  const degraded = stats.nextWatchHealth(args, session, parsed, "thread-x", {});
+  assert.equal(degraded.status, "stale-data", "超过 15 分钟降级为 stale-data");
+  assert.equal(session.fileStallNotified, true);
+
+  session.observedFileMtime = Date.now();
+  const recovered = stats.nextWatchHealth(args, session, parsed, "thread-x", {});
+  assert.equal(recovered.status, "healthy", "文件恢复更新后回到 healthy");
+  assert.equal(session.fileStallWarned, false, "预警标志复位");
+  assert.equal(session.fileStallNotified, false, "降级标志复位");
+});
+
+test("定位诊断：findSuspectFiles 识别「疑似本会话但未被识别」的文件", () => {
+  const realThreadId = "01a0b828-68a1-7662-af38-5e3643265673";
+  const files = [
+    path.join(testRoot, "rollout-2026-09-19T13-34-11-" + realThreadId + ".jsonl"),
+    path.join(testRoot, "rollout-2026-09-19T14-00-00-01a0b828-68a1-weird-suffix.jsonl"),
+    path.join(testRoot, "rollout-2026-09-19T15-00-00-ffffffff-0000-0000-0000-000000000000.jsonl"),
+  ];
+  const suspects = stats.findSuspectFiles(files, realThreadId);
+  assert.equal(suspects.length, 1, "只命中含本会话前缀、却未被识别的文件");
+  assert.ok(suspects[0].includes("weird-suffix"));
+  assert.equal(stats.findSuspectFiles([], realThreadId).length, 0);
+});

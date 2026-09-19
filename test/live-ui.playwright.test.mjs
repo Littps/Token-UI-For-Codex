@@ -43,11 +43,15 @@ const PAYLOAD_WHITELIST = new Set([
   "sessionInput",
   "sessionCached",
   "sessionOutput",
+  "sessionCacheHitRate",
+  "sessionTps",
   "contextUsed",
   "turnTotal",
   "turnInput",
   "turnCached",
   "turnOutput",
+  "turnCacheHitRate",
+  "lastRequestTps",
   "currentTurnIndex",
   "turns",
   "turnsTruncated",
@@ -281,18 +285,18 @@ test("实机：右上角关闭按钮可用", async (t) => {
   assert.equal(closed, true, "关闭按钮不可用");
 });
 
-test("实机：Esc 为增强路径（DOM 事件下应可关闭）", async (t) => {
+test("实机：Esc 不再关闭弹层（插件不注册键盘监听）", async (t) => {
   assert.ok(await openDetails(), "无法打开详情弹层");
-  const closed = await state.page.evaluate(() => {
+  const stillOpen = await state.page.evaluate(() => {
     const target = document.activeElement || document.body || document.documentElement;
     const init = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true };
     target.dispatchEvent(new KeyboardEvent("keydown", init));
     target.dispatchEvent(new KeyboardEvent("keyup", init));
-    return !document.getElementById("ccm-token-spend-detail-dialog");
+    return !!document.getElementById("ccm-token-spend-detail-dialog");
   });
-  t.diagnostic("DOM Esc 关闭: " + closed);
-  if (!closed) await closeIfOpen();
-  assert.equal(closed, true, "Esc 增强路径未生效");
+  t.diagnostic("DOM Esc 后弹层仍打开: " + stillOpen);
+  await closeIfOpen();
+  assert.equal(stillOpen, true, "按当前设计 Esc 不应关闭弹层（键盘监听已按用户要求移除）");
 });
 
 test("实机：无效负载会被页面拒绝", async (t) => {
@@ -327,16 +331,17 @@ test("实机：Playwright 真实鼠标点击能否打开详情", { skip: realInp
   await closeIfOpen();
 });
 
-test("实机：Playwright 真实键盘 Esc 是否生效", { skip: realInputSkip }, async (t) => {
+test("实机：Playwright 真实键盘 Esc 不会关闭弹层", { skip: realInputSkip }, async (t) => {
   await openDetails();
-  let worked = false;
+  let stillOpen = false;
   try {
     await state.page.keyboard.press("Escape");
     await new Promise((resolve) => setTimeout(resolve, 200));
-    worked = await state.page.evaluate(() => !document.getElementById("ccm-token-spend-detail-dialog"));
+    stillOpen = await state.page.evaluate(() => !!document.getElementById("ccm-token-spend-detail-dialog"));
   } catch (error) {
     t.diagnostic("真实键盘事件异常: " + error.message);
   }
-  t.diagnostic("真实键盘 Esc 是否生效: " + worked);
+  t.diagnostic("真实键盘 Esc 后弹层仍打开: " + stillOpen);
   await closeIfOpen();
+  assert.equal(stillOpen, true, "按当前设计 Esc 不应关闭弹层（键盘监听已按用户要求移除）");
 });

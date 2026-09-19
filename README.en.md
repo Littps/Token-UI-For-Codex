@@ -77,13 +77,31 @@ Manual run (debug):
 node .\token-stats.mjs --watch --cdp
 ```
 
+## Data reliability and alerts
+
+The host may **segment** a session log (large conversations are split into multiple files with different names
+and directories). The monitor discovers **all segments** of a session and merges them chronologically
+(cross-segment deduplication by content key), so numbers stay continuous across segmentation.
+
+Stall alerts are written to `logs\watch-YYYYMMDD.log`:
+
+| Level | Condition | Action |
+| --- | --- | --- |
+| Warning | Session file unchanged for 5 minutes | Log only (normal idle sessions fall here) |
+| Degrade | Session file unchanged for 15 minutes | Panel shows "data not updated" (grey state) |
+
+If no file matches the session ID, or files that look like this session are found but not recognized
+(the host may have changed its naming again), the log prints a **locate failure / locate warning**
+with recent file samples for fast triage. Thresholds can be overridden with
+`CCM_FILE_STALL_WARN_MINUTES` / `CCM_FILE_STALL_MINUTES`.
+
 ## Uninstall
 
 ```powershell
 # Standard: remove the task, stop processes, keep logs and state
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\plugins\tokens-ui-for-codex\uninstall-autostart.ps1"
 
-# Full wipe: also remove state, user script, plugin and plugin cache
+# Full wipe: also remove state, user script (incl. install backups), plugin and plugin cache
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\plugins\tokens-ui-for-codex\uninstall-autostart.ps1" -Full
 ```
 
@@ -114,7 +132,7 @@ Map the `run status` health value:
 | `waiting-for-cdp` | Cannot reach `127.0.0.1:9229`; start Codex and Codex++ |
 | `waiting-for-page` | Page not ready; reload the Codex page |
 | `waiting-for-data` | Connected but this conversation has no stats yet |
-| `stale-data` | No fresh data for 15s; check the monitor process |
+| `stale-data` | Two sources: (1) no data for 15s; (2) session file unchanged for 15 minutes (see "Data reliability and alerts"). Check the monitor process and the "数据停滞" log entries |
 | `target-selection-required` | Multiple Codex windows; pass `--target <ID>` explicitly |
 
 Handy checks:

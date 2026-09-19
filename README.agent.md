@@ -14,6 +14,8 @@
 | 插件标识 | `tokens-ui-for-codex@tokens-ui-for-codex-local` |
 | 页面协议 | schema v2，事件名 `ccm-token-spend`，全局 `window.__ccmTokenSpend` |
 | 页面诊断字段 | `window.__ccmTokenSpendStatus`（`""`=正常；`anchor-missing`/`mount-point-missing`/`insert-failed`/`mount-crashed`） |
+| 会话分片 | 宿主会在会话文件过大时切分（新文件名追加 `_<分段UUID>`、换日期目录）；监控自动合并同一会话全部分片并按内容键去重 |
+| 数据停滞告警 | 日志关键词「数据停滞 / 定位失败 / 定位预警」；5 分钟无新增→仅日志、15 分钟→面板 `stale-data` |
 | 管理员权限 | 全流程**不需要**；不要用提权方式运行任何脚本 |
 
 ## 1. 安装
@@ -101,3 +103,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<包>\plugins\tokens-ui-for
 - [ ] `node scripts\verify-sync.mjs --deploy "<包根>"` 输出 `mismatches: 0`
 - [ ] 计划任务、监控进程、用户脚本哈希、插件注册四项复验通过
 - [ ] 页面侧 `check-page-state.mjs` 指标符合预期
+- [ ] `npm run test:live` 实机用例全绿（Playwright 连接在线 Codex；真实输入用例按安全约定默认跳过）

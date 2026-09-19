@@ -76,6 +76,7 @@ node "<包根>\plugins\tokens-ui-for-codex\scripts\check-page-state.mjs"
 | 统计条不出现 | 用户脚本未注入或页面未重载 | 确认 Codex++ 运行中 → 重载 Codex 页面（或重启 Codex） |
 | 健康值长期 `waiting-for-page` | Codex 未启动或页面未就绪 | 启动 Codex；监控会保持待命并自动恢复 |
 | `target-selection-required` | 新机器上开了多个 Codex 窗口 | 用 `--target <ID>` 指定，或在页面侧只保留一个窗口 |
+| 面板数字停滞不增长 | 宿主把会话文件分片了，或日志命名再次变化 | 查日志中的「数据停滞 / 定位失败 / 定位预警」；当前版本已自动合并分片，出现「定位预警」请反馈维护者 |
 
 ## 5. 卸载（如需回退）
 

@@ -77,13 +77,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\plugins\tokens-ui-for-cod
 node .\token-stats.mjs --watch --cdp
 ```
 
+## 数据可靠性与告警
+
+会话日志会被宿主**分片**（文件过大时切分成多个文件，新分片使用不同命名与目录）——
+监控会自动发现同一会话的**全部分片**、按时间合并统计（跨分片按内容去重），
+因此数字始终连续，不会因为分片而停滞。
+
+监控对"数据停滞"提供两级告警（写入 `logs\watch-YYYYMMDD.log`）：
+
+| 级别 | 判定 | 动作 |
+| --- | --- | --- |
+| 预警 | 会话文件 5 分钟无新增 | 仅记录日志（正常的空闲会话属此类） |
+| 降级 | 会话文件 15 分钟无新增 | 面板显示"数据暂未更新"（灰色样式） |
+
+当"按会话 ID 找不到任何文件"或"发现疑似本会话但未被识别的文件"（宿主命名可能再次变化）时，
+日志会输出**定位失败 / 定位预警**（附最近的文件样本），便于快速排查。
+告警阈值可用环境变量 `CCM_FILE_STALL_WARN_MINUTES` / `CCM_FILE_STALL_MINUTES` 调整（单位：分钟）。
+
 ## 卸载
 
 ```powershell
 # 标准卸载：删除计划任务、停止进程、保留日志与状态目录
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\plugins\tokens-ui-for-codex\uninstall-autostart.ps1"
 
-# 一键全清：额外删除日志/状态、用户脚本、插件与插件缓存
+# 一键全清：额外删除日志/状态、用户脚本（含安装备份）、插件与插件缓存
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\plugins\tokens-ui-for-codex\uninstall-autostart.ps1" -Full
 ```
 
@@ -116,7 +133,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\plugins\tokens-ui-for-cod
 | `waiting-for-cdp` | 连接不到 `127.0.0.1:9229`，确认 Codex 与 Codex++ 已启动 |
 | `waiting-for-page` | 页面未就绪，重载 Codex 页面 |
 | `waiting-for-data` | 已连接但当前会话暂无统计，随便发一条消息即可 |
-| `stale-data` | 超过 15 秒没有拿到新数据，检查监控进程是否存活 |
+| `stale-data` | 两种来源：① 超过 15 秒拿不到数据；② 会话文件超过 15 分钟无新增（见"数据可靠性与告警"）。先查监控进程与日志中的"数据停滞"记录 |
 | `target-selection-required` | 检测到多个 Codex 窗口，需显式指定：`node token-stats.mjs --watch --cdp --target <ID>` |
 
 常用检查命令：

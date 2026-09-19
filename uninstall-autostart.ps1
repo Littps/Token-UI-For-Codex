@@ -135,6 +135,15 @@ if ($RemoveUserScript) {
   } else {
     Write-Note "未找到 Codex++ 用户脚本，跳过。"
   }
+  # -Full 时连安装时生成的备份一并清理；默认（仅 -RemoveUserScript）保留备份作为可恢复点。
+  if ($Full) {
+    $userScriptDir = Join-Path $env:APPDATA "Codex++\user_scripts"
+    $userScriptBackups = @(Get-ChildItem -LiteralPath $userScriptDir -Filter "codex-token-spend-panel.js.before-install-*.bak" -File -ErrorAction SilentlyContinue)
+    foreach ($backupFile in $userScriptBackups) {
+      Remove-Item -LiteralPath $backupFile.FullName -Force -ErrorAction SilentlyContinue
+    }
+    if ($userScriptBackups.Count -gt 0) { Write-Ok ("已清理安装备份 " + $userScriptBackups.Count + " 个（-Full）。") }
+  }
 } else {
   Write-Info "未指定 -RemoveUserScript，保留 Codex++ 用户脚本。"
 }

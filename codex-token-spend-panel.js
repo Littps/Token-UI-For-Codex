@@ -1165,13 +1165,10 @@
     state.root.classList.toggle("ccm-ts-native-stale", !hasData || !!(d && d.health && d.health.status !== "healthy"));
     state.root.classList.toggle("ccm-ts-native-error", !!state.protocolError || !!(d && d.health && ["failed", "protocol-mismatch", "target-selection-required"].includes(d.health.status)));
     if (state.dialog) {
-      if (state.dialog.__ccmRenderedDataKey !== dataKeyOf(state.data)) {
-        // 只有发生结构性重建（骨架/列表）时详情框尺寸才可能变化，才需要重新定位；
-        // 增量更新不改尺寸，原地重新定位会白白触发一次强制同步布局。
-        if (renderDetails()) positionDialog();
-      } else if (state.dialog.__ccmSubtitle) {
-        setCellText(state.dialog.__ccmSubtitle, formatSubtitle(state.data));
-      }
+      // 每次都走增量更新（不再用 __ccmRenderedDataKey 门控，原因见 DATA_EVENT 处注释）。
+      // 只有发生结构性重建（骨架/列表）时详情框尺寸才可能变化，才需要重新定位；
+      // 增量更新不改尺寸，原地重新定位会白白触发一次强制同步布局。
+      if (renderDetails()) positionDialog();
     }
   }
 
@@ -1228,15 +1225,22 @@
     }
 
     if (!state.root) state.root = buildRoot();
-    if (state.root.parentElement !== point.container || state.root.nextSibling !== point.before) {
-      // insertBefore 的参考节点必须是容器的「直接子节点」，否则抛 NotFoundError
-      // （浏览器原文：The node before which the new node is to be inserted is not a child of this node）。
-      // 两种会踩中的真实场景：
-      //   1) 上下文圆圈的父亲恰好就是容器 —— 此时 ref === container，等于「插到自己前面」；
-      //   2) buildRoot() 期间 React 重渲染把 ref 移出 DOM，此时 ref.parentElement === null。
-      // 处置：参考节点无效就改传 null —— MDN 明确「null 时元素仍会被追加到父节点末尾」，
-      // 即统计条仍会显示，只是位置从「圆圈左侧」退化为「行末」，属于可接受的优雅降级。
-      const before = point.before && point.before.parentElement === point.container ? point.before : null;
+    // insertBefore 的参考节点必须是容器的「直接子节点」，否则抛 NotFoundError
+    // （浏览器原文：The node before which the new node is to be inserted is not a child of this node）。
+    // 两种会踩中的真实场景：
+    //   1) 上下文圆圈的父亲恰好就是容器 —— 此时 ref === container，等于「插到自己前面」；
+    //   2) buildRoot() 期间 React 重渲染把 ref 移出 DOM，此时 ref.parentElement === null。
+    // 处置：参考节点无效就改传 null —— MDN 明确「null 时元素仍会被追加到父节点末尾」，
+    // 即统计条仍会显示，只是位置从「圆圈左侧」退化为「行末」，属于可接受的优雅降级。
+    //
+    // 注意：判断与插入必须使用同一个 before。若判断用原始 point.before、插入用降级后的
+    // null，会在降级场景下永远判定「位置不对」→ 每次 mount 都重插一次 →
+    // appendChild 对已存在的节点是「移动」（MDN），会产生 childList 变更 →
+    // 触发重挂载 → 每帧循环（P3）。
+    const before = point.before && point.before.parentElement === point.container ? point.before : null;
+    const alreadyPlaced = state.root.parentElement === point.container &&
+      (before ? state.root.nextSibling === before : state.root === point.container.lastElementChild);
+    if (!alreadyPlaced) {
       try {
         point.container.insertBefore(state.root, before);
       } catch (error) {
@@ -1282,6 +1286,13 @@
       const needsMount = records.some((record) => {
         if (!state.root || !state.root.isConnected) return true;
         if (state.root && (record.target === state.root || state.root.contains(record.target))) return false;
+        // 面板自身被移动时会产生「removedNodes 与 addedNodes 都只有 state.root」的记录。
+        // 那不表示面板被外部移除（那种情况由上面的 isConnected 检查兜底），不应触发重挂载——
+        // 否则一旦位置判据出问题，就会形成「移动 → 重挂载 → 再移动」的自激循环（P3 加固）。
+        if (record.type === "childList") {
+          const touched = [...record.addedNodes, ...record.removedNodes];
+          if (touched.length > 0 && touched.every((node) => node === state.root)) return false;
+        }
         if (state.dialog && (record.target === state.dialog || state.dialog.contains(record.target))) return false;
         if (state.container && (record.target === state.container || state.container.contains(record.target))) return true;
         if (record.type === "attributes" && record.attributeName === "aria-label") {
@@ -1318,14 +1329,12 @@
 
   window.addEventListener(DATA_EVENT, () => {
     const nextData = window.__ccmTokenSpend || null;
-    const previousKey = state.dataKey;
-    const previousError = state.protocolError;
     adoptData(nextData);
-    const changed = state.dataKey !== previousKey || state.protocolError !== previousError;
-    if (changed) render();
-    else if (state.dialog && state.dialog.__ccmSubtitle) {
-      state.dialog.__ccmSubtitle.textContent = formatSubtitle(state.data);
-    }
+    // 每次数据事件都渲染：内部全部是增量更新（实测 <1ms，最低成本已做 !== 检查）。
+    // 不再用 dataKey 门控 —— 它曾漏掉 sessionTps / lastRequestTps / health 等字段，
+    // 导致「速度或健康状态变化但界面不刷新」（P4）；去掉字段清单依赖后，
+    // 未来新增字段也不会再漏，代价只是空闲时每 5 秒一次的空跑。
+    render();
     if (!state.root || !state.root.isConnected) queueMount();
   });
 
