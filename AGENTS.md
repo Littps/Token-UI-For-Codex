@@ -85,6 +85,11 @@
   用 `node scripts\verify-sync.mjs --deploy "<部署根>" [--zip <包路径>]` 校验，`mismatches` 必须为 0。当前比对 7 个文件：
   `token-stats.mjs`、`tokens-ui-for-codex-panel.js`、`protocol.mjs`、`find-codex.ps1`、`install.ps1`、`install-autostart.ps1`、`uninstall-autostart.ps1`。
 - 写用户脚本、停/起监控进程、注册计划任务都是用户级操作，不需要管理员权限；受限沙箱里可能需要向用户申请文件或进程权限。
+- **发布约定（2026-09-21 起）**：GitHub 只推送 `main` 与**当前版本**的 tag（如 `1.0.0`）。
+  **历史 alpha 版本（`1.0.0-alpha`、`1.0.0-alpha-2`、`1.0.0-alpha-3`）一律不再推送**——
+  不要执行 `git push --tags`，否则会把 alpha 标签连同旧历史一起推到远端。
+  远端仓库已是「单提交 1.0.0」的全新库；旧历史仅保留在本地 `backup/pre-squash-1513c36` 分支与
+  `%LOCALAPPDATA%\tokens-ui-for-codex\backups\repo-recreate-20260921\` 下的 bundle 备份里。
 - 沟通用中文；**不主动 git commit / push**；用户说打包时才打包。
 - **发现问题先报告再修**；不要顺手改用户没要求的部分。
 - 提交/发布前检查是否残留本机敏感信息（真实用户目录、Token、密钥、邮箱、私网地址、带凭据的 URL）。
