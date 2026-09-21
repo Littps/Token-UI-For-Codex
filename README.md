@@ -8,8 +8,8 @@
 
 ## 它长什么样
 
-[UI展示](readme01.png)
-[UI展示](readme02.png)
+![UI展示](readme01.png)
+![UI展示](readme02.png)
 
 统计条固定在**输入区右下、上下文用量圆圈的左侧**，两行显示：
 
