@@ -1,0 +1,44 @@
+name: Build source package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build source package
+        shell: pwsh
+        run: |
+          ./scripts/build-source-package.ps1 -RepoRoot "${{ github.workspace }}" -OutputPath "${{ runner.temp }}/Tokens-UI-For-Codex-Source.zip" -Label "${{ github.run_number }}"
+
+      - name: Audit source package (medium/high must be zero)
+        shell: pwsh
+        run: |
+          $report = node scripts/audit-sensitive-info.mjs --zip "${{ runner.temp }}/Tokens-UI-For-Codex-Source.zip" | ConvertFrom-Json
+          $report.summary | ConvertTo-Json -Compress
+          $bad = @($report.summary | Where-Object { $_.severity -ne 'low' })
+          if ($bad.Count -gt 0) { throw "敏感信息审计未通过：存在中/高危命中" }
+
+      - name: Upload source package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokens-ui-for-codex-source
+          path: ${{ runner.temp }}/Tokens-UI-For-Codex-Source.zip
+          if-no-files-found: error

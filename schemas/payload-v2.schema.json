@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tokens UI For Codex schema v2 payload",
+  "type": "object",
+  "required": [
+    "protocolName",
+    "schemaVersion",
+    "capabilities",
+    "requestCount",
+    "sessionTotal",
+    "contextUsed",
+    "turnTotal",
+    "turnInput",
+    "turnOutput",
+    "currentTurnIndex",
+    "turnTotalCount",
+    "turns",
+    "requestDetails",
+    "requestDetailsTruncated",
+    "requestDetailTotal",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "modelContextWindow": { "type": ["number", "null"], "minimum": 0 },
+    "requestCount": { "type": "number", "minimum": 0 },
+    "sessionTotal": { "type": ["number", "null"], "minimum": 0 },
+    "sessionInput": { "type": ["number", "null"], "minimum": 0 },
+    "sessionCached": { "type": ["number", "null"], "minimum": 0 },
+    "sessionOutput": { "type": ["number", "null"], "minimum": 0 },
+    "sessionCacheHitRate": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "会话缓存命中率，0–1 的比例（页面负责 ×100 显示）；输入为 0 或缓存缺失时为 null"
+    },
+    "sessionTps": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "会话加权平均生成速度（Σ输出 ÷ Σ纯生成耗时，tokens/秒）；无有效耗时数据时为 null"
+    },
+    "contextUsed": { "type": ["number", "null"], "minimum": 0 },
+    "turnTotal": { "type": "number", "minimum": 0 },
+    "turnInput": { "type": "number", "minimum": 0 },
+    "turnCached": { "type": ["number", "null"], "minimum": 0 },
+    "turnOutput": { "type": "number", "minimum": 0 },
+    "turnCacheHitRate": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "当前提问缓存命中率，0–1 的比例；输入为 0 或缓存缺失时为 null"
+    },
+    "lastRequestTps": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "最后一次有耗时数据的请求的生成速度（tokens/秒）：输出 ÷ 纯生成耗时；无数据时为 null"
+    },
+    "turnTps": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "本轮加权平均生成速度（tokens/秒）：Σ本轮输出 ÷ Σ本轮生成耗时；无有效耗时数据时为 null"
+    },
+    "turnsLimit": { "type": "number", "minimum": 0 },
+    "sessionChanged": { "type": "boolean" },
+    "requestsLimit": { "type": "number", "minimum": 0 },
+    "currentTurnIndex": { "type": "number", "minimum": 0 },
+    "turnTotalCount": { "type": "number", "minimum": 0 },
+    "turnsTruncated": { "type": "boolean" },
+    "turns": { "type": "array", "maxItems": 1000 },
+    "requestDetailsTruncated": { "type": "boolean" },
+    "requestDetailTotal": { "type": "number", "minimum": 0 },
+    "requestDetails": { "type": "array", "maxItems": 1000 },
+    "protocolName": { "const": "tokens-ui-for-codex" },
+    "capabilities": { "type": "array", "items": { "type": "string" } },
+    "updatedAt": { "type": "string", "minLength": 1 },
+    "health": {
+      "type": "object",
+      "required": ["status", "recoveryState", "platform", "targetMode", "targetSelection", "targetCount", "installationState"],
+      "properties": {
+        "status": { "type": "string" },
+        "recoveryState": { "type": "string" },
+        "platform": { "const": "windows" },
+        "platformSupported": { "type": "boolean" },
+        "nodeSupported": { "type": "boolean" },
+        "cdpReachable": { "type": "boolean" },
+        "pageAttached": { "type": "boolean" },
+        "targetMode": { "type": "string" },
+        "targetSelection": { "type": "string" },
+        "targetCount": { "type": "integer", "minimum": 0 },
+        "dataFresh": { "type": "boolean" },
+        "lastSuccessAt": { "type": ["string", "null"] },
+        "lastErrorCode": { "type": ["string", "null"] },
+        "lastErrorAt": { "type": ["string", "null"] },
+        "monitorRunning": { "type": "boolean" },
+        "guardianRunning": { "type": ["boolean", "null"] },
+        "autostartInstalled": { "type": ["boolean", "null"] },
+        "installationState": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
