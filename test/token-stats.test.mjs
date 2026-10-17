@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import test, { after } from "node:test";
 
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tokens-ui-test-"));
 process.env.CODEX_HOME = path.join(testRoot, "codex");
@@ -10,9 +12,87 @@ process.env.LOCALAPPDATA = path.join(testRoot, "local");
 process.env.APPDATA = path.join(testRoot, "roaming");
 process.env.TUI_TOKENS_AS_MODULE = "1";
 fs.mkdirSync(process.env.CODEX_HOME, { recursive: true });
+after(() => {
+  try { fs.rmSync(testRoot, { recursive: true, force: true }); } catch {}
+});
 
 const stats = await import("../token-stats.mjs");
 const protocol = await import("../protocol.mjs");
+const speedStats = await import("../speed-stats.mjs");
+
+test("CDP 端口自动发现：解析命令行、去重并过滤非法值", () => {
+  const text = [
+    '"C:\\Program Files\\WindowsApps\\OpenAI.Codex\\ChatGPT.exe" --remote-debugging-port=9229 --remote-allow-origins=http://127.0.0.1:9229',
+    '"ChatGPT.exe" --type=renderer --remote-debugging-port=9229',
+    '"ChatGPT.exe" --remote-debugging-port=9333',
+    '"ChatGPT.exe" --remote-debugging-port=0',
+    '"ChatGPT.exe" --remote-debugging-port=99999',
+    '"ChatGPT.exe" --remote-debugging-port=abc',
+  ].join("\n");
+  assert.deepEqual(stats.parseCdpPortsFromCommandLines(text), [9229, 9333]);
+});
+
+test("CDP 端口自动发现：区分 Codex 未运行与运行但缺少调试参数", () => {
+  const notRunning = stats.parseCodexProcessSnapshot("TUI_CODEX_PROCESS_COUNT=0\n");
+  assert.equal(notRunning.processCount, 0);
+  assert.deepEqual(notRunning.commandLines, []);
+  assert.equal(stats.portDiscoveryRetryMs(notRunning), 5000);
+
+  const noPort = stats.parseCodexProcessSnapshot([
+    "TUI_CODEX_PROCESS_COUNT=1",
+    'TUI_CODEX_COMMAND="ChatGPT.exe" --type=renderer',
+  ].join("\n"));
+  assert.equal(noPort.processCount, 1);
+  assert.deepEqual(stats.parseCdpPortsFromCommandLines(noPort.commandLines.join("\n")), []);
+  assert.equal(stats.portDiscoveryRetryMs(noPort), 30000);
+
+  const withPort = stats.parseCodexProcessSnapshot([
+    "TUI_CODEX_PROCESS_COUNT=1",
+    'TUI_CODEX_COMMAND="ChatGPT.exe" --remote-debugging-port=9333',
+  ].join("\n"));
+  assert.deepEqual(stats.parseCdpPortsFromCommandLines(withPort.commandLines.join("\n")), [9333]);
+  assert.equal(stats.portDiscoveryRetryMs(withPort), 30000);
+});
+
+test("CDP 客户端审计：只统计客户端侧到目标端口的 ESTABLISHED 连接", () => {
+  const text = [
+    "  TCP    127.0.0.1:58623        127.0.0.1:9229         ESTABLISHED     30840",
+    "  TCP    127.0.0.1:9229         127.0.0.1:58623        ESTABLISHED     40896",
+    "  TCP    127.0.0.1:55647        127.0.0.1:9229         ESTABLISHED     30716",
+    "  TCP    127.0.0.1:12345        127.0.0.1:9333         ESTABLISHED     999",
+  ].join("\r\n");
+  const counts = stats.parseEstablishedCdpClients(text, 9229);
+  assert.deepEqual([...counts.entries()].sort((a, b) => a[0] - b[0]), [[30716, 1], [30840, 1]]);
+});
+
+test("实例状态：陈旧 PID 锁会清理，PID 复用不会被误判为监控", async () => {
+  const stateDir = path.join(process.env.LOCALAPPDATA, "tokens-ui-for-codex");
+  const lockFile = path.join(stateDir, "monitor.lock");
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999, startedAt: new Date().toISOString() }), "utf8");
+  const stale = await stats.monitorInstanceState();
+  assert.equal(stale.running, false);
+  assert.equal(stale.reason, "stale-pid");
+  assert.equal(fs.existsSync(lockFile), false);
+
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), "utf8");
+  const reused = await stats.monitorInstanceState();
+  assert.equal(reused.running, false);
+  assert.equal(reused.reason, "pid-reused");
+  assert.equal(fs.existsSync(lockFile), false);
+});
+
+test("自启状态读取兼容 PowerShell 5.1 的 UTF-8 BOM", () => {
+  const stateDir = path.join(process.env.LOCALAPPDATA, "tokens-ui-for-codex");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(stateDir, "autostart-state.json"),
+    "\uFEFF" + JSON.stringify({ stateVersion: 3, installed: true }),
+    "utf8",
+  );
+  assert.equal(stats.environmentSnapshot().autostartInstalled, true);
+});
 
 const threadId = "test-thread";
 const file = path.join(testRoot, "rollout-2026-09-16T12-00-00-" + threadId + ".jsonl");
@@ -209,21 +289,62 @@ test("context window is still detected when only task_started carries it", () =>
   assert.equal(stats.payloadFor(stats.buildStats(parsed)).modelContextWindow, windowSize);
 });
 
-test("payload protocol validates and negotiates schema v2", () => {
+test("payload protocol validates and negotiates signed schema v3", () => {
   const payload = stats.payloadFor(stats.emptyStats(threadId, file));
   assert.equal(payload.protocolName, protocol.PROTOCOL_NAME);
+  assert.equal(payload.schemaVersion, 3);
+  assert.equal(payload.authRequired, true);
   assert.equal(protocol.validatePayload(payload, { allowLegacy: false }).ok, true);
-  assert.equal(protocol.negotiateSchemaVersion([1, 2]), 2);
+  assert.equal(protocol.validatePayload(payload, { allowLegacy: false, requireAuth: true }).ok, false, "未签名模板不能作为最终负载");
+  assert.equal(protocol.negotiateSchemaVersion([1, 2, 3]), 3);
   assert.equal(protocol.negotiateSchemaVersion([1]), null);
   assert.equal(protocol.validatePayload({ ...payload, protocolName: "wrong" }).ok, false);
+  const signed = {
+    ...payload,
+    auth: { v: 1, ts: Date.now(), nonce: "0123456789abcdef", seq: 1, mac: "a".repeat(64) },
+  };
+  assert.equal(protocol.validatePayload(signed, { allowLegacy: false, requireAuth: true }).ok, true);
+  assert.equal(protocol.validatePayload({ ...signed, auth: { ...signed.auth, seq: 0 } }, { allowLegacy: false, requireAuth: true }).ok, false);
 });
 
 test("checked JSON schema documents the same protocol contract", () => {
-  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v2.schema.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v3.schema.json", import.meta.url), "utf8"));
   assert.equal(schema.properties.protocolName.const, protocol.PROTOCOL_NAME);
   assert.equal(schema.properties.schemaVersion.const, protocol.PROTOCOL_SCHEMA_VERSION);
-  assert.equal(schema.properties.requestDetails.maxItems, 1000);
-  assert.equal(schema.properties.turns.maxItems, 1000);
+  assert.equal(schema.properties.authRequired.const, true);
+  assert.ok(schema.required.includes("auth"));
+  assert.ok(schema.required.includes("currentTurnRequestCount"));
+  assert.equal(schema.properties.requestDetails.maxItems, 500);
+  assert.equal(schema.properties.turns.maxItems, 500);
+});
+
+test("协议和 schema 都在 500 条处拒绝超限数组", () => {
+  const payload = stats.payloadFor(stats.emptyStats(threadId, file));
+  const turn = {
+    index: 1,
+    startLabel: "00:00",
+    requests: 1,
+    input: 1,
+    cached: 0,
+    uncached: 1,
+    output: 1,
+    total: 2,
+  };
+  const request = {
+    index: 1,
+    time: "00:00",
+    input: 1,
+    cached: 0,
+    uncached: 1,
+    output: 1,
+    total: 2,
+  };
+  const oversized = {
+    ...payload,
+    turns: Array.from({ length: 501 }, () => ({ ...turn })),
+    requestDetails: Array.from({ length: 501 }, () => ({ ...request })),
+  };
+  assert.equal(protocol.validatePayload(oversized, { allowLegacy: false }).ok, false);
 });
 
 test("automatic target selection prefers the focused Codex window and manual selection is deterministic", async () => {
@@ -688,6 +809,66 @@ test("F1-22 unique 自身重复：同内容 key 无本体时只补录一次", ()
   assert.equal(result.sessionTotal, 300);
 });
 
+test("F1-23 mixed format：现代记录后的 legacy 必须按 thread delta 更新当前轮", () => {
+  const result = fixtureStats([
+    user("2026-09-17T22:30:00.000Z"),
+    turnContext("2026-09-17T22:30:01.000Z", "T-MIX", 1),
+    usage("2026-09-17T22:30:02.000Z", "mix-turn-1", {
+      turnId: "T-MIX", input: 100, output: 20, cached: 40,
+      total: 120, turnTotal: 120, threadTotal: 120,
+      threadInput: 100, threadOutput: 20, threadCached: 40,
+    }),
+    tokenCount("2026-09-17T22:30:03.000Z", {
+      input: 60, output: 40, cached: 20,
+      total: 220, cumulativeInput: 160, cumulativeOutput: 60, cumulativeCached: 80,
+    }),
+  ]);
+  assert.equal(result.requestCount, 2);
+  assert.equal(result.sessionTotal, 220);
+  assert.equal(result.turns.length, 1);
+  assert.equal(result.turns[0].total, 220);
+  assert.equal(result.turns[0].input, 160);
+  assert.equal(result.turns[0].output, 60);
+  assert.equal(result.turns[0].cached, 80);
+});
+
+test("F1-24 legacy 自身去重保留 cached 构成差异并记为真冲突", () => {
+  const result = fixtureStats([
+    tokenCount("2026-09-17T22:31:00.000Z", {
+      input: 90, output: 30, cached: 10,
+      total: 120, cumulativeInput: 90, cumulativeOutput: 30, cumulativeCached: 10,
+    }),
+    tokenCount("2026-09-17T22:31:00.000Z", {
+      input: 90, output: 30, cached: 70,
+      total: 120, cumulativeInput: 90, cumulativeOutput: 30, cumulativeCached: 70,
+    }),
+  ]);
+  assert.equal(result.legacyStats.raw, 2, "cached 不同不能被窄指纹静默合并");
+  assert.equal(result.formatConflictCount, 1, "同 ts 且数值构成不同应进入真冲突计数");
+});
+
+test("快照的当前提问请求数不能复用整个会话请求数", () => {
+  const snapshot = stats.snapshotStatsFrom({
+    sessionTotal: 900,
+    sessionInput: 800,
+    sessionCached: 600,
+    sessionOutput: 100,
+    requestCount: 2111,
+    currentTurnRequestCount: 7,
+    contextUsed: 300,
+    modelContextWindow: 1000,
+    turnTotal: 500,
+    turnInput: 450,
+    turnCached: 300,
+    turnOutput: 50,
+  });
+  const payload = stats.payloadFor(snapshot);
+  assert.equal(payload.requestCount, 2111);
+  assert.equal(payload.currentTurnRequestCount, 7);
+  assert.equal(payload.requestDetailTotal, 7);
+  assert.equal(payload.turns[payload.turns.length - 1].requests, 7);
+});
+
 // ---------------------------------------------------------------------------
 // 会话分片（2026-09-19 实测：宿主在会话文件过大时切分，新文件名追加 _<分段UUID> 后缀）
 // ---------------------------------------------------------------------------
@@ -733,6 +914,39 @@ test("分片：mergeSegments 拼接记录、取最新上下文窗口、汇总冲
   const fallback = stats.mergeSegments([first, { ...second, modelContextWindow: null }]);
   assert.equal(fallback.modelContextWindow, 100000, "最新分片缺失时回退到较早分片的值");
   assert.equal(stats.mergeSegments([null, null]), null, "全为空时返回 null");
+});
+
+test("单次 --thread 命令与 watch 一样合流全部分片", () => {
+  const cliHome = fs.mkdtempSync(path.join(os.tmpdir(), "tokens-ui-cli-shards-"));
+  const sessions = path.join(cliHome, "sessions", "2026", "10", "17");
+  fs.mkdirSync(sessions, { recursive: true });
+  const cliThread = "11111111-2222-4333-8444-555555555555";
+  const first = path.join(sessions, "rollout-2026-10-17T10-00-00-" + cliThread + ".jsonl");
+  const second = path.join(sessions, "rollout-2026-10-17T10-01-00-" + cliThread + "_66666666-7777-4888-8999-aaaaaaaaaaaa.jsonl");
+  fs.writeFileSync(first, [
+    user("2026-10-17T10:00:01.000Z"),
+    usage("2026-10-17T10:00:02.000Z", "cli-r1", { total: 20, turnTotal: 20, threadTotal: 20 }),
+  ].join("\n") + "\n", "utf8");
+  fs.writeFileSync(second, [
+    usage("2026-10-17T10:01:02.000Z", "cli-r2", {
+      turnId: "turn-1", total: 25, turnTotal: 45, threadTotal: 45,
+      threadInput: 35, threadOutput: 10, threadCached: 2,
+    }),
+  ].join("\n") + "\n", "utf8");
+
+  try {
+    const childEnv = { ...process.env, CODEX_HOME: cliHome };
+    delete childEnv.TUI_TOKENS_AS_MODULE;
+    const output = execFileSync(process.execPath, [
+      fileURLToPath(new URL("../token-stats.mjs", import.meta.url)),
+      "--thread",
+      cliThread,
+    ], { encoding: "utf8", env: childEnv, timeout: 15000 });
+    assert.match(output, /请求次数:\s*2/);
+    assert.match(output, /会话累计消耗:\s*45 tokens/);
+  } finally {
+    fs.rmSync(cliHome, { recursive: true, force: true });
+  }
 });
 
 test("停滞两级告警：5 分钟只预警、15 分钟降级、恢复后回到 healthy", () => {
@@ -913,11 +1127,20 @@ test("B-7 回归锁：混排后 currentTurn 指向真实当前轮（原 bug 会�
     user("2026-09-17T13:00:02.000Z"),
     user("2026-09-17T13:00:03.000Z"),
     turnContext("2026-09-17T13:01:00.000Z", "T-A", 10),
-    usage("2026-09-17T13:01:01.000Z", "r1", { turnId: "T-A", total: 100, turnTotal: 100, threadTotal: 100 }),
+    usage("2026-09-17T13:01:01.000Z", "r1", {
+      turnId: "T-A", input: 90, output: 10, cached: 20,
+      total: 100, turnTotal: 100, threadTotal: 100,
+      threadInput: 90, threadOutput: 10, threadCached: 20,
+    }),
     turnContext("2026-09-17T13:02:00.000Z", "T-B", 20),
-    usage("2026-09-17T13:02:01.000Z", "r2", { turnId: "T-B", total: 200, turnTotal: 200, threadTotal: 300 }),
+    usage("2026-09-17T13:02:01.000Z", "r2", {
+      turnId: "T-B", input: 190, output: 10, cached: 100,
+      total: 200, turnTotal: 200, threadTotal: 300,
+      threadInput: 280, threadOutput: 20, threadCached: 120,
+    }),
     tokenCount("2026-09-17T13:02:30.000Z", {
-      total: 320, cumulativeInput: 300, cumulativeOutput: 20, cumulativeCached: 120,
+      input: 10, output: 10, cached: 0,
+      total: 320, cumulativeInput: 290, cumulativeOutput: 30, cumulativeCached: 120,
     }),
   ]);
   const result = readStats();
@@ -925,8 +1148,11 @@ test("B-7 回归锁：混排后 currentTurn 指向真实当前轮（原 bug 会�
   assert.equal(result.turns.length, 2, "原实现会因用户消息序号而多出填充轮");
   assert.equal(payload.turnTotalCount, 2);
   assert.equal(payload.currentTurnIndex, 2, "当前轮 = 真实第 2 轮");
-  assert.equal(payload.turnTotal, 200, "当前轮数字来自 T-B 的轮累计");
-  assert.equal(payload.turnInput, 10, "当前轮输入不为 0");
+  // 推导：T-B 起点 thread total=100；现代 r2 后 thread total=300，legacy 320。
+  // 220 = 320 - 100，是 T-B 的真实当前轮累计；不能继续停在现代的 200。
+  assert.equal(payload.turnTotal, 220, "legacy 补录必须更新当前轮，而不是只增加请求数");
+  assert.equal(payload.turnInput, 200, "当前轮输入 = 290 - 90");
+  assert.equal(payload.turnOutput, 20, "当前轮输出 = 30 - 10");
   assert.equal(result.turns[1].requestCount, 2);
 });
 
@@ -959,4 +1185,184 @@ test("B-8 本轮平均速度：Σ本轮输出 ÷ Σ本轮生成耗时（与 last
   assert.equal(payload.turnTps, 75, "本轮平均 = (100 + 200) / ((1000 + 3000) / 1000)");
   assert.equal(payload.lastRequestTps, 200 / (3000 / 1000), "单条口径仍是最后一条请求的速度");
   assert.equal(payload.turnTotalCount, 1);
+});
+
+test("TPS-1 生成区间并集重叠只计算一次，工具间隔不进入并集", () => {
+  assert.equal(
+    speedStats.unionDurationMs([[1000, 5000], [3000, 7000], [8000, 9000]]),
+    7000,
+  );
+  assert.equal(speedStats.unionDurationMs([[1000, 2000], [2000, 3000]]), 2000);
+  assert.equal(speedStats.unionDurationMs([]), 0);
+});
+
+test("TPS-2 稳健估算抑制单条尖峰，并覆盖常见速度区间", () => {
+  const sample = (tps, index) => ({
+    output: Math.max(16, Math.round(tps * 2)),
+    genMs: 2000,
+    model: "model-a",
+    timingSource: "record",
+    index,
+  });
+  for (const [base, expected] of [[12, 12], [60, 60], [220, 220], [900, 900], [1300, 1300]]) {
+    const values = [base - 2, base - 1, base, base + 1, base + 2].map(sample);
+    const result = speedStats.robustSpeedSummary(values);
+    assert.ok(Math.abs(result.tps - expected) <= 1, `${base} 区间结果异常: ${result.tps}`);
+    assert.ok(["medium", "high"].includes(result.confidence));
+  }
+
+  const outlier = speedStats.robustSpeedSummary([
+    sample(100, 0), sample(120, 1), sample(130, 2), sample(110, 3), sample(2351, 4),
+  ]);
+  assert.ok(outlier.tps >= 100 && outlier.tps <= 130, "单条 2351 T/s 尖峰不应主导中位数");
+  assert.ok(outlier.outlierCount >= 1, "离群样本应被标记");
+});
+
+test("TPS-3 连续 3 个窄分布高速样本允许进入新速度区间", () => {
+  const sample = (tps, index) => ({
+    output: Math.max(16, Math.round(tps * 2)),
+    genMs: 2000,
+    model: "model-b",
+    timingSource: "item",
+    index,
+  });
+  const result = speedStats.robustSpeedSummary([
+    sample(100, 0), sample(105, 1), sample(95, 2), sample(100, 3),
+    sample(900, 4), sample(930, 5), sample(920, 6),
+  ]);
+  assert.ok(result.tps >= 900 && result.tps <= 930, "连续高速区间应被接受");
+});
+
+test("TPS-4 buildStats 使用稳健 compactTps，并保留墙钟速度字段", () => {
+  const samples = [
+    [1000, 100], [1000, 120], [1000, 130], [1000, 110], [1390, 3269], [1000, 150],
+  ];
+  let cumulative = 0;
+  let cumulativeOutput = 0;
+  const usageRecords = samples.map(([genMs, output], index) => {
+    cumulative += output;
+    cumulativeOutput += output;
+    return {
+      ts: new Date(Date.parse("2026-09-17T15:00:00.000Z") + index * 1000).toISOString(),
+      ordinal: index + 2,
+      genMs,
+      turnId: "T-ROBUST",
+      responseId: "robust-" + index,
+      model: "model-a",
+      input: output,
+      output,
+      cached: 0,
+      total: output * 2,
+      turnUsage: { input: output, output, cached: 0, total: cumulative },
+      threadUsage: { input: cumulative, output: cumulativeOutput, cached: 0, total: cumulative + cumulativeOutput },
+    };
+  });
+  const parsed = {
+    file,
+    threadId,
+    date: "2026-09-17T15-00-00",
+    modelContextWindow: 1000000,
+    userMessages: [],
+    turnContexts: [{ ts: "2026-09-17T15:00:00.000Z", ordinal: 1, turnId: "T-ROBUST" }],
+    counts: [],
+    usageRecords,
+    taskCompletions: [{
+      turnId: "T-ROBUST",
+      ts: "2026-09-17T15:01:00.000Z",
+      durationMs: 60000,
+      ttftMs: 1000,
+      startedAt: null,
+      completedAt: null,
+    }],
+    modelChanges: [],
+    formatConflicts: 0,
+  };
+  const result = stats.buildStats(parsed);
+  const payload = stats.payloadFor(result);
+  assert.ok(payload.compactTps >= 100 && payload.compactTps <= 130, "compactTps 不应被单条尖峰主导");
+  assert.ok(payload.compactSpeedSampleCount >= 3);
+  assert.equal(payload.compactSpeedWindow, 5);
+  assert.ok(payload.turnWallTps > 0, "墙钟速度应存在");
+  assert.ok(payload.turnWallTps < payload.compactTps, "墙钟速度应低于生成估算");
+});
+
+test("TPS-5 少于 3 个有效样本时 compactTps 为 null，不显示单条尖峰", () => {
+  const parsed = {
+    file,
+    threadId,
+    date: "2026-09-17T15-10-00",
+    modelContextWindow: 1000000,
+    userMessages: [],
+    turnContexts: [{ ts: "2026-09-17T15:10:00.000Z", ordinal: 1, turnId: "T-ONE" }],
+    counts: [],
+    usageRecords: [{
+      ts: "2026-09-17T15:10:01.000Z", ordinal: 2, genMs: 1390, turnId: "T-ONE",
+      responseId: "one", model: "model-a", input: 1000, output: 3269, cached: 0, total: 4269,
+      turnUsage: { input: 1000, output: 3269, cached: 0, total: 4269 },
+      threadUsage: { input: 1000, output: 3269, cached: 0, total: 4269 },
+    }],
+    modelChanges: [],
+    formatConflicts: 0,
+  };
+  const payload = stats.payloadFor(stats.buildStats(parsed));
+  assert.equal(payload.compactTps, null);
+  assert.equal(payload.compactSpeedSampleCount, 1);
+  assert.equal(payload.compactSpeedConfidence, "low");
+});
+
+test("速度估算与有效速度：使用 item_completed 时间窗并剥离工具耗时", () => {
+  writeLines([
+    turnContext("2026-09-17T14:10:00.000Z", "T-SPEED", 1),
+    usage("2026-09-17T14:10:01.000Z", "speed-r1", {
+      input: 10,
+      output: 300,
+      cached: 2,
+      total: 310,
+      turnId: "T-SPEED",
+      turnTotal: 310,
+      threadTotal: 310,
+    }),
+    event("2026-09-17T14:10:20.000Z", "event_msg", {
+      type: "item_completed",
+      turn_id: "T-SPEED",
+      item: { type: "Reasoning", id: "reasoning-1" },
+      started_at_ms: 1000,
+      completed_at_ms: 11000,
+    }),
+    event("2026-09-17T14:10:21.000Z", "event_msg", {
+      type: "item_completed",
+      turn_id: "T-SPEED",
+      item: { type: "AgentMessage", id: "message-1" },
+      started_at_ms: 11000,
+      completed_at_ms: 19000,
+    }),
+    event("2026-09-17T14:10:22.000Z", "event_msg", {
+      type: "item_completed",
+      turn_id: "T-SPEED",
+      item: { type: "CommandExecution", id: "tool-1" },
+      started_at_ms: 19000,
+      completed_at_ms: 20000,
+    }),
+    event("2026-09-17T14:10:23.000Z", "event_msg", {
+      type: "task_complete",
+      turn_id: "T-SPEED",
+      duration_ms: 20000,
+      time_to_first_token_ms: 500,
+      started_at: 1,
+      completed_at: 21,
+    }),
+  ]);
+  const result = readStats();
+  assert.equal(Number(result.genEstimateTps.toFixed(2)), 16.67);
+  assert.equal(Number(result.effectiveTps.toFixed(2)), 15.79);
+  assert.equal(Number(result.turnEffectiveTps.toFixed(2)), 15.79);
+  assert.equal(result.effectiveSampleCount, 1);
+  assert.equal(result.effectiveWindow, 25);
+  assert.equal(result.speedTimingConfidence, "high");
+  const payload = stats.payloadFor(result);
+  assert.equal(Number(payload.genEstimateTps.toFixed(2)), 16.67);
+  assert.equal(Number(payload.effectiveTps.toFixed(2)), 15.79);
+  assert.equal(payload.effectiveSampleCount, 1);
+  assert.equal(payload.effectiveWindow, 25);
+  assert.equal(payload.speedTimingConfidence, "high");
 });

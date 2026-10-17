@@ -1,200 +1,247 @@
-# F1 规格：混合日志格式的统计合并
+# 混合日志格式统计规格
 
-本文件是**统计口径的唯一权威**。`token-stats.mjs` 的实现、`test/token-stats.test.mjs` 的期望值
-与 `scripts/check-request-count.mjs` 的真值对照都必须与本文件一致；改实现前先改这里。
+本文件是当前统计口径的权威规格。实现、测试与真实会话核对都必须与本文件一致。
 
-## 0. 事件格式（两代并存）
+## 1. 两代事件
 
-会话日志里存在两代事件格式，同一会话可能同时出现（Codex 引擎升级或回退）：
-
-| 类别 | 事件 | 逐请求量 | 累计量 |
+| 类型 | 事件 | 逐请求 | 累计 |
 | --- | --- | --- | --- |
-| **A 类（legacy）** | `event_msg` / `payload.type = token_count` | `payload.info.last_token_usage` | `payload.info.total_token_usage`、`payload.info.model_context_window` |
-| **B 类（new）** | `token_usage_record` | `payload.usage` | `payload.thread_token_usage`（线程）、`payload.turn_token_usage`（轮次） |
+| legacy | `event_msg / token_count` | `info.last_token_usage` | `info.total_token_usage` |
+| modern | `token_usage_record` | `payload.usage` | `thread_token_usage` + `turn_token_usage` |
 
-**契约**：两代必须**统一合并**，不允许"只要出现任一 B 类记录就整体丢弃 A 类"。
+两代可同时存在于同一会话，必须统一合并。
 
-## 1. 规则
+## 2. 时间与稳定顺序
 
-**R1 时间轴统一**：A、B 两类事件按 `timestamp` 稳定排序；同一时间戳时 A 在前、B 在后。
-乱序不丢数据（排序消除顺序影响）。
+- 统一按 `timestamp` 排序
+- 同 timestamp 时 legacy 在前、modern 在后
+- 同来源同 timestamp 使用 `ordinal`
+- 跨分片合并后仍使用 `(timestamp, ordinal)` 全序
 
-**R2 累计链（接续 / 重启）**：去重后按时间序扫描累计值，维护一条统一累计链：
+## 3. 累计链
 
-- 累计值**上升** → 视为接续，只把增量（`v - 上一次值`）计入总量；
-- 累计值**下降** → 视为重启，把新基线整体计入总量，并记一次 reset 事件（线程与轮次各自计数）。
+累计值使用 reset-aware normalizer：
 
-**禁止任何"累计必然单调递增"的假设**（上下文压缩、会话重置都会让累计下降）。
+- 上升：接续
+- 下降：视为 reset，新基线整体纳入
+- 禁止单调递增假设
+- thread counter 与 turn counter 分别维护 reset 事件
 
-**R3 分类（一对一认领；时间不参与身份判定）**：
+## 4. 跨格式身份
 
-- 内容 key = `线程累计 | 本轮量`
-  （A：`info.total_token_usage.total_tokens` + `info.last_token_usage.total_tokens`；
-  B：`thread_token_usage.total_tokens` + `usage.total_tokens`）
-- A 类先按 `ts|total|lastTotal` 指纹去重（legacy 自身重复），再逐条按时间序认领新格式本体
-- 新格式是权威流：B 类自身按 `response_id`（无 id 时 `ts|total|turn_id`）与内容 key 去重
+内容 key：
 
-### 1.1 一对一认领表（每条 legacy 记录只落入一条）
+```text
+thread_total | request_total
+```
 
-| # | 判定 | 处理 | requestCount | sessionTotal |
-| --- | --- | --- | --- | --- |
-| 1 | 同内容 key 且**尚未被认领**的本体存在 → **echo** | 认领该本体（本体只能被认领一次；多具时取时间最近的一具），计入 `echoStats` | +0 | +0 |
-| 2 | 同内容 key 的本体存在但**都已被认领** → **replay** | 计入 `replayStats`（不再算请求） | +0 | +0 |
-| 3 | 新格式里**没有该 key** → **unique** | 作为独立请求补录 | +1 | 走累计链（R2） |
-| 3b | unique 且该 key 已在 unique 桶出现过 → **自身重复** | 计入 `uniqueStats.selfDuplicate` | +0 | +0 |
-| 4 | 同 `response_id` 或同内容 key（同格式内重复） | 去重，原样不变 | +0 | +0 |
+时间不参与身份判断。时间只用于：
 
-**相加只能来自「累计下降 + 新 key」**；上升场景出现相加即为缺陷。
+- 在多个候选本体中选择最近的一条
+- 记录 echo lag
+- 记录 replay lag
 
-**结构不变量**：`echoStats.total = 被认领的本体数`；
-`echo + replay + unique = legacy 去重后总数`；
-`legacy 去重后 + 自身重复 = legacy 指纹去重后条数`。
+## 5. legacy 去重
 
-**R4 会话总量**：取累计链终值，它等于逐请求 `total` 的前缀和（与实机核对口径一致）。
-逐请求只累加 `input` / `output` / `cached`。
+legacy 自身去重指纹包含：
 
-**R5 轮次归属**：轮次列表以 `turn_context` 事件为**权威来源** —— 宿主逐轮写出该事件并携带 `turn_id`，
-实测覆盖到日志开头，且是记录里 `turn_id` 的超集（还包含"没有任何用量记录的空轮"）。
+```text
+timestamp
+total
+lastTotal
+input
+output
+cached
+cumulative input
+cumulative output
+cumulative cached
+```
 
-- 有 `turn_id` 的记录精确匹配到该轮；
-- 无 `turn_id` 的 legacy 记录按「开始时间 ≤ 记录时间」落到所属轮；
-- 仅当整份日志**没有** `turn_context` 时，才退回 `user_message` 时间分界；两者都没有时退化为单轮。
+原因：
 
-**禁止**把「有 `turn_id` 就新建轮」与「无 `turn_id` 就按用户消息序号取数组下标」两套规则并行写进同一个
-轮次数组（会产生填充空轮，并让 `currentTurn = turns.at(-1)` 指向空轮 → 面板当前轮恒为 0）。
+只用 `timestamp|total|lastTotal` 会把同 timestamp、同总量、但缓存构成不同的真实事件静默合并。
 
-排序键统一为 `(ts, ordinal)`：`ordinal` 是宿主写出的全局事件序号，跨分片合并后仍是全序。
+## 6. 一对一认领
 
-**R6 可观测（回声 / 重放 / 补录分开）**：
+每条 legacy 只进入一类：
 
-- `echoStats = { total, lagMaxMs, overThreshold, thresholdMs, topLag }`：**回声（正常现象）**，用于健康度。
-  阈值 `thresholdMs = ECHO_LAG_THRESHOLD_MS`（60 秒）；统计范围**按会话**（每次 `buildStats` 从会话日志重算，
-  不按监控进程累计）。`topLag` = 滞后最大的前 3 条时间戳；**只在 `overThreshold > 0` 时打一行日志**并附 top-3。
-- `replayStats = { count, lagMaxMs }`：**重放陈旧度**（本体已被更早的 legacy 认领），**不混进 echoStats**。
-- `uniqueStats = { count, selfDuplicate }`：无本体补录数（净计数）与自身重复数。
-- `legacyStats = { raw, deduped, claimedModern }`：结构不变量核对用。
-- `formatConflictCount`：**真冲突** —— 同 `response_id` 但数值不同，或同 `ts` 但数值不同。**非 0 即报警**。
-
-**R7 截断 / 半行 / 重建**：沿用 `IncrementalRolloutParser` 语义（偏移 + 半行缓存 + 文件指纹）；
-文件被截断或重建时按新基线重新统计，不沿用旧值。
-
-**R8 上限与按需窗口**：
-
-- 请求明细：每个轮对象最多保留最近 **500** 条；各轮摘要最多保留最近 **500** 轮。
-- 推送窗口（页面 → 监控）：弹层关闭 = 5 轮 / 0 条明细；打开 = 25 轮 / 10 条明细；
-  「加载更多」每次 +50 轮 / +20 条。超出窗口的数据**不进入负载**。
-- 上限由监控通过 `turnsLimit` / `requestsLimit` 下发给页面；页面据此禁用"加载更多"并显示"已达上限"。
-
-## 2. Fixture 矩阵
-
-每条 fixture 断言 `requestCount` 与 `sessionTotal`（部分另外断言 `cumulativeResetCount` / `formatConflictCount`）。
-
-| # | 场景 | 输入要点 | 期望 |
+| 分类 | 条件 | 请求数 | 总量 |
 | --- | --- | --- | --- |
-| 1 | legacy-only | token_count 累计 100 → 300 → 600 | 3 次请求，sessionTotal=600，reset=0 |
-| 2 | new-only | usage_record 线程累计 120 → 300 → 600 | 3 次请求，sessionTotal=600，reset=0 |
-| 3 | 旧 → 新（升版） | 旧 1,000,000 后新 50 | 2 次请求，sessionTotal=1,000,050（下降 → 重启累加） |
-| 4 | 新 → 旧（回退） | 新 600 后旧 1,000,000 | 2 次请求，sessionTotal=1,000,000（全程上升 → 不累加） |
-| 5 | 混合 + 压缩重置 | 600 → 60 → 260 | sessionTotal=860，reset=2（线程累计与轮次累计各记一次） |
-| 6 | 混合 + 尾部截断 | 文件重建后仅 50 | sessionTotal=50，reset=0 |
-| 7 | 乱序 | 新在后但时间戳在前 | 与顺序无关，数值与顺序无关 |
-| 8 | 重复事件（真正测重复） | `M(r1,120)×2 + L(120)×2 + M(r2,170,50)` | 2 次请求；sessionTotal=170；reset=0 |
-| 9A | 同时间戳、500 的 key 全新 | A=1000、B=500 | 2 次请求，sessionTotal=1500（下降 → 累加），reset=1 |
-| 9B | 同时间戳、500 的 key 已出现 | 早前已有 500，再出现 A=1000、B=500 | 2 次请求，sessionTotal=1000（上升 → 不累加），reset=0 |
-| 10 | 标准双写 | 同内容 120 的两条事件 | 1 次请求，sessionTotal=120 |
-| 11 | 双写 + 压缩 | 双写 600 → 双写 60 | 2 次请求，sessionTotal=660，reset=2 |
-| 12 | 双写 + 尾部截断 | 截断重建后只剩 60 的双写 | 1 次请求，sessionTotal=60 |
-| 13 | 错峰回声 | 同内容 120、时间差 12s | 1 次请求，sessionTotal=120；`echoStats.total=1`、`overThreshold=0`、真冲突=0 |
-| 14 | legacy 落后一拍的 echo + replay | R 600/1200/1800；C(600)、C(600)、C(1200)、C(1200) | 3 次请求，sessionTotal=1800；echo=2、replay=2 |
-| 15 | 双写段 → 单格式段衔接 | 双写 600、1200 → 仅 legacy 1800 | 3 次请求，sessionTotal=1800 |
-| 16 | 双写中途升降版 | 双写 600 → 仅 legacy 1200/1800 → 双写 2400 → 仅新格式 3000 | 5 次请求，sessionTotal=3000 |
-| 17 | 降版重启 | 新格式 600 → legacy 50（下降 + 新 key） | 2 次请求，sessionTotal=650，reset=1 |
-| 18 | 超阈值回声 | 同内容 120、时间差 90s | 1 次请求，sessionTotal=120；overThreshold=1，top-3 记录回声时间戳 |
-| 19 | 双写段内 legacy-only | 双写 600、1200 之间插入 legacy 900（新 key） | 3 次请求，sessionTotal=1200 |
-| 20 | 真冲突（同 id 不同值） | 同 response_id、线程累计 120 与 200 | 1 次请求，sessionTotal=120，formatConflictCount=1 |
-| 21 | 一对一认领 | M(`100\|100`)、M(`200\|200`)；L(`100\|100`)×2、L(`300\|300`) | 3 次请求，sessionTotal=300；echo=1、replay=1、unique=1；claimedModern=echo |
-| 22 | unique 自身重复 | M(`100\|100`)；L(`300\|300`)×2（时间戳不同） | 2 次请求，sessionTotal=300；unique=1、selfDuplicate=1 |
+| echo | 同内容 key 且存在未认领 modern 本体 | +0 | +0 |
+| replay | 同 key 的本体已经全部被认领 | +0 | +0 |
+| unique | modern 中没有该 key | +1 | 按累计链 |
+| selfDuplicate | unique key 已在该桶出现 | +0 | +0 |
 
-## 3. 轮次归属 fixture（B-1 .. B-8）
+结构不变量：
 
-除 F1-1..22 的口径断言外，`test/token-stats.test.mjs` 另有 8 条**轮次归属 / 速度**用例。
-其中 B-1 / B-3 / B-6 / B-7 在旧实现下**失败**，用来锁住"填充空轮导致 currentTurn 指向空轮"这个缺陷。
+```text
+echoStats.total = claimedModern
+echo + replay + unique = legacyDeduped
+legacyDeduped + selfDuplicate = legacyRawAfterFingerprint
+requestCount = modernUnique + uniqueStats.count
+```
 
-| # | 场景 | 期望 |
+## 7. 真冲突
+
+`formatConflictCount` 只在以下情况增加：
+
+- 同 `response_id` 但数值不同
+- 同 timestamp 但完整数值构成不同
+
+非 0 即报警。
+
+## 8. 轮次归属
+
+`turn_context` 是权威来源：
+
+- 有 `turn_id` 精确归属
+- 无 `turn_id` 的 legacy 按开始时间窗归属
+- 没有 `turn_context` 才使用 `user_message` 分界
+- 都没有时退化为单轮
+
+禁止：
+
+- 同时使用“turn_id 建轮”和“用户消息下标建轮”
+- 创建无语义填充轮
+- 让 `currentTurn` 指向空轮
+
+## 9. 混合格式当前轮
+
+每轮维护 `threadBase`：
+
+```text
+threadBase = 第一条记录的 normalized thread cumulative - 该请求量
+```
+
+一轮出现 modern `turn_token_usage` 后：
+
+- modern 值作为本轮累计
+- 后续 legacy 没有 turnUsage 时使用：
+
+```text
+currentTurnValue = normalized thread cumulative - threadBase
+```
+
+禁止只增加 requestCount 而不更新当前轮。
+
+## 10. 会话总量与上下文
+
+- sessionTotal = 累计链终值
+- 逐请求只累加 input / output / cached
+- contextUsed = 最后一次请求 total，并受 modelContextWindow 上限约束
+- 上下文压缩不会直接制造 session reset
+
+## 11. 速度
+
+紧凑条估算：
+
+```text
+最近有效请求样本的稳健中位数
+```
+
+- 生成区间先合并为并集，重叠部分不重复计时
+- 最多使用最近 5 个有效请求样本
+- 用中位数和 MAD 抑制单条尖峰
+- 少于 3 个有效样本时 `compactTps=null`，页面显示 `--T/s`
+- 连续 3 个窄分布高速/低速样本可接受为新的速度区间
+
+有效速度：
+
+```text
+output / (turn_duration - tool_duration)
+```
+
+- 会话有效速度取最近 25 个高/中置信度轮次
+- 按输出和耗时加权
+- `turnWallTps` = 当前轮 output ÷ 整轮墙钟耗时
+- 墙钟速度不使用 input/cached/context 总量
+- output tokens 已包含 reasoning，不重复添加
+- 无可靠计时显示 `-- Tokens/s`
+
+协议新增可选字段：
+
+- `compactTps`
+- `compactSpeedSampleCount`
+- `compactSpeedWindow`
+- `compactSpeedConfidence`
+- `turnWallTps`
+
+旧字段 `genEstimateTps`、`lastRequestTps`、`turnTps` 保留用于兼容。
+
+## 12. 分片
+
+- 同一 thread 的所有 rollout 文件归组
+- 文件按时间和名称稳定排序
+- 解析后合并事件再统计
+- 分片重叠内容由统一身份规则去重
+- watch 与 `--thread` 单次命令走同一合流路径
+
+## 13. 推送窗口
+
+- 关闭：5 轮 / 0 明细
+- 打开：10 轮 / 10 明细
+- 请求加载更多：+20
+- 轮次加载更多：+50
+- 上限：各 500
+- 未展示内容不进 payload
+- 超过 500 的完整结构化请求与轮次摘要写入本地历史，保留 60 天；不通过 CDP 下发
+
+## 14. 测试矩阵
+
+### 混合格式
+
+| # | 场景 | 核心断言 |
 | --- | --- | --- |
-| B-1 | 3 个 `turn_context` + 各 1 条新格式记录 | 轮数=3；当前轮序号=3；轮开始时间取自 `turn_context` |
-| B-2 | 同轮双写（现代 + legacy 同值配对） | 轮数=1；requestCount=1（回声不计）；该轮只收一条记录 |
-| B-3 | legacy 记录时间落在第 2 轮内（且存在 3 条用户消息） | 轮数=2；legacy 归入第 2 轮 |
-| B-4 | 无 `turn_context`、仅有 `user_message` | 退回分界：轮数 = 用户消息数 |
-| B-5 | 完全没有轮次线索 | 单轮 |
-| B-6 | 分片合并两个 `turn_context` | 轮数=2；轮开始时间分别来自两段 |
-| B-7 | 混排后检查 `currentTurn` | 当前轮序号=2；`turnTotal` 来自真实当前轮 |
-| B-8 | 本轮平均速度 | Σ 本轮输出 ÷ Σ 本轮生成耗时（与 `lastRequestTps` 单条口径并列，互不覆盖） |
+| F1-1 | legacy-only | 请求数、sessionTotal |
+| F1-2 | modern-only | 与 legacy 口径一致 |
+| F1-3 | 旧 → 新 | 总数接续 |
+| F1-4 | 新 → 旧 | 不双计 |
+| F1-5 | 混合 + 压缩 | reset 数正确 |
+| F1-6 | 混合 + 截断 | 使用新基线 |
+| F1-7 | 乱序 | 结果与事件顺序无关 |
+| F1-8 | 重复事件 | 请求不翻倍 |
+| F1-9A/B | 同 timestamp 新旧 key | 下降新 key/上升旧 key 区分 |
+| F1-10 | 标准双写 | 只算一次 |
+| F1-11 | 双写 + 压缩 | 只算一次并记 reset |
+| F1-12 | 双写 + 截断 | 按新基线 |
+| F1-13 | 错峰回声 | echo，不算请求 |
+| F1-14 | legacy 落后一拍 | echo/replay 分列 |
+| F1-15 | 双写段 → 单格式段 | 衔接正确 |
+| F1-16 | 双写中途升降版 | 全程不重复 |
+| F1-17 | 降版重启 | 下降 + 新 key |
+| F1-18 | 超阈值回声 | 只影响健康统计 |
+| F1-19 | 双写段 legacy-only | unique 补录 |
+| F1-20 | 同 response_id 冲突 | conflict=1 |
+| F1-21 | 一对一认领 | claimedModern=echo |
+| F1-22 | unique 自身重复 | selfDuplicate |
+| F1-23 | 混合格式当前轮 | thread delta 更新 total/input/output/cached |
+| F1-24 | legacy cached 构成差异 | 不静默合并，conflict=1 |
 
-## 4. F1-8 收口（已定稿）
+### 轮次与快照
 
-早期 F1-8 期望 170（把 50 与 120 相加），与 F1-4 / F1-9B 的"上升 = 接续"冲突。定为"真正测重复"的用例：
-
-- 输入：`M(r1,120) ×2 + L(120) ×2 + M(r2,170,50)`
-- 期望：`requestCount=2`、`sessionTotal=170`、`reset=0`
-- 推导：重复的新格式记录按 `response_id` 去重；legacy 120 与 r1 内容 key 相同 → 回声丢弃；
-  r1 累计 120 → r2 累计 170 是上升 = 接续，总量就是 170，**不是 50 + 120 相加**。
-
-## 5. 真值对照（只读实测）
-
-对照脚本：`scripts/check-request-count.mjs`（本实现侧）。在一份真实会话文件
-（modern 1135 / legacy 1292）上逐项比对：
-
-| 指标 | 参考值 | 本实现 | 一致 |
-| --- | --- | --- | --- |
-| echo | 1134 | 1134 | ✅ |
-| replay | 152 | 152 | ✅ |
-| unique（未剔自身重复） | 6 | 6（净 5 + selfDuplicate 1） | ✅ |
-| 配对数 / 未配对 | 1134 / 158 | claimedModern 1134；未认领入账 158 | ✅ |
-| 回声滞后 >60s | 6 | 6 | ✅ |
-| 回声最大滞后 | 2,752,991 ms | `echoStats.lagMaxMs` 相同 | ✅ |
-| 重放最大陈旧度 | 3,863,172 ms | `replayStats.lagMaxMs` 相同 | ✅ |
-
-改用一对一认领后，滞后 >60s 的回声由"允许复用"口径的 56 条降到 **6 条**，
-`overThreshold / echoStats.total = 6 / 1134 = 0.53% ≤ 1%`。
-
-### 5.1 6 条 unique（净 5）的实证
-
-逐条检查发现：每条 unique 的**线程累计**都能在新格式里找到同值记录（后者早约 13ms 写入），
-只是"本轮量"不同（legacy 记增量口径，新格式记含重发上下文的口径）。
-
-结论：这 5 条净 unique 按规格计入 `requestCount`（+5），但**不把它们的本轮量再加进总量** ——
-它们对应的线程累计点已由新格式本体计入累计链，再加会双计。
-
-## 6. 验收
-
-1. 单元测试逐条断言上表数值（`test/token-stats.test.mjs`）。
-2. 实机断言"页面数字 == payload 真值"（`test/live-ui.playwright.test.mjs`）。
-3. 改前 / 改后同一真实会话数值对照（`scripts/check-request-count.mjs`，只读）。
-4. 副本哈希对照（源码 / 部署 / 插件 cache / Codex++ 用户脚本 / 打包 zip）：
-   `node scripts/verify-sync.mjs --deploy "<部署根>" --zip "<包路径>"`，必须 `mismatches: 0`。
-
-**验收口径**（会话级，全部必须成立）：
-
-- 结构：`echoStats.total = legacyStats.claimedModern`（一对一认领，本体只被认领一次）
-- 结构：`echoStats.total + replayStats.count + uniqueStats.count = legacyStats.deduped`
-- 结构：`legacyStats.deduped + uniqueStats.selfDuplicate = legacyStats.raw`
-- 结构：`requestCount = modern 去重数 + uniqueStats.count`
-- 结构：`sessionTotal = 逐请求 total 前缀和`，偏差 **0**
-- `formatConflictCount`（真冲突）**= 0**
-- 比例：`echoStats.overThreshold / echoStats.total ≤ 1%`
-- `lagMaxMs` 只作观测，不设固定上限（随会话长度自然增长）
-
-### 6.1 实机核对快照（只读）
-
-| 指标 | 数值 | 判定 |
+| # | 场景 | 核心断言 |
 | --- | --- | --- |
-| 原始事件 | `token_usage_record` 1135 条、`token_count` 1292 条 | — |
-| echo / replay / unique | 1134 / 152 / 5（原始 unique 6，含 1 次自身重复） | 与参考脚本逐项一致 |
-| `legacyStats` | raw 1292、deduped 1291、claimedModern 1134 | 三条结构不变量成立 |
-| `requestCount` | **1140** = 新格式 1135 + unique 5 | 符合"modern 去重 + 净 unique 补录" |
-| `sessionTotal` | 358,219,402 | = 新格式线程累计终值 = 逐请求 total 前缀和（偏差 0） |
-| `echoStats` | total 1134、overThreshold 6、lagMaxMs 2,752,991、thresholdMs 60000 | 比例 0.53% ≤ 1% ✅ |
-| `replayStats` | count 152、lagMaxMs 3,863,172 | 与参考口径最大滞后一致 |
-| `formatConflictCount` | 0 | ✅ |
-| `cumulativeResetCount` | 0 | 该会话未发生累计重置 |
+| B-1 | turn_context 权威 | 当前轮正确 |
+| B-2 | 同轮双写 | 只收一条 |
+| B-3 | legacy 时间窗归属 | 不填充空轮 |
+| B-4 | 仅 user_message | 旧日志回退 |
+| B-5 | 无线索 | 单轮 |
+| B-6 | 跨分片 turn_context | 合并正确 |
+| B-7 | 混排当前轮 | currentTurn、total、input、output |
+| B-8 | 本轮平均速度 | Σoutput ÷ Σgeneration time |
+| S-1 | 快照当前请求数 | 不用 session requestCount 冒充 |
+
+## 15. 验收
+
+```powershell
+npm test
+node scripts\golden-baseline.mjs --check
+node scripts\verify-live.mjs
+```
+
+交付前还必须有：
+
+- 真实会话改前/改后对照
+- schema v3 验签通过
+- 页面/监控数值一致
+- 源、部署、cache、用户脚本 `mismatches: 0`

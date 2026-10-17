@@ -117,10 +117,11 @@ const report = {};
 
 // ---- F4：schema 三份实现 ----
 {
-  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v2.schema.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v3.schema.json", import.meta.url), "utf8"));
   const required = schema.required || [];
   const alwaysProduced = [
-    "protocolName", "schemaVersion", "capabilities", "modelContextWindow", "requestCount",
+    "protocolName", "schemaVersion", "authRequired", "auth", "capabilities", "modelContextWindow", "requestCount",
+    "currentTurnRequestCount",
     "sessionTotal", "sessionInput", "sessionCached", "sessionOutput", "contextUsed",
     "turnTotal", "turnInput", "turnCached", "turnOutput", "currentTurnIndex", "turns",
     "turnsTruncated", "turnTotalCount", "requestDetails", "requestDetailsTruncated",

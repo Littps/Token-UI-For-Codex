@@ -1,194 +1,250 @@
 # Tokens UI For Codex
 
-Token usage for the **Codex desktop app**, shown where you already look: a compact
-native-style bar next to the context-usage ring, plus a click-through details dialog.
-It never modifies Codex itself, never registers keyboard listeners, and never shows your
-conversation text.
+Native-style token usage UI for the Codex desktop app. A compact bar sits immediately
+left of the context-usage ring in the composer; left-click it to open a detailed dialog.
 
 - Author: **Littps**
-- Platform: Windows 10 / 11 (Codex **desktop** only)
+- Platform: Windows 10 / 11
+- Client: Codex / ChatGPT desktop
+- Dependency: Codex++ user scripts
 - License: MIT
 
-## What it looks like
+The project does not patch Codex's React bundle, register keyboard listeners, or display
+message text, session paths, or thread IDs.
 
-The bar sits **at the bottom-right of the composer, immediately left of the context ring**,
-with two rows:
+## UI
 
+```text
+Session  Current question  Requests
+≈Speed   Hit rate          Hits      Output
 ```
-Session   Current turn   Requests
-Speed     Hit rate       Hits        Output
-```
 
-Left-click the bar to open the **details dialog** with six sections:
+The compact bar shows:
+
+- Session total
+- Current-question total
+- Session request count
+- Robust estimated generation speed as `≈XXXT/s`
+- Current-question cache hit rate
+- Cache-hit tokens
+- Current-question output tokens
+
+The bar freezes while the pointer is over it and catches up immediately after the pointer leaves.
+
+Clicking the bar opens six sections:
 
 | Section | Contents |
 | --- | --- |
-| Session total | tokens / requests / input·cache-hits / average speed / cache misses / output |
-| Current turn | tokens / requests / input·cache-hits / **this turn's average speed** / cache misses / output |
-| Context usage | used tokens, context limit and ratio |
-| Runtime status | status / monitor / page / data / window selection / model switches / cumulative resets / recovery |
-| Current-turn request details | **latest 10 by default**, "Load more" adds 20 each click |
-| Turn summaries | **latest 25 turns by default**, "Load more" adds 50 each click |
+| Session total | tokens, requests, input/cache hits, recent effective speed, misses, output |
+| Current question | tokens, requests, input/cache hits, current-turn effective speed, misses, output |
+| Context usage | used tokens, context limit, ratio |
+| Runtime status | status, monitor, page, freshness, model switches, cumulative resets |
+| Current-question requests | latest 10; Load more adds 20; cap 500 |
+| Turn summaries | latest 10; Load more adds 50; cap 500 |
 
-Both lists are newest-first. Data that is not displayed **is not pushed to the page**; it is
-fetched only when you click, capped at 500 entries each.
+Both lists are newest-first. Hidden rows are not included in the page payload.
+The page, monitor protocol and receiver are all capped at **500** rows. Older structured
+request and turn records are written to a local history archive and never sent over CDP.
 
-Close the dialog by clicking outside it, or the `×` in the top-right corner. **The plugin
-registers no keyboard listeners** — Esc does not close the dialog.
+Additional behavior:
 
-While the pointer rests on the bar, the bar **freezes** (numbers and tooltips stop changing);
-it catches up the moment the pointer leaves — handy for reading or copying values.
+- Close by clicking outside or the top-right `×`
+- No keyboard listeners; Esc does not close the dialog
+- Light/dark theme follows the Codex host and updates after a short debounce
+- Frosted glass automatically degrades to a solid surface on slow devices
+- Health dot: green healthy, yellow waiting/stale, red error
 
 ## Requirements
 
-| Dependency | Requirement | Notes |
-| --- | --- | --- |
-| OS | Windows 10 / 11 | Windows only |
-| Codex | Desktop app | The panel is injected into the desktop renderer page |
-| Codex++ | Installed, user scripts enabled | The bar itself is a Codex++ user script |
-| Node.js | **22 or newer** | Usually already available: the Codex desktop app ships its own runtime (v24 as tested) |
+| Dependency | Requirement |
+| --- | --- |
+| OS | Windows 10 / 11 |
+| Codex | Desktop app, MSIX or conventional installation |
+| Codex++ | Installed, user scripts enabled |
+| Node.js | 22+; the Codex bundled runtime is preferred when available |
+| PowerShell | Windows PowerShell 5.1 or PowerShell 7 |
+| Admin rights | Not required |
 
-The installer locates Node in this order: `PATH` → the runtime bundled with Codex → common
-install locations. If none is found it **fails loudly and tells you to install Node** —
-it never fails silently.
+Node discovery collects every `node.exe` candidate from `PATH`, the Codex runtime and
+common install locations, ignores `.cmd` shims and versions below 22, then chooses the
+highest compatible version. Installation stops with a clear message if none qualifies.
 
-## Installation
+## Project dependencies and build
 
-### One click (recommended)
+There are no third-party runtime npm dependencies. The monitor uses only Node.js built-ins:
 
-Double-click `install.bat` in the package (it prefers PowerShell 7, then falls back to 5.1):
+- `fs`, `path`, `os`
+- `crypto` for HMAC-SHA256 and session hashes
+- `child_process`
+- built-in WebSocket and fetch in Node 22+
 
-1. Environment check (OS / Node / Codex++ / Codex desktop / `codex` CLI)
-2. Install the Codex++ user script (copy with SHA-256 verification; older panel scripts in the
-   folder are identified **by script content** and disabled as `.superseded-*.bak`)
-3. Register the local Codex plugin (provides the skill that explains and troubleshoots the tool)
-4. Install logon autostart (scheduled task, **no admin rights needed**)
-5. Self-check and report
+No `npm install` is required for deployment. Development verification uses Node.js 22/24,
+Windows PowerShell 5.1/PowerShell 7, and Playwright only for `npm run test:live`. CI runs
+unit tests on both Node 22 and Node 24.
 
-### Manual (three steps)
+## Install
 
 ```powershell
-# 1) User script (the bar itself)
-Copy-Item ".\plugins\tokens-ui-for-codex\tokens-ui-for-codex-panel.js" "$env:APPDATA\Codex++\user_scripts\" -Force
-
-# 2) Register the local plugin (skill for explanations and troubleshooting)
-codex plugin marketplace add .\
-codex plugin add tokens-ui-for-codex@tokens-ui-for-codex-local
-
-# 3) Logon autostart (scheduled task; no admin rights)
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\plugins\tokens-ui-for-codex\install-autostart.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\install.ps1"
 ```
 
-## Autostart and supervision
+The installer:
 
-The scheduled task `tokens-ui-for-codex-monitor` starts the monitor process:
+1. Verifies Windows, Node, Codex, Codex++, the user-script switch and the `codex` CLI
+2. Backs up and installs the Codex++ user script with SHA-256 verification
+3. Retires older panel scripts by content so only one bar is injected
+4. Registers `tokens-ui-for-codex@tokens-ui-for-codex-local`
+5. Registers a per-user scheduled task and starts the monitor once
+6. Rechecks the task, plugin, user script and monitor process
 
-- **Triggers**: once right after installation + at logon + a 5-minute watchdog pass
-- **Action**: `wscript.exe → launch-silent.vbs → node` (no console window, no PowerShell,
-  unaffected by the PowerShell execution policy)
-- **Duplicate instances**: never starts a second one (idle pass if already running);
-  on failure restarts 3 times, 1 minute apart; no run-time limit
-- **Privilege**: per-user, RunLevel Limited — no admin rights, no UAC prompt
+Source archives do not need a prebuilt `plugins/` tree. The installer generates a
+temporary staging layout under `%LOCALAPPDATA%\tokens-ui-for-codex\install-stage\`.
 
-If Codex is not running the monitor simply waits; it exits nothing and starts reporting as
-soon as Codex comes up.
+## Startup
 
-## Refresh cadence and data reliability
+Scheduled task: `tokens-ui-for-codex-monitor`
 
-- **Pushes immediately on change**; otherwise heartbeat by state: **1 second while a task is
-  running**, 5 seconds when idle
-- **Expanded state does not heartbeat**: once you loaded a long list (window above the default
-  tier) that payload is sent only when it actually changes
-- **Session sharding**: when the host splits a huge session file, the monitor groups, merges and
-  time-sorts the shards before computing statistics
-- **Incremental parsing**: file offset and half-line buffer are remembered; truncation, rebuild
-  or same-length replacement triggers a fresh baseline instead of reusing stale totals
-- **Two-level stall warning**: 5 minutes without new records logs a warning; 15 minutes degrades
-  to `stale-data` on the panel, returning to `healthy` automatically
-- **Replay / echo**: the same request appearing in both log formats is claimed one-to-one and
-  never counted twice; echoes lagging more than 60 seconds are reported separately with the
-  top-3 timestamps in the log
+- Runs once after installation and again at user logon
+- No periodic watchdog
+- Action chain: `wscript.exe → launch-silent.vbs → node`
+- Duplicate instances are ignored
+- Failed runs retry up to 3 times, one minute apart
+- Per-user Limited principal; no UAC
+
+If the monitor is stopped, use the dialog's Start Monitor command or the Start-menu
+shortcut. The Unicode PowerShell confirmation window requires `Y` before starting.
+
+## Data flow
+
+```text
+Codex rollout JSONL
+  → incremental parser and statistics
+  → local CDP with dynamic port discovery
+  → signed schema v3 payload
+  → HMAC verification in the Codex++ script
+  → incremental bar/dialog rendering
+```
+
+The monitor:
+
+- Reads only structured numeric fields
+- Merges all shards of a long session
+- Sorts by `(timestamp, ordinal)`
+- Handles truncation, half lines, same-size replacement and cumulative resets
+- Uses the same multi-shard path for watch mode and one-shot `--thread`
+- Deduplicates modern and legacy formats without assuming monotonic counters
+- Uses full legacy fingerprints for duplicate detection
+- Updates a mixed-format current turn from the turn's thread baseline
+
+The authoritative merge contract is [docs/F1-merge-spec.md](docs/F1-merge-spec.md).
+
+## Speed
+
+- The compact bar displays an estimated generation speed and marks it with `≈`
+- It uses the median of up to five valid request samples plus MAD outlier filtering
+- Fewer than three valid samples shows `--T/s` instead of exposing a raw spike
+- Three consecutive narrow-range samples can establish a new speed regime
+- Generation intervals are merged before calculating active generation time
+- The dialog displays effective speed: output tokens ÷ (turn duration − tool time)
+- Session effective speed is weighted over the latest 25 high/medium-confidence turns
+- The speed tooltip also shows the current turn's wall-clock average using output tokens only
+- `output_tokens` already includes reasoning and tool-structure tokens
+
+## Refresh cadence
+
+| State | Behavior |
+| --- | --- |
+| Data changed | Push immediately |
+| Task running | 1-second heartbeat |
+| Idle | 5-second heartbeat |
+| Expanded long lists | No heartbeat; push only on data/health/window changes |
+
+## Security and privacy
+
+- Signed-only schema v3
+- Random 256-bit per-monitor session key
+- HMAC-SHA256 over the full payload, timestamp and nonce
+- Reject missing auth, bad MAC, timestamps older than 30 seconds, nonce replay and sequence rollback
+- Boot payloads use the same verification path
+- Payloads are cloned before async verification and the verified snapshot is applied
+- Local CDP uses `--port auto`; `--port <n>` remains available as an override
+- No paths, thread IDs, message text, credentials or API keys are included in the page payload
+- The local archive also excludes message text, paths and original thread identifiers; only a session hash is used
+
+## Diagnostics
+
+```text
+%LOCALAPPDATA%\tokens-ui-for-codex\
+├─ logs\watch-YYYY-MM-DD.log
+├─ history\sessions\<sessionHash>\
+│  ├─ requests-YYYYMM*.jsonl
+│  └─ turns.json
+├─ monitor-health.json
+├─ autostart-state.json
+└─ last-summary.json
+```
+
+The health file is rewritten every monitor cycle with a fresh `lastSuccessAt` and mtime.
+
+Local history rules:
+
+- Structured numeric fields, time labels and indexes only
+- No message text, session paths, thread IDs, response IDs or turn IDs
+- Retained for **60 days**
+- Request files rotate at 32MB
+- Cleanup runs every six hours
+- Standard uninstall keeps history; `-Full` removes it
+
+Common checks:
+
+```powershell
+Get-ScheduledTask -TaskName tokens-ui-for-codex-monitor | Format-List State
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'token-stats\.mjs' } |
+  Select-Object ProcessId, CommandLine
+Get-Content "$env:LOCALAPPDATA\tokens-ui-for-codex\monitor-health.json" -Raw
+```
+
+## Verification
+
+```powershell
+npm run check
+npm test
+node scripts\golden-baseline.mjs --check
+node scripts\verify-live.mjs
+npm run test:live
+node scripts\verify-sync.mjs --deploy "<deployment root>"
+```
+
+Current baseline: 65 unit tests, zero Golden mismatch, 15 live page checks, and
+12 Playwright passes with 2 real-input tests skipped for safety.
+
+## Update and rollback
+
+Back up the source, deployment, plugin cache, Codex++ user scripts, state directory and
+configuration before an update. The installer stops all old `token-stats.mjs --watch`
+processes before starting the new one. Reload the Codex page after updating the user script.
 
 ## Uninstall
 
 ```powershell
-# Standard: removes the scheduled task, stops the process, keeps logs and state
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\plugins\tokens-ui-for-codex\uninstall-autostart.ps1
+# Keep state, logs and the user script
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\plugins\tokens-ui-for-codex\uninstall-autostart.ps1"
 
-# Full: also removes logs/state, the user script (and its backups), the plugin and its cache
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\plugins\tokens-ui-for-codex\uninstall-autostart.ps1 -Full
+# Full cleanup
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\plugins\tokens-ui-for-codex\uninstall-autostart.ps1" -Full
 ```
 
-The uninstaller identifies this plugin's scheduled task and startup entries **by what their
-actions point to**, and its user script **by script content**, so it never depends on legacy
-file names.
+The uninstaller prints a residual self-check. Delete the package directory manually afterward.
 
-## Data and privacy
+## Known limits
 
-- The page payload contains **only** numeric statistics, time labels, per-turn summaries and a
-  limited request list for the current turn
-- It contains **no** session file paths, thread IDs, user message excerpts, tokens, keys or
-  credentials
-- The monitor reads local session logs but extracts **structured numbers only** — it never
-  copies, displays or transmits conversation text
-- Page and monitor talk over local CDP (default `127.0.0.1:9229`); nothing goes over the network
-- The panel registers no keyboard listeners, does not patch Codex's React bundle, and writes no
-  Codex configuration files
-
-## Troubleshooting
-
-| Symptom | Check first |
-| --- | --- |
-| No bar at all | Is Codex++ running with user scripts enabled? Does `%APPDATA%\Codex++\user_scripts\tokens-ui-for-codex-panel.js` exist? Then reload the page |
-| Bar shows "waiting for data" | Is the monitor process alive? Health snapshot `%LOCALAPPDATA%\tokens-ui-for-codex\monitor-health.json`; logs `...\logs\watch-YYYY-MM-DD.log` |
-| Numbers stop moving | Look for "data stall / locate failed / locate warning" entries; a very long session may be getting sharded by the host |
-| Speed looks slow to update | **The data source decides this**: values change only when Codex writes a usage record (measured arrival gap: median ≈ 2.9 s, p90 ≈ 14.7 s). Heartbeats only make the UI look alive; they cannot invent data |
-| Stuck on "window selection required" | Specify the target page with `--target <ID>` |
-
-```powershell
-# Is the monitor alive?
-Get-ScheduledTask -TaskName tokens-ui-for-codex-monitor | Get-ScheduledTaskInfo
-Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'token-stats.mjs' }
-```
-
-## How it works (short version)
-
-Two cooperating parts:
-
-1. **Panel (Codex++ user script)** — mounts the bar left of the native context ring. No React
-   patching: DOM mounting plus incremental updates. The dialog skeleton is built once and then
-   refreshed field by field.
-2. **Monitor process (Node)** — reads local session logs → computes statistics → pushes a schema
-   v2 payload over CDP → the page dispatches a `tokens-ui-for-codex` event that drives redraws.
-
-**Speed figures** (both come from official data, never estimated):
-
-- "This turn's average speed" = Σ output of this turn ÷ Σ generation time of this turn
-- "Average speed" (session) = Σ session output ÷ Σ session generation time
-
-> A live "tokens/s while generating" indicator is **not reliably possible** with the current
-> Codex renderer: logs contain no per-chunk events, and the page replaces nodes instead of
-> appending characters (measured over a 25-second window: 352 child nodes added while character
-> changes were only 28 events / +13 net characters; turn blocks oscillate between 145 and 10586
-> characters). The project therefore shows only reconcilable official figures.
-
-## Package layout
-
-```
-Tokens UI For Codex/
-├─ install.bat                       one-click entry point
-├─ DEPLOYMENT.md                     deployment & install guide
-├─ .agents/plugins/marketplace.json  local marketplace manifest
-└─ plugins/tokens-ui-for-codex/
-   ├─ .codex-plugin/plugin.json      plugin manifest (author: Littps)
-   ├─ tokens-ui-for-codex-panel.js   Codex++ user script (bar + details dialog)
-   ├─ token-stats.mjs                monitor process (read logs, compute, push over CDP)
-   ├─ protocol.mjs / schemas/        payload contract and JSON schema
-   ├─ install.ps1 / install-autostart.ps1 / uninstall-autostart.ps1
-   ├─ find-codex.ps1                 locate codex / Node / Codex++ dynamically
-   ├─ skills/tokens-ui-for-codex/    plugin skill
-   └─ scripts/ test/ docs/           tooling, tests and specifications
-```
+- Windows + Codex desktop + Codex++ only
+- UI anchoring depends on Codex accessibility labels; major host updates may require selector changes
+- Codex rollout events do not expose a per-token/chunk timeline, so compact-bar speed is an estimate
+- There is no periodic watchdog; after the scheduled-task retry budget is exhausted, start the monitor manually
+- Multi-window use requires one unique focused target, otherwise use `--target`
+- Locked-down enterprise environments may block scheduled tasks, user scripts or local CDP
 
 ## License
 

@@ -1,16 +1,17 @@
 // 实机验收：只读取页面状态，并在结束时自动关闭详情弹层。
-// 用法：node scripts/verify-live.mjs [--port 9229] [--target <target-id>]
+// 用法：node scripts/verify-live.mjs [--port auto|<n>] [--target <target-id>]
 // 多窗口且无法唯一判断时，需要显式传入 --target。
 
+import { portArgOf, resolveCdpPort } from "./cdp-port.mjs";
+
 const argv = process.argv.slice(2);
-let port = 9229;
 let targetId = "";
 let checkRefresh = false;
 for (let index = 0; index < argv.length; index += 1) {
-  if (argv[index] === "--port" && Number.isInteger(Number(argv[index + 1]))) port = Number(argv[index + 1]);
-  else if (argv[index] === "--target" && argv[index + 1]) targetId = String(argv[index + 1]).trim();
+  if (argv[index] === "--target" && argv[index + 1]) targetId = String(argv[index + 1]).trim();
   else if (argv[index] === "--refresh") checkRefresh = true;
 }
+const port = await resolveCdpPort(portArgOf(argv));
 
 function fail(message) {
   console.error("验收失败: " + message);
@@ -105,6 +106,8 @@ try {
       supportedSchemaVersions: protocol ? protocol.supportedSchemaVersions : null,
       payloadProtocolName: payload && payload.protocolName,
       payloadSchemaVersion: payload && payload.schemaVersion,
+      payloadAuthRequired: payload && payload.authRequired,
+      payloadHasMac: !!(payload && payload.auth && /^[0-9a-f]{64}$/.test(payload.auth.mac)),
       payloadHealthStatus: payload && payload.health && payload.health.status,
       panelCount: document.querySelectorAll('#tui-native').length,
       styleCount: document.querySelectorAll('#tui-native-style').length,
@@ -116,12 +119,14 @@ try {
   const snapshot = JSON.parse(snapshotRaw || "{}");
 
   record("协议已注册", snapshot.protocolName === "tokens-ui-for-codex", snapshot.protocolName);
-  record("支持 schema v2", Array.isArray(snapshot.supportedSchemaVersions) && snapshot.supportedSchemaVersions.includes(2), snapshot.supportedSchemaVersions);
+  record("支持 schema v3", Array.isArray(snapshot.supportedSchemaVersions) && snapshot.supportedSchemaVersions.includes(3), snapshot.supportedSchemaVersions);
   record("统计条唯一", snapshot.panelCount === 1, snapshot.panelCount);
   record("样式表唯一", snapshot.styleCount === 1, snapshot.styleCount);
   record("统计条位于上下文圆圈左侧", snapshot.panelLeftOfRing, { panel: snapshot.panelRect, ring: snapshot.ringRect });
   record("负载协议名匹配", snapshot.payloadProtocolName === "tokens-ui-for-codex", snapshot.payloadProtocolName);
-  record("负载 schema v2", snapshot.payloadSchemaVersion === 2, snapshot.payloadSchemaVersion);
+  record("负载 schema v3", snapshot.payloadSchemaVersion === 3, snapshot.payloadSchemaVersion);
+  record("负载要求签名", snapshot.payloadAuthRequired === true, snapshot.payloadAuthRequired);
+  record("负载携带 HMAC", snapshot.payloadHasMac === true, snapshot.payloadHasMac);
   record("运行状态健康", ["healthy", "waiting-for-data", "starting"].includes(snapshot.payloadHealthStatus), snapshot.payloadHealthStatus);
 
   await evaluate(ws, `(() => {

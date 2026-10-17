@@ -1,139 +1,335 @@
-# AGENTS.md —— 仓库内 Agent 工作约定
+# AGENTS.md — Tokens UI For Codex 工程约定
 
-> 写给在本仓库工作的 Agent：改代码、跑测试、部署或发布前先读完本文件，**不要凭记忆操作**。
-> 项目：**Tokens UI For Codex**（作者 **Littps**，许可 MIT）。
+本文件写给在本仓库工作的 Agent。修改、部署或发布前先读完本文件。
 
-## 1. 项目定位
+作者：**Littps**
+许可：MIT
 
-- 在 Codex / ChatGPT **桌面版**中显示当前会话的 Token 用量：输入区右下角的紧凑统计条 + 可点击的详情弹层。
-- **仅支持桌面版**；不支持 codex CLI 的终端界面。
-- **依赖 Codex++**：统计条以 Codex++ 用户脚本形式注入（`%APPDATA%\Codex++\user_scripts\`）。未安装 Codex++ 时本项目不可用。
-- 不修改 Codex 的 React bundle、不注册键盘监听、不写 Codex 的 `config.toml`。
-- 页面负载只含数字统计、时间标签、轮次摘要与当前轮有限请求明细；**不含**会话文件路径、线程 ID、用户消息正文、Token 或凭据。
+## 1. 产品边界
 
-## 2. 目录结构
+- 仅支持 Windows 10/11 上的 Codex / ChatGPT 桌面版
+- 依赖 Codex++ 用户脚本
+- 不修改 Codex React bundle
+- 不注册键盘监听
+- 不修改 Codex `config.toml`
+- 不读取、复制、展示或外传用户消息正文
 
-- `tokens-ui-for-codex-panel.js` —— 面板 UI（Codex++ 用户脚本）。
-- `token-stats.mjs` —— 监控进程：读会话日志统计，经 CDP 推送 schema v2 负载。
-- `protocol.mjs` / `schemas/payload-v2.schema.json` —— 协议契约与 JSON Schema。
-- `find-codex.ps1` / `install.ps1` / `install-autostart.ps1` / `uninstall-autostart.ps1` / `install.bat` —— 运行时定位与安装卸载。
-- `scripts/` 工具与校验脚本、`test/` 测试、`docs/` 规格与记录、`.github/` CI。
-- 源码树**不含**预编译 exe、`node-version\`、`release\`、`build\`；发布包由 `scripts\build-package.ps1`（部署包）与 `scripts\build-source-package.ps1`（源码包）生成。
-- `skills/tokens-ui-for-codex/SKILL.md` 只存在于**部署包与插件 cache**，源码树不含 `skills\`。
+页面只展示结构化统计：
 
-## 3. 工作原理（改代码前必须知道）
+- token 数量
+- 时间标签
+- 请求与轮次摘要
+- 上下文使用量
+- 健康与安装状态
 
-### 3.1 数据链路
+运行时依赖边界：
+
+- 没有第三方 npm 运行时依赖
+- 只使用 Node.js 22+ 内置模块和 WebSocket/fetch
+- 部署不需要 `npm install`
+- Playwright 只用于 `npm run test:live`
+- CI 同时覆盖 Node.js 22 和 24
+
+## 2. 组件
+
+### 页面
+
+`tokens-ui-for-codex-panel.js`
+
+- Codex++ 用户脚本
+- 原生风格紧凑条
+- 点击详情弹层
+- 主题跟随
+- HMAC 验签
+- DOM 增量更新
+
+### 监控
+
+`token-stats.mjs`
+
+- 读取本地 Codex rollout JSONL
+- 增量解析与分片合并
+- 统计请求、轮次、缓存、速度和上下文
+- 通过本机 CDP 推送签名 schema v3 负载
+- 写入健康快照、简略快照和日志
+
+### 协议
+
+- `protocol.mjs`
+- `schemas/payload-v3.schema.json`
+- 页面事件：`tokens-ui-for-codex`
+- 页面全局：`window.__tuiForCodex`
+
+### 安装
+
+- `find-codex.ps1`
+- `install.ps1`
+- `install-autostart.ps1`
+- `uninstall-autostart.ps1`
+- `install.bat`
+
+### 测试与工具
+
+- `test/token-stats.test.mjs`
+- `test/live-ui.playwright.test.mjs`
+- `scripts/check-page-state.mjs`
+- `scripts/verify-live.mjs`
+- `scripts/verify-sync.mjs`
+- `scripts/golden-baseline.mjs`
+- `scripts/perf-baseline.mjs`
+
+## 3. 数据链路
 
 ```text
-本地会话日志(.jsonl) -> token-stats.mjs 统计 -> CDP(127.0.0.1:9229) -> window.__tuiForCodex + 事件 tokens-ui-for-codex -> 面板增量渲染
+Codex rollout JSONL
+  → IncrementalRolloutParser
+  → buildStats / mixed-format merge
+  → payloadFor
+  → signPayload (HMAC-SHA256 + ts + nonce + seq)
+  → local CDP
+  → panel verifyPayloadAuth
+  → adoptData
+  → incremental render
 ```
 
-- 监控只提取结构化字段，不复制、不展示、不外传正文。
-- 页面与监控之间是**单向推送**（监控 → 页面）；页面只能通过 `<html data-tui-window>` 反向表达"想看多少条"。
+页面 → 监控只有一个反向信号：
 
-### 3.2 推送节奏（三段心跳）
+```html
+<html data-tui-window="turns:requests">
+```
 
-| 状态 | 间隔 |
+监控每秒读取一次窗口值。
+
+## 4. 协议约束
+
+schema v3 是严格签名-only：
+
+- 必须 `authRequired: true`
+- 必须有 `auth.v=1`
+- 必须有 `ts`、`nonce`、`seq`、`mac`
+- 时间窗 ±30 秒
+- nonce 不可重复
+- seq 必须严格递增
+- MAC = HMAC-SHA256(canonicalJson(body) + "|" + ts + "|" + nonce)
+- boot 负载与事件负载走同一验签函数
+- 验证前深拷贝，验证后应用同一快照
+
+拒绝条件：
+
+- 无 auth
+- 坏 MAC
+- 过期 ts
+- nonce 重放
+- seq 倒退
+- `authRequired !== true`
+
+## 5. 统计口径
+
+权威文件：`docs/F1-merge-spec.md`
+
+必须遵守：
+
+- 两代日志格式统一合并
+- 累计值不可假设单调递增
+- 累计下降按 reset-aware normalizer 处理
+- 现代格式是权威流
+- legacy 回声一对一认领
+- legacy 自身去重包含完整 input/output/cached
+- 现代记录后的 legacy 当前轮用 thread delta 修正
+- `requestCount = modern 去重数 + unique 补录数`
+- `sessionTotal = 逐请求 total 前缀和`，偏差应为 0
+
+轮次：
+
+- `turn_context` 是权威来源
+- 有 `turn_id` 精确归属
+- 无 `turn_id` 按时间窗归属
+- 没有 `turn_context` 才退回 user message 分界
+- 排序键统一为 `(ts, ordinal)`
+
+速度：
+
+- 紧凑条：`≈XXXT/s`，最近最多 5 个有效请求样本的中位数 + MAD 离群过滤
+- 少于 3 个有效样本显示 `--T/s`，禁止回退到单条尖峰
+- 生成区间重叠时取并集；连续 3 个窄分布样本允许切换速度区间
+- 详情：有效速度 = output ÷（轮耗时 − 工具耗时）
+- 详情标题显示本轮墙钟平均；墙钟速度只使用 output，不使用上下文累计量
+- 会话有效速度使用最近 25 个高/中置信度轮次加权
+- 输出 token 已包含 reasoning，不得重复加
+
+## 6. 推送与加载
+
+| 场景 | 行为 |
 | --- | --- |
 | 数据变化 | 立即推送 |
-| 检测到任务正在运行 | 1 秒心跳 |
+| 任务运行中 | 1 秒心跳 |
 | 空闲 | 5 秒心跳 |
-| 展开态（窗口大于默认档） | **不参与心跳**，仅变化时推送 |
+| 展开长列表 | 不做心跳 |
 
-心跳只重发最后一份负载，不重新解析未变化的会话文件。监控日志只记录"数据变化"的推送，**心跳是静默的**——不要用日志时间戳去测心跳频率。
+窗口：
 
-### 3.3 按需窗口（页面 → 监控的信号）
+- 关闭：5 轮 / 0 明细
+- 打开：10 轮 / 10 明细
+- 请求加载更多：+20
+- 轮次加载更多：+50
+- 上限：各 500
 
-- 面板把所需条数写进 `<html data-tui-window="turns:requests">`，监控每秒读一次；窗口变化立刻推送。
-- 弹层关闭：5 轮 / 0 条明细；打开：25 轮 / 10 条明细；「加载更多」每次 +50 轮 / +20 条。
-- 上限由监控下发（`turnsLimit` / `requestsLimit`，各 500）；未展示的部分不推送。
-- 会话切换时监控下发一次性 `sessionChanged: true`，面板据此复位窗口与翻页进度。
+未展示数据不进页面负载。
+页面、协议和接收端数组上限均为 500；更早的结构化请求与轮次摘要写入本地历史，不经过 CDP。
 
-### 3.4 轮次归属
+本地历史：
 
-- 轮次列表以 `turn_context` 事件为**权威来源**：宿主逐轮写出、携带 `turn_id`、覆盖日志开头，且包含「没有任何用量记录的空轮」。
-- 记录按 `turn_id` 精确归属；无 `turn_id` 的 legacy 记录按「开始时间 ≤ 记录时间」落到所属轮；仅当整份日志没有 `turn_context` 时才退回 `user_message` 分界。
-- **禁止**把「有 `turn_id` 就新建轮」与「无 `turn_id` 按数组下标」两套规则并行写进同一个轮次数组——会填充空轮，让 `currentTurn` 指向空轮（面板当前提问恒为 0）。
-- 排序键统一为 `(ts, ordinal)`；`ordinal` 是宿主全局事件序号，跨分片合并后仍是全序。
+- `%LOCALAPPDATA%\tokens-ui-for-codex\history\sessions\<sessionHash>\`
+- 请求：`requests-YYYYMM*.jsonl`
+- 轮次：`turns.json`
+- 保留 60 天；请求文件 32MB 分段；每 6 小时清理
 
-### 3.5 统计口径
+## 7. UI 约束
 
-- 以 `docs/F1-merge-spec.md` 为准：两代事件格式（`token_count` / `token_usage_record`）统一合并，累计量走 reset-aware 归一化，**禁止单调递增假设**。
-- 计数不变量：`requestCount = modern 去重数 + unique 补录数`；`sessionTotal = 逐请求 total 前缀和`（偏差 0）。
-- 速度口径：当前提问「本轮平均速度」= Σ本轮输出 ÷ Σ本轮生成耗时；会话累计「平均速度」= Σ会话输出 ÷ Σ会话生成耗时。
+- 统计条固定在上下文用量圆圈左侧
+- 第一行：会话 / 当前提问 / 请求
+- 第二行：≈速度 / 命中率 / 命中 / 输出
+- 悬浮冻结
+- 点击弹层外部或 × 关闭
+- 无键盘监听
+- 详情骨架一次构建
+- 列表结构不变时按稳定 key 更新实际行
+- 倒序列表必须更新顶部当前轮，不能固定更新最后一行
+- 深浅色跟随宿主
+- 主题观察器只监听 `<html>`，不要订阅整棵 DOM 的 class/style
+- 磨砂玻璃必须有低性能降级
 
-### 3.6 增量解析与会话分片
+## 8. 文件编码
 
-- 增量解析器记录文件偏移 + 半行缓存 + 文件指纹；截断、重建、同长度替换一律按新基线重建，不沿用旧统计。
-- 宿主会切分超大会话（文件名追加 `_<分段UUID>`、可能换日期目录）；监控归组同一会话全部分片、合并后统计，停滞判据使用**最新分片**的 mtime。
-- 两级停滞告警：5 分钟无新增仅写日志预警；15 分钟降级为面板 `stale-data`；恢复后自动回 `healthy`。
+硬要求：
 
-### 3.7 运行与自启
+- `.ps1`：UTF-8 with BOM
+- `launch-silent.vbs`：UTF-16LE with BOM
+- `launch-confirm.vbs`：UTF-16LE with BOM
+- 生成的 `start-monitor.ps1`：UTF-8 with BOM
+- `.mjs` / `.js` / `.md`：UTF-8
 
-- 计划任务 `tokens-ui-for-codex-monitor`：触发为「安装完成后立即执行 + 每 5 分钟兜底巡检 + 登录时启动」。
-- 任务动作是 `wscript.exe → launch-silent.vbs → node`（无终端窗口、不经 PowerShell、不受执行策略影响）；重复实例策略「不启动新实例」；失败重启 3 次 / 间隔 1 分钟；运行级别 Limited，**不需要管理员权限**。
-- **项目不使用常驻 PowerShell 守护进程**（历史 `guardian.ps1` 已删除），不要再引入同类常驻守护。
-- 状态目录 `%LOCALAPPDATA%\tokens-ui-for-codex\`：`monitor-health.json`、`autostart-state.json`、
-  `client-thread-map.json`（占位对话映射，按需生成）、`logs\watch-YYYY-MM-DD.log`
-  （按日；超过 1MB 时轮转为 `*.log.<时间戳>`；保留最近 30 份 `watch-*` / `monitor-*` 文件）。
+原因：
 
-## 4. 修改约定（必须遵守）
+- Windows PowerShell 5.1 对无 BOM UTF-8 中文解析不可靠
+- 旧 ASCII VBS 会把中文安装路径写成 `???`
+- PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM，生成 JSON 必须用无 BOM UTF-8
 
-- 编辑 JS 或含中文的文件必须用 Node `fs.writeFileSync`（UTF-8）；不要用 PowerShell 直写，否则中文会坏。
-- 改完保持**四处生效副本同步**：源码树 / 部署包 / 插件 cache / `%APPDATA%\Codex++\user_scripts\`。
-  用 `node scripts\verify-sync.mjs --deploy "<部署根>" [--zip <包路径>]` 校验，`mismatches` 必须为 0。当前比对 7 个文件：
-  `token-stats.mjs`、`tokens-ui-for-codex-panel.js`、`protocol.mjs`、`find-codex.ps1`、`install.ps1`、`install-autostart.ps1`、`uninstall-autostart.ps1`。
-- 写用户脚本、停/起监控进程、注册计划任务都是用户级操作，不需要管理员权限；受限沙箱里可能需要向用户申请文件或进程权限。
-- **发布约定（2026-09-21 起）**：GitHub 只推送 `main` 与**当前版本**的 tag（如 `1.0.0`）。
-  **历史 alpha 版本（`1.0.0-alpha`、`1.0.0-alpha-2`、`1.0.0-alpha-3`）一律不再推送**——
-  不要执行 `git push --tags`，否则会把 alpha 标签连同旧历史一起推到远端。
-  远端仓库已是「单提交 1.0.0」的全新库；旧历史仅保留在本地 `backup/pre-squash-1513c36` 分支与
-  `%LOCALAPPDATA%\tokens-ui-for-codex\backups\repo-recreate-20260921\` 下的 bundle 备份里。
-- 沟通用中文；**不主动 git commit / push**；用户说打包时才打包。
-- **发现问题先报告再修**；不要顺手改用户没要求的部分。
-- 提交/发布前检查是否残留本机敏感信息（真实用户目录、Token、密钥、邮箱、私网地址、带凭据的 URL）。
+使用 `[System.IO.File]::WriteAllText` 明确指定编码。
 
-## 5. 测试与门禁
+## 9. 安装与生命周期
 
-| 命令 | 内容 | 当前基线 |
-| --- | --- | --- |
-| `npm run check` | 三个 JS 文件语法检查 | 全部通过 |
-| `npm test` | 单元测试（`node:test`） | **47/47** |
-| `node scripts\golden-baseline.mjs --check` | 行为基线（CLI 输出哈希） | **31/31，0 不一致** |
-| `node scripts\verify-live.mjs` | 页面实机验收 | **13/13，failed = 0** |
-| `npm run test:live` | Playwright 实机用例 | 11 通过 / 2 跳过（真实输入用例默认跳过） |
-| `node scripts\verify-sync.mjs --deploy "<部署根>"` | 副本一致性 | `mismatches = 0` |
-| `npm run perf -- 20000` | 本地脱敏性能基准 | 无第三方运行时依赖 |
+计划任务：
 
-硬规矩：
+- `tokens-ui-for-codex-monitor`
+- 安装后立即执行一次
+- 登录时执行
+- 无周期巡检
+- Limited
+- 不请求 UAC
 
-- **时序 / 心跳类断言必须多轮实机（≥ 5 轮）**，单轮通过不算。历史上出现过"单轮绿、多轮间歇失败"的用例（无效负载被 1 秒心跳覆盖）。
-- **禁止改期望值来适配实现**；期望值只能来自规格推导或实测真值对照。
-- **禁止凭记忆打补丁**；不确定就重读源码 / 日志 / 规格。
-- 测试全绿不等于验收通过：涉及数字口径的改动必须附"同一会话改前 / 改后真值对照"。
-- 真实输入用例默认不跑：CDP 注入的 Escape 会被 Codex 当成「停止回答」，字符注入会污染输入框；需要时显式设 `TUI_ALLOW_REAL_INPUT=1`。
-- 实机测试必须带 `--test-force-exit`，否则 CDP 连接会阻止进程退出。
-- 行为基线语料冻结在 `%TEMP%\tui-golden-corpus` 并重复复用；要更新语料时显式加 `--refresh-corpus`（否则"会话变长"会被误判成"实现改坏"）。
+主链：
 
-## 6. 面板设计约定
+```text
+wscript.exe → launch-silent.vbs → node
+```
 
-- 统计条固定在**输入区右下、上下文用量圆圈左侧**：第一行 `会话 / 当前提问 / 请求`，第二行 `速度 · 命中率 · 命中 · 输出`（「缓存未命中」已从统计条移除，详情弹层仍保留）。
-- 使用宿主主题变量，深浅色都跟随宿主；无独立悬浮窗、拖拽、缩放、位置记忆。
-- 指针停留在统计条上时**冻结写入**（数字 / `aria-label` / `title`），移出后立即补一次渲染。
-- 详情弹层用 `role="dialog"`，只支持「点击外部」与「右上角 ×」关闭；**不注册任何键盘监听**（无 Enter / 空格 / Esc 处理）。
-- 详情弹层是「骨架一次构建 + 数据增量更新」；列表仅在结构变化（条数 / 首尾序号 / 截断标志 / 总数）时重建，并保持滚动位置与展开状态。
-- 列表倒序（最新在最上面）：请求明细默认 10 条、「加载更多」+20；各轮摘要默认 25 轮、「加载更多」+50。
-- **不要重新引入前端实时估算**：在当前 Codex 渲染方式下不可行（日志没有逐块事件；页面按节点替换而非字符追加，实测 25 秒窗口内子节点新增 352 个而字符净增 13）。速度只显示可对账的官方口径，无数据时显示 `-- Tokens/s`。
-- 多窗口默认选唯一焦点目标，其次唯一可见目标；无法唯一判断时报 `CDP_TARGET_SELECTION_REQUIRED`，不得随机选。
-- 启动加载期读不到对话 ID 时显示 0，不回退到上一条对话的数据。
+手动入口：
 
-## 7. 运行时注意事项
+```text
+launch-confirm.vbs → start-monitor.ps1 → Y 确认 → launch-silent.vbs
+```
 
-- 只读排查脚本：`node scripts\check-page-state.mjs`、`node scripts\close-detail-dialog.mjs`、`node scripts\reset-page-input-state.mjs`。
-- `npm run reload` 重载 Codex 渲染页面后常停在新对话页，需要用 DOM 点击侧栏标题恢复会话（见 `scripts\reload-page.mjs`）。
-- MSIX 虚拟化：在 Codex 应用上下文里读 `%LOCALAPPDATA%` 可能看到包 LocalCache 的陈旧副本；结论前必须与非打包进程读数或活体日志交叉验证。
-- `NODE_OPTIONS` 可能让子 Node 进程继承 `--inspect-port=127.0.0.1:9229`，与 Codex 的 CDP 端口相同；连不上时先确认端口占用方。CDP 目标列表：`http://127.0.0.1:9229/json/list`。
-- `cdpEval` 有表达式白名单（必须以 `JSON.stringify(` / `(function ()` 等开头），否则抛 `CDP_EXPRESSION_BLOCKED`。
-- 插件版本号写在 `.codex-plugin/plugin.json` 的 `version`，它决定插件 cache 目录名；改版本号后必须重新 `marketplace add` + `plugin add`。
-- 页面诊断字段：`window.__tuiForCodexStatus`（`""` 表示正常；其余为 `anchor-missing` / `mount-point-missing` / `insert-failed` / `mount-crashed`）；协议探针为 `window.__tuiForCodex`、`window.__tuiForCodexProtocol`、`window.__tuiForCodexNativeUiInstalled`。
+安装更新时必须停止所有旧 `token-stats.mjs --watch`，再启动新实例。
+
+## 10. 副本同步
+
+生效副本：
+
+1. 源码树
+2. 正式部署
+3. 插件 cache
+4. Codex++ 用户脚本
+
+运行：
+
+```powershell
+node scripts\verify-sync.mjs --deploy "<部署根>"
+```
+
+必须 `mismatches: 0`。
+
+更新用户脚本后必须重载 Codex 页面。
+
+## 11. 测试门禁
+
+```powershell
+npm run check
+npm test
+node scripts\golden-baseline.mjs --check
+node scripts\verify-live.mjs
+npm run test:live
+node scripts\verify-sync.mjs --deploy "<部署根>"
+```
+
+PowerShell：
+
+```powershell
+# Windows PowerShell 5.1
+powershell.exe -NoProfile -Command '$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\install.ps1),[ref]$null,[ref]$errors)|Out-Null; $errors.Count'
+
+# PowerShell 7
+pwsh -NoProfile -Command '$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\install.ps1),[ref]$null,[ref]$errors)|Out-Null; $errors.Count'
+```
+
+完整四项检查由 `.github/workflows/test.yml` 执行。
+
+规则：
+
+- 时序、重启、心跳类改动至少做 5 轮实机
+- 禁止改期望值来适配实现
+- 数字口径改动必须附真实会话改前/改后对照
+- 测试全绿不等于交付成功，还要检查页面和进程状态
+- 真实输入注入默认跳过
+
+## 12. 当前基线
+
+- 单元测试：65
+- Golden：0 不一致
+- `verify-live`：15 项，failed=0
+- Playwright：12 通过 / 2 安全跳过
+- 连续监控重启：5 轮通过
+- 分页：5 轮通过
+- 主题快速切换：20 轮通过
+
+## 13. 安全与隐私
+
+- 页面负载不含路径、线程 ID、response ID、turn ID、消息正文、密钥
+- 不读取会话正文
+- 不修改 Codex++ `user_scripts.json`
+- 不修改 Codex `config.toml`
+- 审计脚本无中/高危项才可交付
+- 本地 CDP 是信任边界：页面验签降低伪造风险，但不能替代操作系统账户隔离
+- 任何新功能都不得把原始会话内容加入页面负载或日志
+- 历史归档不得包含消息正文、路径、原始线程 ID、response ID 或 turn ID
+- 历史归档只保存在本机，不得通过 CDP 下发
+
+## 14. Git 与交付
+
+- 不主动 commit / push，除非用户明确要求
+- 不推送历史 alpha 标签
+- 发布前检查本机绝对路径、用户名、Token、密钥
+- 打包时明确区分：
+  - 源码包：可构建、可测试
+  - 安装包：只含运行所需文件和用户文档
+- 交付说明必须写清版本、验证结果、回滚点和未覆盖项
+
+## 15. 已知边界
+
+- Windows only
+- 依赖 Codex++
+- DOM 锚点可能随 Codex 大版本更新变化
+- 无周期性 watchdog
+- 实时逐 token 速度不可得
+- 多窗口需要唯一焦点或手动 target
+- 受限企业环境可能禁用计划任务、用户脚本或 CDP

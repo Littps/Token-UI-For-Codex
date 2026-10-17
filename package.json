@@ -1,17 +1,25 @@
 {
   "name": "tokens-ui-for-codex",
+  "version": "1.0.1+codex.20261017170503",
+  "description": "Codex desktop token usage UI with signed local CDP transport, robust speed estimates, and a 60-day local structured history archive.",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Littps"
+  },
+  "os": [
+    "win32"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check token-stats.mjs && node --check protocol.mjs && node --check tokens-ui-for-codex-panel.js",
-    "test": "node --test --test-force-exit test/token-stats.test.mjs",
+    "check": "node --check token-stats.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check tokens-ui-for-codex-panel.js",
+    "test": "node --test --test-force-exit test/token-stats.test.mjs test/history-archive.test.mjs",
     "test:live": "node --test --test-force-exit test/live-ui.playwright.test.mjs",
     "perf": "node scripts/perf-baseline.mjs",
     "verify:live": "node scripts/verify-live.mjs",
     "reload": "node scripts/reload-page.mjs"
-  },
-  "author": "Littps"
+  }
 }

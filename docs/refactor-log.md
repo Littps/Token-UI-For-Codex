@@ -1,98 +1,227 @@
-# 核心重构进度日志
+# 核心实现与重构记录
 
-作者：**Littps**。本文件记录"把核心脚本逐块重写为独立实现"这一轮工作的目标、方法与验证证据。
+作者：**Littps**
 
-## 目标
+本文件记录当前核心实现的职责划分、关键重构结果和验证门禁。
+历史细节以 Git 历史为准，本文件不再作为旧版本契约说明。
 
-保证**对外行为完全不变**的前提下，把核心脚本的每个代码块替换为独立实现：
-CLI 参数与输出格式、payload schema v2、状态文件路径与字段、计划任务名、退出码均冻结不动。
+## 1. 当前架构
 
-仓库内**不再保留**任何历史归档、历史分支或历史文件名；旧分支与旧标签已从版本库物理移除
-（`reflog expire` + `gc --prune=now`），历史快照目录已删除而不是归档。
-
-## 方法
-
-1. **行为基线先行**：用本机真实会话冻结成快照语料，跑 31 个命令行用例，
-   把输出的 SHA-256 固化为 `test/golden/cli-baseline.json`。
-2. **逐块替换**：每完成一块就运行 ①语法检查 ②单元测试 ③行为基线 ④必要的实机冒烟。
-3. **契约冻结**：CLI 参数与输出格式、payload schema v2、状态文件路径与字段、
-   计划任务名、退出码都不得改动。
-4. **不做顺手优化**：重构期间只做等价替换；发现的改进点另开一轮（见 `CHANGELOG.md`）。
-
-## 验证命令
-
-```powershell
-node --check token-stats.mjs                       # 语法
-npm test                                           # 单元测试（当前 47 项）
-node scripts\golden-baseline.mjs --check           # 行为基线（必须 0 不一致）
-node scripts\golden-baseline.mjs --check --refresh-corpus   # 需要重建语料快照时
+```text
+Codex rollout JSONL
+  │
+  ├─ IncrementalRolloutParser
+  │    ├─ 文件偏移
+  │    ├─ 半行缓存
+  │    ├─ 前缀指纹 / truncation 检测
+  │    └─ usage / turn / timing / model 事件
+  │
+  ├─ collectUnifiedRecords
+  │    ├─ legacy token_count
+  │    ├─ modern token_usage_record
+  │    ├─ echo / replay / unique
+  │    └─ 真冲突计数
+  │
+  ├─ buildStats
+  │    ├─ turn_context 轮次归属
+  │    ├─ reset-aware cumulative counters
+  │    ├─ cache 构成
+  │    ├─ 速度和耗时
+  │    └─ 上下文使用量
+  │
+  ├─ payloadFor
+  │    └─ 按窗口裁剪请求/轮次
+  │
+  └─ signPayload
+       ├─ HMAC-SHA256
+       ├─ timestamp
+       ├─ nonce
+       └─ seq
 ```
 
-> 基线脚本会把语料冻结到 `%TEMP%\tui-golden-corpus` 并**重复复用**。
-> 这是必要的：正在进行的会话文件会持续增长，每次重新复制语料会把"会话变长"
-> 误判成"实现改坏"。需要更新语料时显式加 `--refresh-corpus`。
+页面：
 
-## 进度
+```text
+CDP payload
+  → clone
+  → verify auth
+  → adoptData
+  → compact metrics
+  → details incremental update
+```
 
-| # | 代码块 | 状态 | 说明 |
-| --- | --- | --- | --- |
-| 0 | 行为基线 | ✅ 完成 | 31 个用例；连续多次校验全绿，证明可复现 |
-| 1 | 格式化与 CLI 打印 | ✅ 完成 | `labelOf`→`clockLabel`、`fmtInt`→`groupedInteger`、`fmtShort`→`compactNumber`；`printStats` 改为"先收集行再一次性输出"，字节输出等价 |
-| 2 | 文件发现与会话定位 | ✅ 完成 | 递归遍历改为**迭代式栈遍历**（跳过符号链接目录）；`resolveFile` 拆为 `locateThreadFile` + `newestRolloutFile`；新增常量 `ROLLOUT_FILE_RE` |
-| 3 | 客户端状态映射 | ✅ 完成 | 新增 `readClientStateFile`；`pruneClientState` 改为候选表 + `dropStale` 双向裁剪；常量抽出 `CLIENT_NEW_THREAD_PREFIX` / `CLIENT_UUID_RE` / `CLIENT_FILE_CREATE_SLACK_MS` |
-| 4 | CDP 辅助与线程 ID 检测 | ✅ 完成 | 注入表达式整体重写：`norm`→`normalizeThreadId`、`elConv`→`threadIdFromElement`、`confirm`→`rememberActiveThread`、`hasThreadMarker`→`touchesThreadMarker`；选择器与属性名抽成常量表；哨兵改为 `BLANK_CONVERSATION` 常量 |
-| 5 | 主循环 `main()` | ✅ 完成 | 拆成具名函数：`printAllThreads` / `reportRuntimeWarnings` / `assertCdpRuntimeAvailable` / `createWatchSession` / `resolveWatchThread` / `readWatchStats` / `nextWatchHealth` / `buildWatchKey` / `logStatsAnomalies` / `publishWatchRound` / `handleWatchError` / `runWatchRound` / `runWatchLoop`；跨轮状态收进 session 对象；`main()` 只剩入口分发 |
+## 2. 核心模块
 
-## 分块验证记录
+### token-stats.mjs
 
-### 块 1（格式化与打印）
+职责：
 
-- `node --check` 通过；`npm test` 全绿；行为基线 31/31 一致
-- 冒烟：`--watch`（隔离状态目录）运行 8 秒无崩溃，日志正常输出会话累计行
+- 枚举 Codex rollout 文件
+- 识别同一会话的所有分片
+- 增量解析
+- 归并两代日志格式
+- 统计 token、缓存、请求、轮次和速度
+- 解析动态 CDP 端口
+- 选择单窗口/焦点窗口
+- 签名并推送 payload
+- 写健康快照、简略快照和日志
+- 维护单实例锁
 
-### 块 2（文件发现与会话定位）
+当前关键常量：
 
-- `node --check` 通过；`npm test` 全绿；行为基线 31/31 一致
-- 结论：把递归遍历换成迭代式栈遍历后输出仍**逐字节一致**，说明文件枚举顺序不影响对外可见结果
+- 最大请求明细：500
+- 最大轮次摘要：500
+- 运行中心跳：1 秒
+- 空闲心跳：5 秒
+- 回声阈值：60 秒
+- 文件停滞预警：5 分钟
+- 文件停滞降级：15 分钟
+- 多窗口焦点复核：10 秒
+- 紧凑速度：最近 5 个有效样本中位数 + MAD 离群过滤
 
-### 块 3（客户端状态映射）
+### tokens-ui-for-codex-panel.js
 
-- `node --check` 通过；`npm test` 全绿；行为基线 31/31 一致
+职责：
 
-### 块 4（CDP 辅助与线程 ID 检测）
+- 找到上下文用量圆圈
+- 在左侧挂载统计条
+- 跟随宿主主题
+- 打开/关闭详情
+- 按窗口渲染请求和轮次
+- 验签 schema v3
+- 悬浮冻结
+- 自适应磨砂玻璃
+- MutationObserver 重挂载保护
 
-这一段无法用命令行基线覆盖（它跑在 Codex 页面里），因此新增实机差分探针
-`scripts/probe-active-thread.mjs`：从 `token-stats.mjs` 里抽出注入表达式，在真实页面上执行。
+当前 UI 约束：
 
-| 步骤 | 结果 |
-| --- | --- |
-| 改写前探针（3 次） | 解析出的对话 ID 与当前对话一致，稳定复现 |
-| 改写后探针（3 次） | 与改写前完全一致 |
-| `node --check` / `npm test` / 行为基线 | 通过 / 全绿 / 31-31 一致 |
+- 骨架只构建一次
+- 数值增量更新
+- 列表结构不变时按稳定 key 更新每行
+- 不注册键盘监听
+- 不修改 React bundle
 
-> 探针开发中发现的真实细节：`NEW_THREAD` 常量在源码里嵌在字符串字面量内部
-> （`return "${NEW_THREAD}";`），抽表达式时必须按原文替换，不能加引号包装，
-> 否则探针会一直报页面语法错误。
+### protocol.mjs
 
-> 覆盖边界：探针只验证了"当前这一种 DOM 状态"（侧边栏存在、对话有内容）。
-> 空白新对话、侧边栏收起、多窗口这几条分支没有在实机上跑到，属于残留风险 ——
-> 面板显示 0 或不更新时优先怀疑这几条分支。
+职责：
 
-### 块 5（主循环）
+- 协议名和版本
+- 能力声明
+- health 枚举
+- payload 基础校验
+- signed auth 结构校验
 
-- `node --check` 通过；`npm test` 全绿；行为基线 31/31 一致
-- 冒烟（隔离状态目录，各 10 秒）：
-  - `--watch`：正常输出「监控启动」与会话累计行
-  - `--watch --cdp`：正常输出推送行（含状态与错峰回声日志），并在数据变化后再次推送
-- 等价简化：`thread === NEW_THREAD`、占位对话、启动加载期三个分支都返回同一个
-  `emptyStats(null, null)`，合并为一条判断（行为不变）
+### 安装脚本
 
-## 当前状态
+`find-codex.ps1`
 
-- 重构块 1–5 全部完成并逐块通过"语法 + 单测 + 行为基线"三重校验；早期按行数统计的进度口径已失效，
-  不再维护该计数。
-- 现行门禁（2026-09-21）：`npm test` **47/47**、行为基线 **31/31 一致**、
-  `verify-live` **13/13**、Playwright 实机 **11 通过 / 2 跳过 / 0 失败**、
-  五处副本 `mismatches = 0`。
-- 重构之后的增量改动（速度口径、按需加载、三段心跳、轮次归属统一等）见 `CHANGELOG.md`；
-  统计口径以 `docs/F1-merge-spec.md` 为准。
+- 定位 codex CLI
+- 定位 Codex 桌面版
+- 定位 Codex++
+- 定位 Node 22+
+- 读取 Codex++ 用户脚本开关
+
+`install.ps1`
+
+- 处理发布布局和源码 staging
+- 安装用户脚本
+- 刷新插件注册
+- 调用自启安装
+
+`install-autostart.ps1`
+
+- 生成 Unicode VBS 与 start-monitor.ps1
+- 注册计划任务
+- 停止旧监控
+- 启动新监控
+
+`uninstall-autostart.ps1`
+
+- 按动作和内容识别本插件资源
+- 支持标准/完全卸载
+
+### history-archive.mjs
+
+- 按会话哈希归档完整结构化请求
+- `turns.json` 保存最新轮次摘要
+- 请求 JSONL 仅追加新记录
+- 60 天保留期
+- 32MB 分段
+- 每 6 小时清理
+- 不包含消息正文、路径或原始线程标识
+
+## 3. 已落地的重要修复
+
+### 数据正确性
+
+- 两代格式统一合并
+- reset-aware 累计归一化
+- 分片合流
+- `--thread` 与 watch 共用分片路径
+- legacy 完整内容指纹去重
+- echo/replay/unique 一对一认领
+- 混合格式当前轮 thread delta
+- 当前提问请求数独立字段
+
+### 页面刷新
+
+- 取消不完整的 `dataKey` 渲染门控
+- 当前轮行按稳定 key 更新
+- 主题变化立即应用
+- 主题观察只监听 `<html>`
+- 悬浮冻结和恢复
+- 紧凑条优先读取 `compactTps`；样本不足显示 `--T/s`
+
+### 协议与安全
+
+- schema v3 签名-only
+- boot payload 验签
+- 深拷贝后再异步验证
+- nonce 防重放
+- seq 单调
+- 安全拒绝计数
+- CDP 客户端审计
+
+### 安装兼容
+
+- PS1 UTF-8 BOM
+- Windows PowerShell 5.1 / 7 双解析
+- PowerShell 5.1 单例数组修复
+- JSON 禁止意外 BOM
+- VBS UTF-16LE
+- 中文安装路径
+- 源码包 staging
+- 旧监控统一停止
+- Node 只选 `.exe` 且取最高 v22+
+
+## 4. 验证门禁
+
+```powershell
+npm run check
+npm test
+node scripts\golden-baseline.mjs --check
+node scripts\verify-live.mjs
+npm run test:live
+node scripts\verify-sync.mjs --deploy "<部署根>"
+```
+
+当前结果：
+
+- 单元测试：65/65
+- Golden：0 不一致
+- verify-live：15/15
+- Playwright：12 通过 / 2 安全跳过
+- 连续重启：5 轮
+- 分页：5 轮
+- 主题：20 轮
+
+## 5. 修改规则
+
+- 先改规格，再改实现
+- 不以单调递增假设处理累计值
+- 不用时间戳作为跨格式唯一身份
+- 不允许无签名负载
+- 不允许键盘监听回归
+- 不允许页面负载携带消息正文或路径
+- 时序类修改必须多轮实机
+- 交付前必须校验四个生效副本

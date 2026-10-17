@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test, { before } from "node:test";
+import { resolveCdpPort } from "../scripts/cdp-port.mjs";
 
 const require = createRequire(import.meta.url);
 const globalNodeModules = path.join(os.homedir(), "AppData", "Roaming", "npm", "node_modules");
@@ -26,7 +27,8 @@ function loadPlaywright() {
 }
 
 const { chromium } = loadPlaywright();
-const CDP_ENDPOINT = process.env.TUI_CDP_URL || "http://127.0.0.1:9229";
+const cdpPort = await resolveCdpPort(process.env.TUI_CDP_PORT || "auto");
+const CDP_ENDPOINT = process.env.TUI_CDP_URL || "http://127.0.0.1:" + cdpPort;
 const PANEL_SELECTOR = "#tui-native";
 const ALLOW_REAL_INPUT = process.env.TUI_ALLOW_REAL_INPUT === "1";
 const realInputSkip = ALLOW_REAL_INPUT
@@ -36,15 +38,29 @@ const realInputSkip = ALLOW_REAL_INPUT
 const PAYLOAD_WHITELIST = new Set([
   "protocolName",
   "schemaVersion",
+  "authRequired",
   "capabilities",
+  "auth",
   "modelContextWindow",
   "requestCount",
+  "currentTurnRequestCount",
   "sessionTotal",
   "sessionInput",
   "sessionCached",
   "sessionOutput",
   "sessionCacheHitRate",
   "sessionTps",
+  "genEstimateTps",
+  "compactTps",
+  "compactSpeedSampleCount",
+  "compactSpeedConfidence",
+  "compactSpeedWindow",
+  "turnWallTps",
+  "effectiveTps",
+  "turnEffectiveTps",
+  "effectiveSampleCount",
+  "effectiveWindow",
+  "speedTimingConfidence",
   "contextUsed",
   "turnTotal",
   "turnInput",
@@ -63,6 +79,7 @@ const PAYLOAD_WHITELIST = new Set([
   "requestDetails",
   "requestDetailsTruncated",
   "requestDetailTotal",
+  "snapshot",
   "modelSwitchCount",
   "cumulativeResetCount",
   "health",
@@ -164,7 +181,9 @@ test("实机：负载协议与隐私白名单", async (t) => {
   ];
   const leaks = leakPatterns.filter(([, pattern]) => pattern.test(raw)).map(([name]) => name);
   t.diagnostic(JSON.stringify({ schemaVersion: payload.schemaVersion, keyCount: keys.length, unknown, leaks }));
-  assert.equal(payload.schemaVersion, 2, "schema 版本应为 2");
+  assert.equal(payload.schemaVersion, 3, "schema 版本应为 3");
+  assert.equal(payload.authRequired, true, "v3 负载必须声明 authRequired=true");
+  assert.ok(payload.auth && /^[0-9a-f]{64}$/.test(payload.auth.mac), "v3 负载必须携带 HMAC 签名");
   assert.deepEqual(unknown, [], "负载出现白名单外的字段");
   assert.deepEqual(leaks, [], "负载疑似包含路径或线程 ID");
 });
@@ -302,24 +321,108 @@ test("实机：Esc 不再关闭弹层（插件不注册键盘监听）", async (
   assert.equal(stillOpen, true, "按当前设计 Esc 不应关闭弹层（键盘监听已按用户要求移除）");
 });
 
-test("实机：无效负载会被页面拒绝", async (t) => {
-  // 注意：这里必须是同步的、绝不 await 任何计时器。
-  // 面板的数据事件处理是同步的（dispatchEvent 返回时 DOM 已更新），一旦让出事件循环，
-  // 监控的心跳推送（运行中 1 秒/次）就可能把注入的非法负载覆盖掉，
-  // 断言随之变成"看运气"（实测间歇失败复现率约 17%，见 CHANGELOG 2026-09-21）。
-  const result = await state.page.evaluate(() => {
+test("实机：无 auth 的伪造 schema v3 负载会被拒绝", async (t) => {
+  const result = await state.page.evaluate(async () => {
     const backup = window.__tuiForCodex;
-    window.__tuiForCodex = { protocolName: "tokens-ui-for-codex", schemaVersion: 2, bogus: true };
+    const forged = JSON.parse(JSON.stringify(backup));
+    delete forged.auth;
+    forged.sessionTotal = 123456789;
+    document.documentElement.setAttribute("data-tui-security", "0");
+    window.__tuiForCodex = forged;
     window.dispatchEvent(new Event("tokens-ui-for-codex"));
+    await new Promise((resolve) => setTimeout(resolve, 60));
     const root = document.getElementById("tui-native");
-    const panelError = root ? root.classList.contains("tui-native-error") : null;
     const ariaLabel = root ? root.getAttribute("aria-label") : null;
+    const security = Number(document.documentElement.getAttribute("data-tui-security") || "0");
     window.__tuiForCodex = backup;
     window.dispatchEvent(new Event("tokens-ui-for-codex"));
-    return { panelError, ariaLabel };
+    return { ariaLabel, security };
   });
-  t.diagnostic("无效负载处理: " + JSON.stringify(result));
-  assert.equal(result.panelError, true, "无效负载未被标记为错误状态");
+  t.diagnostic("无签名负载处理: " + JSON.stringify(result));
+  assert.ok(result.security >= 1, "无签名负载没有进入安全拒绝计数");
+  assert.ok(!String(result.ariaLabel || "").includes("123,456,789"), "伪造总量进入了 UI");
+});
+
+test("实机：紧凑条优先使用稳健速度，样本不足显示 --T/s", async (t) => {
+  const result = await state.page.evaluate(async () => {
+    const original = JSON.parse(JSON.stringify(window.__tuiForCodex));
+    let sequence = Number(original.auth && original.auth.seq) || 0;
+    let allowedNonce = "";
+    let lastPayload = original;
+    const canonicalJson = (value) => {
+      if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+      if (value && typeof value === "object") {
+        return "{" + Object.keys(value).sort()
+          .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+      }
+      return JSON.stringify(value);
+    };
+    const interceptor = (event) => {
+      if (window.__tuiForCodex?.auth?.nonce === allowedNonce) return;
+      window.__tuiForCodex = lastPayload;
+      event.stopImmediatePropagation();
+    };
+    window.addEventListener("tokens-ui-for-codex", interceptor, true);
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(window.__tuiForCodexAuthKey),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const push = async ({ compactTps, sampleCount, confidence, genEstimateTps }) => {
+      const body = JSON.parse(JSON.stringify(original));
+      delete body.auth;
+      body.compactTps = compactTps;
+      body.compactSpeedSampleCount = sampleCount;
+      body.compactSpeedConfidence = confidence;
+      body.compactSpeedWindow = 5;
+      body.genEstimateTps = genEstimateTps;
+      body.updatedAt = new Date().toISOString();
+      const ts = Date.now();
+      const nonce = crypto.randomUUID();
+      const signature = await crypto.subtle.sign(
+        "HMAC",
+        key,
+        new TextEncoder().encode(canonicalJson(body) + "|" + ts + "|" + nonce),
+      );
+      const mac = [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      sequence = Math.max(sequence, Number(window.__tuiForCodex?.auth?.seq) || 0) + 1;
+      const payload = { ...body, auth: { v: 1, ts, nonce, seq: sequence, mac } };
+      allowedNonce = nonce;
+      lastPayload = payload;
+      window.__tuiForCodex = payload;
+      window.dispatchEvent(new Event("tokens-ui-for-codex"));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return document.querySelector("#tui-native .tui-native-tps .tui-native-value")?.textContent;
+    };
+    try {
+      const robust = await push({
+        compactTps: 123.4,
+        sampleCount: 4,
+        confidence: "medium",
+        genEstimateTps: 9999,
+      });
+      const insufficient = await push({
+        compactTps: null,
+        sampleCount: 1,
+        confidence: "low",
+        genEstimateTps: 9999,
+      });
+      await push({
+        compactTps: original.compactTps,
+        sampleCount: original.compactSpeedSampleCount || 0,
+        confidence: original.compactSpeedConfidence || "low",
+        genEstimateTps: original.genEstimateTps,
+      });
+      return { robust, insufficient };
+    } finally {
+      window.removeEventListener("tokens-ui-for-codex", interceptor, true);
+    }
+  });
+  t.diagnostic(JSON.stringify(result));
+  assert.equal(result.robust, "≈123T/s", "稳健速度未被紧凑条采用");
+  assert.equal(result.insufficient, "--T/s", "样本不足时回退到了单条尖峰");
 });
 
 test("实机：Playwright 真实鼠标点击能否打开详情", { skip: realInputSkip }, async (t) => {

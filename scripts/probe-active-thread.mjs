@@ -7,31 +7,31 @@
 // 用法：
 //   node scripts/probe-active-thread.mjs                 # 打印当前解析结果
 //   node scripts/probe-active-thread.mjs --expect <值>   # 与期望值比对，不一致则非 0 退出
-//   可选：--port 9229  --target <target-id>
+//   可选：--port auto|<n>  --target <target-id>
 //
 // 重构流程：改写这段脚本前先跑一次记下结果，改写后再跑一次，两次必须一致。
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { portArgOf, resolveCdpPort } from "./cdp-port.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 const sourceFile = path.join(root, "token-stats.mjs");
 
 const argv = process.argv.slice(2);
-let port = 9229;
 let targetId = "";
 let expected = null;
 let hasExpected = false;
 for (let index = 0; index < argv.length; index += 1) {
-  if (argv[index] === "--port" && Number.isInteger(Number(argv[index + 1]))) port = Number(argv[index + 1]);
-  else if (argv[index] === "--target" && argv[index + 1]) targetId = String(argv[index + 1]).trim();
+  if (argv[index] === "--target" && argv[index + 1]) targetId = String(argv[index + 1]).trim();
   else if (argv[index] === "--expect" && index + 1 < argv.length) {
     expected = argv[index + 1] === "null" ? null : String(argv[index + 1]);
     hasExpected = true;
   }
 }
+const port = await resolveCdpPort(portArgOf(argv));
 
 function fail(message) {
   console.error("探针失败: " + message);

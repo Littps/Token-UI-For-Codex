@@ -1,4 +1,4 @@
-# Tokens UI For Codex —— 卸载登录自启，并停止监控进程
+﻿# Tokens UI For Codex —— 卸载登录自启，并停止监控进程
 #
 # 默认保留日志、会话映射和诊断状态；只有显式传入 -PurgeState 才会清理状态目录。
 #
@@ -21,6 +21,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 
 if ($Full) {
   $PurgeState = $true
@@ -35,7 +36,7 @@ $userScriptsDir = Join-Path $env:APPDATA "Codex++\user_scripts"
 $userScriptName = "tokens-ui-for-codex-panel.js"
 # 识别“属于本插件”的计划任务、快捷方式与用户脚本时，只看它们的动作/内容，不看名字前缀：
 # 历史版本换过名字也能被清掉，脚本里不需要写死任何旧名字。
-$pluginArtifacts = @('token-stats\.mjs', 'guardian\.ps1', 'launch-silent\.vbs')
+$pluginArtifacts = @('token-stats\.mjs', 'guardian\.ps1', 'launch-silent\.vbs', 'launch-confirm\.vbs', 'start-monitor\.(cmd|ps1)')
 $userScriptMarker = 'NativeUiInstalled'
 
 function Write-Info { param([string]$Text) Write-Host ("   " + $Text) }
@@ -82,6 +83,25 @@ foreach ($lnk in $staleLinks) {
 if ($staleLinks.Count -eq 0) { Write-Info "启动文件夹无本插件快捷方式残留。" }
 if ($shell) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
 
+# 清理自定义 URL 协议（tokens-ui-for-codex://start）
+$protoRoot = "HKCU:\Software\Classes\tokens-ui-for-codex"
+if (Test-Path -LiteralPath $protoRoot) {
+  Remove-Item -Path $protoRoot -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $protoRoot) { Write-Note "启动协议键未能删除：tokens-ui-for-codex://start" }
+  else { Write-Ok "已删除启动协议：tokens-ui-for-codex://start" }
+} else {
+  Write-Info "启动协议不存在，跳过。"
+}
+
+# 清理开始菜单入口
+$startMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Tokens UI For Codex - 启动监控.lnk"
+if (Test-Path -LiteralPath $startMenuShortcut) {
+  Remove-Item -LiteralPath $startMenuShortcut -Force -ErrorAction SilentlyContinue
+  Write-Ok "已删除开始菜单入口：Tokens UI For Codex - 启动监控"
+} else {
+  Write-Info "开始菜单无本插件入口残留。"
+}
+
 # ---------------------------------------------- 2) 停止监控与旧版守护进程
 Write-Host "`n== 2/4 停止后台进程" -ForegroundColor Cyan
 
@@ -124,13 +144,15 @@ foreach ($name in @("guardian.pid", "guardian-state.json", "guardian.lock", "mon
 
 if (-not $PurgeState) {
   if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
-  [ordered]@{
-    stateVersion = 2
+  $stateJson = [ordered]@{
+    stateVersion = 3
     installed = $false
     mechanism = "scheduled-task"
     taskName = $taskName
     uninstalledAt = (Get-Date).ToUniversalTime().ToString("o")
-  } | ConvertTo-Json -Compress | Set-Content -LiteralPath $autostartState -Encoding UTF8
+  } | ConvertTo-Json -Compress
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($autostartState, ($stateJson + "`r`n"), $utf8NoBom)
   Write-Host ("   已保留运行状态和日志：" + $stateDir) -ForegroundColor Cyan
 } else {
   if (Test-Path -LiteralPath $stateDir) { Remove-Item -LiteralPath $stateDir -Recurse -Force -ErrorAction SilentlyContinue }

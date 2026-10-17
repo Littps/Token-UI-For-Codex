@@ -1,4 +1,4 @@
-# Tokens UI For Codex —— 动态定位工具（install / uninstall / autostart 共用）
+﻿# Tokens UI For Codex —— 动态定位工具（install / uninstall / autostart 共用）
 #
 # 为什么需要它（全部来自实测）：
 #   1) Codex 桌面版是 MSIX 安装（WindowsApps），只在它自己启动的子进程里
@@ -156,16 +156,25 @@ function Get-CodexPlusPlusSwitchState {
 
 # ---- 定位 Node（PATH → Codex 自带运行时 → 常见安装位置）---------------------
 # 返回对象：{ path, version, major, source }
+# 规则：
+#   1) 只接受 node.exe（.cmd/.bat 包装器可能指向旧版或被篡改，不能作为运行时）；
+#   2) 收集全部候选并选版本最高的 22+，不能“先找到哪个用哪个”；
+#   3) 找不到 22+ 就返回 $null，由安装器明确提示下载，不能静默退回旧 Node。
 function Resolve-NodeCli {
-  $candidates = @()
-  $fromPath = Get-Command node -ErrorAction SilentlyContinue
-  if ($fromPath -and $fromPath.Source) { $candidates += $fromPath.Source }
+  $pathSources = @()
+  foreach ($command in @(Get-Command node -All -ErrorAction SilentlyContinue)) {
+    if ($command -and $command.Source -and [System.IO.Path]::GetExtension($command.Source).ToLowerInvariant() -eq ".exe") {
+      $pathSources += $command.Source
+    }
+  }
 
-  # Codex 自带运行时（实测 v24），用户没装 Node 时的最佳回落
+  $candidates = @($pathSources)
+
+  # Codex 自带运行时（实测 v24），用户没装 Node 时的最佳回落。
   $runtimeRoot = Join-Path $env:USERPROFILE ".cache\codex-runtimes"
   if (Test-Path -LiteralPath $runtimeRoot) {
-    $candidates += Get-ChildItem -LiteralPath $runtimeRoot -Recurse -Filter "node.exe" -ErrorAction SilentlyContinue |
-      Select-Object -ExpandProperty FullName
+    $candidates += @(Get-ChildItem -LiteralPath $runtimeRoot -Recurse -Filter "node.exe" -File -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty FullName)
   }
 
   $candidates += @(
@@ -173,17 +182,39 @@ function Resolve-NodeCli {
     (Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe")
   )
 
+  $seen = @{}
+  $valid = @()
   foreach ($candidate in $candidates) {
-    if (-not $candidate -or -not (Test-Path -LiteralPath $candidate)) { continue }
+    if (-not $candidate) { continue }
+    $full = [System.IO.Path]::GetFullPath($candidate)
+    if ($seen.ContainsKey($full)) { continue }
+    $seen[$full] = $true
+    if ([System.IO.Path]::GetExtension($full).ToLowerInvariant() -ne ".exe") { continue }
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }
+
     $version = ""
-    try { $version = ((& $candidate --version 2>$null) | Select-Object -First 1).Trim() } catch { continue }
-    if ($version -notmatch "^v(\d+)") { continue }
-    return [pscustomobject]@{
-      path    = $candidate
-      version = $version
-      major   = [int]$Matches[1]
-      source  = if ($fromPath -and $fromPath.Source -eq $candidate) { "path" } else { "fallback" }
+    try { $version = [string]((& $full --version 2>$null) | Select-Object -First 1); $version = $version.Trim() } catch { continue }
+    if ($version -notmatch "^v(\d+)\.(\d+)\.(\d+)") { continue }
+    $versionObject = $null
+    try { $versionObject = [version]($Matches[1] + "." + $Matches[2] + "." + $Matches[3]) } catch { continue }
+    if ($versionObject.Major -lt 22) { continue }
+
+    $source = "fallback"
+    foreach ($pathSource in $pathSources) {
+      if ([string]::Equals([System.IO.Path]::GetFullPath($pathSource), $full, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $source = "path"
+        break
+      }
+    }
+    $valid += [pscustomobject]@{
+      path          = $full
+      version       = $version
+      major         = [int]$versionObject.Major
+      versionObject = $versionObject
+      source        = $source
     }
   }
-  return $null
+
+  if ($valid.Count -eq 0) { return $null }
+  return ($valid | Sort-Object -Property @{ Expression = { $_.versionObject }; Descending = $true } | Select-Object -First 1)
 }

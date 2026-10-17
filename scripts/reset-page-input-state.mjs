@@ -1,10 +1,11 @@
 // 清理诊断脚本在 Codex 页面上留下的残留状态。
 // 只做读取与复位：移除探针元素、删除探针全局变量、关闭焦点模拟。
-// 不注入任何键鼠事件。用法：node scripts/reset-page-input-state.mjs
+// 不注入任何键鼠事件。用法：node scripts/reset-page-input-state.mjs [--port auto|<n>]
 
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { portArgOf, resolveCdpPort } from "./cdp-port.mjs";
 
 const require = createRequire(import.meta.url);
 const globalNodeModules = path.join(os.homedir(), "AppData", "Roaming", "npm", "node_modules");
@@ -19,7 +20,8 @@ function loadPlaywright() {
 }
 
 const { chromium } = loadPlaywright();
-const browser = await chromium.connectOverCDP("http://127.0.0.1:9229");
+const port = await resolveCdpPort(portArgOf(process.argv.slice(2)));
+const browser = await chromium.connectOverCDP("http://127.0.0.1:" + port);
 const pages = browser.contexts().flatMap((context) => context.pages());
 const page = pages.find((item) => item.url().startsWith("app://-/") && !item.url().includes("avatar-overlay"));
 if (!page) throw new Error("未找到 Codex 页面目标");

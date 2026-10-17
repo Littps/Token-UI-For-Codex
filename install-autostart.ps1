@@ -1,4 +1,4 @@
-# Tokens UI For Codex —— 登录自启安装（计划任务直启版）
+﻿# Tokens UI For Codex —— 登录自启安装（计划任务直启版）
 #
 # 作用：注册一个登录触发的计划任务，由 Windows 直接拉起 Node 监控进程。
 #
@@ -19,19 +19,17 @@
 #   pwsh -NoProfile -ExecutionPolicy Bypass -File .\install-autostart.ps1
 #
 # 可选参数：
-#   -Port <int>    监控使用的 CDP 端口，默认 9229
+#   -Port <auto|int> 监控使用的 CDP 端口：默认 auto（从 ChatGPT.exe 命令行自动发现），也可指定 1-65535
 #   -SkipStart     只注册任务，不立即启动监控
 
 [CmdletBinding()]
 param(
-  [int]$Port = 9229,
-  [switch]$SkipStart,
-  # 兜底巡检周期（分钟）：监控进程若意外死亡，最多等这么久就会被自动拉起。
-  # 该触发在监控正常运行时不会产生任何新进程（被 IgnoreNew 跳过）。
-  [int]$WatchdogMinutes = 5
+  [string]$Port = "auto",
+  [switch]$SkipStart
 )
 
 $ErrorActionPreference = "Continue"
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $statsScript = Join-Path $scriptDir "token-stats.mjs"
@@ -43,12 +41,20 @@ $taskName = "tokens-ui-for-codex-monitor"
 $codexPlusPlusUserScripts = Join-Path $env:APPDATA "Codex++\user_scripts"
 # 识别“属于本插件”的计划任务与快捷方式时，只看它们指向的脚本，不看名字前缀：
 # 这样历史版本换过多少种名字都能清掉，脚本里也不需要写死任何旧名字。
-$pluginArtifacts = @('token-stats\.mjs', 'guardian\.ps1', 'launch-silent\.vbs')
+$pluginArtifacts = @('token-stats\.mjs', 'guardian\.ps1', 'launch-silent\.vbs', 'launch-confirm\.vbs', 'start-monitor\.(cmd|ps1)')
 
 function Write-Info { param([string]$Text) Write-Host ("   " + $Text) }
 function Write-Ok { param([string]$Text) Write-Host ("   [OK] " + $Text) -ForegroundColor Green }
 function Write-Note { param([string]$Text) Write-Host ("   [提示] " + $Text) -ForegroundColor Yellow }
 function Write-Bad { param([string]$Text) Write-Host ("   [错误] " + $Text) -ForegroundColor Red }
+
+if ($Port -ne "auto") {
+  $portNumber = 0
+  if (-not [int]::TryParse($Port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+    Write-Bad ("端口参数无效：" + $Port + "（应为 auto 或 1-65535）")
+    exit 1
+  }
+}
 
 foreach ($dir in @($stateDir, $logDir)) {
   if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -174,23 +180,110 @@ try {
 Set sh = CreateObject("WScript.Shell")
 sh.Run "$vbsCommand", 0, True
 "@
-  [System.IO.File]::WriteAllText($launcherPath, $vbsText, [System.Text.Encoding]::ASCII)
+  # UTF-16LE + BOM：VBS 必须能保存中文安装路径。ASCII 曾把“中文”静默改写成 “???”。
+  [System.IO.File]::WriteAllText($launcherPath, $vbsText, (New-Object System.Text.UnicodeEncoding($false, $true)))
   Write-Ok "已生成无窗口启动器：launch-silent.vbs"
+
+  # ---- 人工确认启动（详情面板的"启动监控"按钮 / 开始菜单入口）------------
+  # 设计原则：协议处理器只负责"打开终端"，绝不直接执行监控；
+  # 必须由用户在终端里按 Y 确认后才启动，便于企业审计与防误触。
+  $confirmScript = Join-Path $scriptDir "start-monitor.ps1"
+  $nodeLiteral = "'" + $nodePath.Replace("'", "''") + "'"
+  $portLiteral = "'" + $Port.Replace("'", "''") + "'"
+  # 使用 PowerShell 确认窗口，而不是 cmd.exe 批处理：
+  #   - 中文用户名/安装路径不再依赖活动代码页；
+  #   - Windows PowerShell 5.1 与 PowerShell 7 均可运行；
+  #   - 仍保留显式 Y/N 确认，企业审计时能看到将要执行的完整命令。
+  $confirmLines = @(
+    '# Tokens UI For Codex - 人工确认启动器（安装时生成）',
+    '$ErrorActionPreference = "Continue"',
+    '$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition',
+    '$statsScript = Join-Path $scriptDir "token-stats.mjs"',
+    ('$nodePath = ' + $nodeLiteral),
+    ('$port = ' + $portLiteral),
+    'if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) {',
+    '  $locator = Join-Path $scriptDir "find-codex.ps1"',
+    '  if (Test-Path -LiteralPath $locator) { . $locator }',
+    '  if (Get-Command Resolve-NodeCli -ErrorAction SilentlyContinue) { $info = Resolve-NodeCli; if ($info) { $nodePath = $info.path } }',
+    '}',
+    'Write-Host ""',
+    'Write-Host "  Tokens UI For Codex - Local monitor start confirmation" -ForegroundColor Cyan',
+    'Write-Host "  --------------------------------------------------"',
+    'Write-Host "  Command to run (local only, no network access):"',
+    'Write-Host ("    `"" + $nodePath + "`" `"" + $statsScript + "`" --watch --cdp --port " + $port)',
+    'Write-Host ""',
+    'if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) { Write-Host "Node.js 22+ was not found. Install Node.js 22+ and retry." -ForegroundColor Red; Read-Host "Press Enter to close"; exit 1 }',
+    '& $nodePath $statsScript --instance-status',
+    'if ($LASTEXITCODE -eq 0) { Write-Host "Monitor is already running. This window will close."; Start-Sleep -Seconds 2; exit 0 }',
+    'Write-Host ""',
+    '$answer = Read-Host "Start monitor? [Y] Start  [N] Cancel"',
+    'if ($answer -notmatch "^(?i)y$") { Write-Host "Cancelled."; Start-Sleep -Seconds 2; exit 1 }',
+    '$launcher = Join-Path $scriptDir "launch-silent.vbs"',
+    'if (Test-Path -LiteralPath $launcher -PathType Leaf) {',
+    '  Start-Process -FilePath (Join-Path $env:WINDIR "System32\wscript.exe") -ArgumentList @("//nologo", ("`"" + $launcher + "`"")) -WindowStyle Hidden',
+    '} else {',
+    '  $launchArgs = @(("`"" + $statsScript + "`""), "--watch", "--cdp", "--port", $port)',
+    '  Start-Process -FilePath $nodePath -ArgumentList $launchArgs -WindowStyle Hidden',
+    '}',
+    'Start-Sleep -Seconds 4',
+    '& $nodePath $statsScript --instance-status',
+    'if ($LASTEXITCODE -ne 0) { Write-Host "Monitor did not start. Check %LOCALAPPDATA%\tokens-ui-for-codex\logs." -ForegroundColor Red; Read-Host "Press Enter to close"; exit 1 }',
+    'Write-Host "Monitor is running. This window will close." -ForegroundColor Green',
+    'Start-Sleep -Seconds 2',
+    'exit 0'
+  )
+  $confirmText = (($confirmLines -join "`r`n") + "`r`n")
+  [System.IO.File]::WriteAllText($confirmScript, $confirmText, (New-Object System.Text.UTF8Encoding($true)))
+  $oldConfirmCmd = Join-Path $scriptDir "start-monitor.cmd"
+  if (Test-Path -LiteralPath $oldConfirmCmd) { Remove-Item -LiteralPath $oldConfirmCmd -Force -ErrorAction SilentlyContinue }
+  Write-Ok "已生成人工确认启动脚本：start-monitor.ps1"
+
+  $confirmLauncher = Join-Path $scriptDir "launch-confirm.vbs"
+  $confirmVbs = @"
+' Tokens UI For Codex - open confirmation console (generated by install-autostart.ps1)
+Set sh = CreateObject("WScript.Shell")
+sh.Run "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ""$confirmScript""", 1, False
+"@
+  [System.IO.File]::WriteAllText($confirmLauncher, $confirmVbs, (New-Object System.Text.UnicodeEncoding($false, $true)))
+  Write-Ok "已生成确认启动器：launch-confirm.vbs"
+
+  # 自定义 URL 协议：tokens-ui-for-codex://start（仅当前用户，无需管理员）
+  # 命令固定、不接收 %1 参数，避免被任意网页传参利用。
+  $protoRoot = "HKCU:\Software\Classes\tokens-ui-for-codex"
+  Remove-Item -Path $protoRoot -Recurse -Force -ErrorAction SilentlyContinue
+  New-Item -Path (Join-Path $protoRoot "shell\open\command") -Force | Out-Null
+  Set-ItemProperty -Path $protoRoot -Name "(Default)" -Value "URL:Tokens UI For Codex"
+  Set-ItemProperty -Path $protoRoot -Name "URL Protocol" -Value ""
+  $protoCommand = '"' + (Join-Path $env:WINDIR "System32\wscript.exe") + '" //nologo "' + $confirmLauncher + '"'
+  Set-ItemProperty -Path (Join-Path $protoRoot "shell\open\command") -Name "(Default)" -Value $protoCommand
+  Write-Ok "已注册启动协议：tokens-ui-for-codex://start（仅当前用户）"
+
+  # 开始菜单兜底入口（企业策略禁用自定义协议时仍可手动启动）
+  try {
+    $startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
+    $shortcutPath = Join-Path $startMenu "Tokens UI For Codex - 启动监控.lnk"
+    $shell = New-Object -ComObject WScript.Shell
+    $sc = $shell.CreateShortcut($shortcutPath)
+    $sc.TargetPath = Join-Path $env:WINDIR "System32\wscript.exe"
+    $sc.Arguments = '//nologo "' + $confirmLauncher + '"'
+    $sc.WorkingDirectory = $scriptDir
+    $sc.Description = "Tokens UI For Codex - 手动启动监控"
+    $sc.Save()
+    Write-Ok "已创建开始菜单入口：Tokens UI For Codex - 启动监控"
+  } catch {
+    Write-Note ("开始菜单入口创建失败（不影响协议启动）：" + $_.Exception.Message)
+  }
 
   $wscriptPath = Join-Path $env:WINDIR "System32\wscript.exe"
   $action = New-ScheduledTaskAction -Execute $wscriptPath -Argument ('//nologo "' + $launcherPath + '"') -WorkingDirectory $scriptDir
   $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-  # 兜底巡检必须是**独立的 Once 触发器**。
-  # 实测：把 Repetition 挂在 LogonTrigger 上不会真正触发；
-  # 独立触发器带明确的 StartBoundary + 无 Duration（= 无限重复）才可靠。
-  # 时间回拨一分钟，确保注册后立即进入重复周期。
-  $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1) -RepetitionInterval (New-TimeSpan -Minutes $WatchdogMinutes)
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -DontStopOnIdleEnd -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
   $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logonTrigger, $watchdogTrigger) -Settings $settings -Principal $principal -Description "Tokens UI For Codex: start the token monitor at logon (no guardian process)" -Force | Out-Null
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logonTrigger) -Settings $settings -Principal $principal -Description "Tokens UI For Codex: start the token monitor at logon (no watchdog)" -Force | Out-Null
   Write-Ok ("已注册计划任务：" + $taskName)
   Write-Info "动作：wscript.exe 调起 launch-silent.vbs（无终端窗口）"
-  Write-Info ("触发器：登录时 + 每 " + $WatchdogMinutes + " 分钟兜底巡检")
+  Write-Info ("CDP 端口：" + $Port + "（auto = 从 ChatGPT.exe 命令行自动发现）")
+  Write-Info "触发器：仅登录时（不设周期巡检）；安装完成后会立即启动一次"
   Write-Info "重复实例：不启动新实例（已在运行时空转，不产生新进程）；运行时限：不限；失败重启：3 次 / 间隔 1 分钟。"
 } catch {
   Write-Bad ("计划任务注册失败：" + $_.Exception.Message)
@@ -198,20 +291,22 @@ sh.Run "$vbsCommand", 0, True
 }
 
 # ------------------------------------------------------- 4) 立即启动（可选）
-# 触发策略：安装完毕立即执行一次；之后由"每 5 分钟兜底巡检"维护；
-# 登录时另有 AtLogOn 触发器。启动失败必须显式报告（自动重试 1 次），不能静默。
+# 触发策略：安装完毕立即执行一次；之后仅登录时启动；
+# 手动启动通过详情面板「启动监控」按钮或开始菜单入口。启动失败必须显式报告（自动重试 1 次）。
 Write-Host "`n== 4/5 立即启动监控" -ForegroundColor Cyan
 
 function Get-MonitorProcesses {
-  param([string]$ScriptPath)
+  # 不绑定安装目录：升级/换盘/部署副本变化后，旧监控也必须被识别并释放。
+  # token-stats.mjs + --watch 是本插件监控的稳定命令指纹。
   return @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like ("*" + $ScriptPath + "*") })
+    Where-Object { $_.CommandLine -and $_.CommandLine -match 'token-stats\.mjs' -and $_.CommandLine -match '--watch' })
 }
 
-$running = Get-MonitorProcesses -ScriptPath $statsScript
+$running = @(Get-MonitorProcesses)
+$startFailed = $false
 
 if ($SkipStart) {
-  Write-Note "按参数要求跳过立即启动；登录触发与 5 分钟兜底巡检仍会照常拉起。"
+  Write-Note "按参数要求跳过立即启动；登录触发仍会照常拉起，也可从详情面板/开始菜单手动启动。"
 } else {
   # 先停掉已在运行的旧实例：脚本内容可能在本次更新中已变化，而运行中的进程仍使用内存里的旧代码。
   if ($running.Count -gt 0) {
@@ -234,7 +329,7 @@ if ($SkipStart) {
       Write-Note ("第 " + $attempt + " 次触发任务失败：" + $_.Exception.Message)
     }
     Start-Sleep -Seconds 3
-    $after = Get-MonitorProcesses -ScriptPath $statsScript
+    $after = @(Get-MonitorProcesses)
     if ($after.Count -gt 0) {
       $attemptNote = if ($attempt -gt 1) { "，第 " + $attempt + " 次尝试成功" } else { "" }
       Write-Ok ("监控已启动（PID " + $after[0].ProcessId + $attemptNote + "）")
@@ -244,30 +339,37 @@ if ($SkipStart) {
     if ($attempt -lt 2) { Write-Note "本次未检测到监控进程，3 秒后自动重试…" }
   }
   if (-not $started) {
+    $startFailed = $true
     Write-Bad "立即启动失败：触发任务后仍未检测到监控进程（已自动重试 1 次）。"
     Write-Note ("可手动重试：Start-ScheduledTask -TaskName `"" + $taskName + "`"")
-    Write-Note "兜底巡检仍会每 5 分钟尝试拉起；如持续失败请检查任务状态与监控日志。"
+    Write-Note "也可从详情面板「启动监控」或开始菜单入口手动重试；如持续失败请检查任务状态与监控日志。"
   }
 }
 
 # ------------------------------------------------------------------ 5) 汇总
 Write-Host "`n== 5/5 完成" -ForegroundColor Cyan
 
-[ordered]@{
-  stateVersion = 2
+$stateJson = [ordered]@{
+  stateVersion = 3
   installed = $true
   mechanism = "scheduled-task"
+  schemaVersion = 3
+  launcherEncoding = "utf-16le"
+  confirmationScript = "start-monitor.ps1"
   taskName = $taskName
   nodePath = $nodePath
   scriptPath = $statsScript
   port = $Port
   installedAt = (Get-Date).ToUniversalTime().ToString("o")
-} | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $stateDir "autostart-state.json") -Encoding UTF8
+} | ConvertTo-Json -Compress
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText((Join-Path $stateDir "autostart-state.json"), ($stateJson + "`r`n"), $utf8NoBom)
 
 Write-Host "后续说明：" -ForegroundColor White
-Write-Host "   1) 触发方式：安装完成时立即启动一次；之后每 5 分钟兜底巡检（已在运行则自动跳过）；登录时也会启动。"
+Write-Host "   1) 触发方式：安装完成时立即启动一次；之后仅登录时自启；手动启动用详情面板按钮或开始菜单。"
 Write-Host "   2) 计划任务直接拉起 Node 监控，不经过 PowerShell，不需要管理员权限。"
 Write-Host "   3) Codex 不在运行时监控保持待命，不会退出；Codex 启动后自动开始上报。"
 Write-Host ("   4) 运行日志：" + (Join-Path $logDir "watch-YYYYMMDD.log"))
 Write-Host "   5) 卸载：运行 uninstall-autostart.ps1"
+if ($startFailed) { exit 1 }
 exit 0

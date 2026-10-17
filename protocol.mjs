@@ -1,5 +1,7 @@
 export const PROTOCOL_NAME = "tokens-ui-for-codex";
-export const PROTOCOL_SCHEMA_VERSION = 2;
+// v3 起只接受签名负载：无 auth、坏 MAC、过期时间戳、nonce 重放与 seq 倒退均拒绝。
+// 旧监控（v2）会因 supportedSchemaVersions 不含 3 而明确失败，安装器负责先停旧进程。
+export const PROTOCOL_SCHEMA_VERSION = 3;
 export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([PROTOCOL_SCHEMA_VERSION]);
 
 export const PROTOCOL_CAPABILITIES = Object.freeze([
@@ -8,9 +10,14 @@ export const PROTOCOL_CAPABILITIES = Object.freeze([
   "request-count",
   "cache-split",
   "context-usage",
+  "speed-estimate",
+  "effective-speed",
   "turn-summaries",
   "request-details",
   "health-snapshot",
+  "current-turn-request-count",
+  "signed-payload",
+  "robust-speed",
 ]);
 
 export const HEALTH_STATUSES = Object.freeze([
@@ -70,9 +77,6 @@ export function makeHealth(overrides = {}) {
     lastErrorCode: null,
     lastErrorAt: null,
     monitorRunning: true,
-    // 已废弃：守护进程在「自启架构调整」中移除，此字段自那时起恒为 null。
-    // 保留是为了向后兼容——旧页面会读它，schema 也仍然声明它。
-    guardianRunning: null,
     autostartInstalled: null,
     installationState: "ready",
     ...overrides,
@@ -104,7 +108,7 @@ export function validateHealth(health) {
   for (const key of ["lastSuccessAt", "lastErrorAt", "lastErrorCode"]) {
     if (!isNullableString(health[key])) errors.push("health." + key + " must be null or a string");
   }
-  for (const key of ["guardianRunning", "autostartInstalled"]) {
+  for (const key of ["autostartInstalled"]) {
     if (health[key] != null && typeof health[key] !== "boolean") errors.push("health." + key + " must be null or boolean");
   }
   if (typeof health.installationState !== "string" || !INSTALL_STATES.includes(health.installationState)) {
@@ -139,12 +143,23 @@ function validateRequest(request, index) {
   return errors;
 }
 
+function validateAuth(auth) {
+  const errors = [];
+  if (!auth || typeof auth !== "object" || Array.isArray(auth)) return ["auth must be an object"];
+  if (auth.v !== 1) errors.push("auth.v is invalid");
+  if (!isFiniteNumber(auth.ts) || auth.ts < 0) errors.push("auth.ts is invalid");
+  if (typeof auth.nonce !== "string" || auth.nonce.length < 16 || auth.nonce.length > 64) errors.push("auth.nonce is invalid");
+  if (!Number.isInteger(auth.seq) || auth.seq < 1) errors.push("auth.seq is invalid");
+  if (typeof auth.mac !== "string" || !/^[0-9a-f]{64}$/.test(auth.mac)) errors.push("auth.mac is invalid");
+  return errors;
+}
+
 export function negotiateSchemaVersion(remoteVersions) {
   const offered = Array.isArray(remoteVersions) ? remoteVersions : [];
   return SUPPORTED_SCHEMA_VERSIONS.find((version) => offered.includes(version)) || null;
 }
 
-export function validatePayload(payload, { allowLegacy = true } = {}) {
+export function validatePayload(payload, { allowLegacy = true, requireAuth = false } = {}) {
   const errors = [];
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return { ok: false, errors: ["payload must be an object"] };
@@ -153,26 +168,41 @@ export function validatePayload(payload, { allowLegacy = true } = {}) {
   if (!Number.isInteger(payload.schemaVersion) || !SUPPORTED_SCHEMA_VERSIONS.includes(payload.schemaVersion)) {
     errors.push("unsupported schemaVersion: " + String(payload.schemaVersion));
   }
+  if (payload.authRequired !== true) errors.push("authRequired must be true");
+  if (requireAuth) errors.push(...validateAuth(payload.auth));
   if (!Array.isArray(payload.capabilities) || payload.capabilities.some((item) => typeof item !== "string")) {
     errors.push("capabilities must be an array of strings");
   }
-  for (const key of ["requestCount", "turnTotal", "turnInput", "turnOutput", "currentTurnIndex", "turnTotalCount", "requestDetailTotal", "modelSwitchCount", "cumulativeResetCount", "turnsLimit", "requestsLimit"]) {
+  for (const key of ["requestCount", "currentTurnRequestCount", "turnTotal", "turnInput", "turnOutput", "currentTurnIndex", "turnTotalCount", "requestDetailTotal", "modelSwitchCount", "cumulativeResetCount", "turnsLimit", "requestsLimit"]) {
     if (!isNonNegativeNumber(payload[key])) errors.push(key + " must be a non-negative number");
   }
-  for (const key of ["sessionTotal", "contextUsed", "modelContextWindow", "sessionInput", "sessionCached", "sessionOutput", "turnCached", "turnTps"]) {
+  for (const key of ["compactSpeedSampleCount", "compactSpeedWindow"]) {
+    if (payload[key] != null && !isNonNegativeNumber(payload[key])) errors.push(key + " must be a non-negative number");
+  }
+  for (const key of ["sessionTotal", "contextUsed", "modelContextWindow", "sessionInput", "sessionCached", "sessionOutput", "turnCached", "turnTps", "turnWallTps", "sessionTps", "lastRequestTps", "genEstimateTps", "compactTps", "effectiveTps", "turnEffectiveTps"]) {
     if (!isNullableNonNegativeNumber(payload[key])) errors.push(key + " must be null or a non-negative number");
+  }
+  for (const key of ["effectiveSampleCount", "effectiveWindow"]) {
+    if (!isNonNegativeNumber(payload[key])) errors.push(key + " must be a non-negative number");
+  }
+  if (payload.speedTimingConfidence != null && !["high", "medium", "low"].includes(payload.speedTimingConfidence)) {
+    errors.push("speedTimingConfidence is invalid");
+  }
+  if (payload.compactSpeedConfidence != null && !["high", "medium", "low"].includes(payload.compactSpeedConfidence)) {
+    errors.push("compactSpeedConfidence is invalid");
   }
   for (const key of ["turnsTruncated", "requestDetailsTruncated", "sessionChanged"]) {
     if (typeof payload[key] !== "boolean") errors.push(key + " must be boolean");
   }
+  if (payload.snapshot != null && typeof payload.snapshot !== "boolean") errors.push("snapshot must be boolean");
   if (!Array.isArray(payload.turns)) errors.push("turns must be an array");
   if (!Array.isArray(payload.requestDetails)) errors.push("requestDetails must be an array");
   if (Array.isArray(payload.turns)) {
-    if (payload.turns.length > 1000) errors.push("turns exceeds the 1000-row limit");
+    if (payload.turns.length > 500) errors.push("turns exceeds the 500-row limit");
     payload.turns.forEach((turn, index) => errors.push(...validateTurn(turn, index)));
   }
   if (Array.isArray(payload.requestDetails)) {
-    if (payload.requestDetails.length > 1000) errors.push("requestDetails exceeds the 1000-row limit");
+    if (payload.requestDetails.length > 500) errors.push("requestDetails exceeds the 500-row limit");
     payload.requestDetails.forEach((request, index) => errors.push(...validateRequest(request, index)));
   }
   if (typeof payload.updatedAt !== "string" || !payload.updatedAt) errors.push("updatedAt must be a non-empty string");

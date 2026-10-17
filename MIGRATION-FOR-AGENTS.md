@@ -1,124 +1,202 @@
-# 迁移指南 —— 把 Tokens UI For Codex 移到另一台 Windows 电脑
+# Tokens UI For Codex 跨电脑迁移指南
 
-面向 Agent 与手动操作者。目标：在新电脑上得到与旧电脑一致的工作状态，
-且每一步都能验证"是否真的到位"。作者 **Littps**。
+面向 Agent 与手动操作者。目标是把当前有效版本迁移到另一台 Windows 电脑，
+同时避免带入旧机器的会话映射、日志和插件 cache 污染。
 
-## 0. 迁移前：新电脑必须具备什么
+作者：**Littps**
 
-| 项目 | 检查方式 | 不满足时 |
+## 1. 目标电脑依赖
+
+| 依赖 | 检查 | 不满足时 |
 | --- | --- | --- |
 | Windows 10 22H2 / 11 | `[Environment]::OSVersion` | 不支持 |
-| Codex / ChatGPT 桌面版 | `Get-AppxPackage -Name "*Codex*"` 或进程 `ChatGPT.exe` | 先安装桌面版 |
-| Codex++ | 进程 `codex-plus-plus.exe` 或 `%LOCALAPPDATA%\Programs\Codex++\codex-plus-plus.exe` | 先安装 Codex++ |
-| Codex++ 用户脚本已启用 | `%APPDATA%\Codex++\user_scripts.json` 的 `enabled`（**只读检查**） | 在 Codex++ 里启用后重跑安装器 |
-| Node.js 22+ | `node --version`，或 Codex 自带运行时 `%USERPROFILE%\.cache\codex-runtimes` 下存在 `node.exe` | 二选一即可；都没有则装 Node 22+ |
-| PowerShell 5.1+ | 系统自带 | — |
+| Codex / ChatGPT 桌面版 | `Get-AppxPackage -Name "*Codex*"` 或 `ChatGPT.exe` | 先安装 |
+| Codex++ | `codex-plus-plus.exe` 或常见安装目录 | 先安装 |
+| Codex++ 用户脚本已启用 | 只读检查 `user_scripts.json` 的 `enabled` | 在 Codex++ 设置中开启 |
+| Node.js 22+ | `node --version`，或 Codex 自带运行时 | 安装 Node 22+ |
+| PowerShell 5.1+ | `powershell.exe -NoProfile -Command "$PSVersionTable.PSVersion"` | 修复系统 PowerShell |
 
-Node 可以省略：Codex 桌面版自带运行时（实测 v24）会被自动复用。
-`find-codex.ps1` 的查找顺序是 **PATH → Codex 自带运行时 → 常见安装位置**；都找不到时安装器会
-明确报错并提示安装，而不是静默失败。
+无需单独安装 Node：Codex 桌面版自带运行时可由 `find-codex.ps1` 自动发现。
 
-## 1. 需要带走什么
+## 2. 应迁移什么
 
-只需要**一个部署包目录**（含 `install.bat`、`install.ps1`、`DEPLOYMENT.md`、`.agents\`、`plugins\`）。
+推荐迁移完整部署目录：
 
-**不需要**带走状态目录（`%LOCALAPPDATA%\tokens-ui-for-codex\`）、日志与会话映射：
-它们会在新机器上重新生成，旧机器的历史数据不迁移（也不建议迁移，避免会话映射错配）。
+```text
+Tokens UI For Codex/
+├─ install.bat
+├─ install.ps1
+├─ DEPLOYMENT.md
+├─ .agents/plugins/marketplace.json
+└─ plugins/tokens-ui-for-codex/
+```
 
-如果确实要保留旧机器的日志做对照，可以单独复制 `logs\` 目录，但**不要复制
-`client-thread-map.json`**（它记录的是旧机器的线程 ID 映射）。
+也可以迁移源码压缩包，然后运行根目录 `install.ps1`。
 
-## 2. 安装步骤（新电脑）
+源码包没有 `plugins/` 时，安装器会生成：
 
-1. 把包目录放到任意位置（例如桌面；路径不要放在需要管理员权限的位置）。
-2. 运行一键安装：
+```text
+%LOCALAPPDATA%\tokens-ui-for-codex\install-stage\
+```
 
-   ```powershell
-   pwsh -NoProfile -ExecutionPolicy Bypass -File "<包根>\install.ps1"
-   ```
+## 3. 不应迁移什么
 
-   或直接双击 `<包根>\install.bat`（优先 PowerShell 7，回退 5.1）。
-3. 完全退出并重新打开 Codex 桌面版。
+以下内容属于旧机器状态，不复制：
 
-安装器会自动：定位 `codex` CLI（含 MSIX 的 bin 哈希目录）、定位 Node（含 Codex 自带运行时）、
-检查 Codex++ 与其用户脚本总开关、写入用户脚本（备份 + SHA-256 校验）、注册本地插件、
-注册计划任务并**立即启动一次**监控（失败自动重试 1 次）。
+```text
+%LOCALAPPDATA%\tokens-ui-for-codex\
+```
 
-## 3. 迁移后的验证（四条硬标准 + 页面侧）
+尤其是：
+
+- `client-thread-map.json`：旧机器线程映射
+- `monitor.lock`：旧 PID
+- `autostart-state.json`：旧安装路径
+- `last-summary.json`：旧会话简略快照
+- `logs\`：旧机器排障日志
+- `install-stage\`：临时构建布局
+
+如果确实需要保留日志做对照，可以单独复制 `logs\`，但不要复制映射、锁和自启状态。
+
+## 4. 迁移步骤
+
+1. 在旧机器确认当前版本和文件来自同一发布版本。
+2. 只复制部署目录或源码包。
+3. 把目录放在当前用户可写的位置，不要放系统目录。
+4. 在目标机器运行：
 
 ```powershell
-# ① 计划任务
-Get-ScheduledTask -TaskName tokens-ui-for-codex-monitor | Get-ScheduledTaskInfo
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<包根>\install.ps1"
+```
 
-# ② 监控进程
-Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object CommandLine -match 'token-stats'
+5. 完全退出并重新打开 Codex。
+6. 重载页面后确认只有一个统计条。
 
-# ③ 用户脚本哈希（应与包内文件一致）
-Get-FileHash "$env:APPDATA\Codex++\user_scripts\tokens-ui-for-codex-panel.js"
-Get-FileHash "<包根>\plugins\tokens-ui-for-codex\tokens-ui-for-codex-panel.js"
+安装器会重新生成：
 
-# ④ 插件注册
+- Codex++ 用户脚本
+- 插件 marketplace 注册
+- 插件 cache
+- 计划任务
+- 自启状态
+- VBS/PowerShell 启动器
+- 新的监控状态
+
+## 5. 安装后验证
+
+### 任务
+
+```powershell
+Get-ScheduledTask -TaskName tokens-ui-for-codex-monitor | Format-List State
+```
+
+### 进程
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'token-stats\.mjs.*--watch' } |
+  Select-Object ProcessId, CommandLine
+```
+
+只允许一个实例。
+
+### 插件
+
+```powershell
 codex plugin list
 ```
 
-页面侧（可选，需要监控进程已运行）：
+必须出现：
+
+```text
+tokens-ui-for-codex@tokens-ui-for-codex-local  installed, enabled
+```
+
+### 用户脚本
+
+```powershell
+Get-FileHash "$env:APPDATA\Codex++\user_scripts\tokens-ui-for-codex-panel.js" -Algorithm SHA256
+Get-FileHash "<包根>\plugins\tokens-ui-for-codex\tokens-ui-for-codex-panel.js" -Algorithm SHA256
+```
+
+两个哈希必须相同。
+
+### 页面
 
 ```powershell
 node "<包根>\plugins\tokens-ui-for-codex\scripts\check-page-state.mjs"
+node "<包根>\plugins\tokens-ui-for-codex\scripts\verify-live.mjs"
 ```
 
-期望：`panelCount=1`、`payloadSchema=2`、`ringCount≥1`、`installedFlag=true`。
+期望：
 
-想一次比对全部生效副本（源码 / 部署 / 插件 cache / 用户脚本 / 打包 zip）：
+- `panelCount=1`
+- `payloadSchema=3`
+- `installedFlag=true`
+- `ringCount>=1`
+- `failed=0`（verify-live）
+
+### 全部副本
 
 ```powershell
-node "<包根>\plugins\tokens-ui-for-codex\scripts\verify-sync.mjs" --deploy "<包根>" --zip "<包 zip>"
+node "<包根>\plugins\tokens-ui-for-codex\scripts\verify-sync.mjs" --deploy "<包根>"
 ```
 
-输出必须为 `mismatches: 0`。
+必须 `mismatches: 0`。
 
-> 说明：`scripts\`（含 `check-page-state.mjs`、`verify-sync.mjs` 等诊断与校验脚本）只随
-> **完整部署目录**与**源码包**提供；精简的安装包 zip 按设计只含运行所需文件与用户文档。
-> 新电脑上若只有安装包，可先复制旧机器的完整部署目录，或从源码包取 `scripts\`。
+## 6. 常见迁移问题
 
-## 4. 常见迁移问题
-
-| 现象 | 原因 | 处置 |
+| 问题 | 原因 | 处理 |
 | --- | --- | --- |
-| 安装器报"未找到 codex 命令" | 桌面版是 MSIX，bin 不在 PATH | 安装器已自动搜索；仍失败时检查 `%LOCALAPPDATA%\OpenAI\Codex\bin` 是否存在 |
-| 安装器报"运行时缺失" | 既没装 Node，也没有 Codex 自带运行时 | 安装 Node 22+（勾选加入 PATH）后重跑 |
-| 提示"Codex++ 用户脚本总开关关闭" | `user_scripts.json` 的 `enabled=false` | 在 Codex++ 管理器中启用后重跑安装器 |
-| 统计条不出现 | 用户脚本未注入或页面未重载 | 确认 Codex++ 运行中 → 重载 Codex 页面（或重启 Codex） |
-| 出现两条统计条 | 用户脚本目录里有历史面板脚本 | 安装器会按脚本内容把非当前脚本改名为 `.superseded-*.bak`；重载页面后确认条数为 1 |
-| 健康值长期 `waiting-for-page` | Codex 未启动或页面未就绪 | 启动 Codex；监控会保持待命并自动恢复 |
-| `target-selection-required` | 新机器上开了多个 Codex 窗口且无唯一目标 | 用 `--target <ID>` 指定，或在页面侧只保留一个窗口 |
-| 面板数字停滞不增长 | 宿主把会话分片了，或日志命名再次变化 | 查日志中的「数据停滞 / 定位失败 / 定位预警」；当前版本已自动合并分片，出现「定位预警」请反馈维护者 |
+| 找不到 codex | MSIX bin 不在 PATH | 让安装器自动搜索；仍失败时检查 `%LOCALAPPDATA%\OpenAI\Codex\bin` |
+| 找不到 Node | 无系统 Node，且 Codex runtime 不可见 | 安装 Node 22+ |
+| 用户脚本开关关闭 | Codex++ `enabled=false` | 在 Codex++ 中开启，不改 JSON |
+| 无统计条 | 页面未重载或脚本未注入 | 重启 Codex，确认用户脚本存在 |
+| 两条统计条 | 旧用户脚本残留 | 安装器按脚本内容改名，重载页面 |
+| 中文路径失效 | PS1 无 BOM 或 VBS 被写成 ASCII | 使用当前安装器重新生成 |
+| 协议不匹配 | 监控和用户脚本不是同一版本 | 重跑安装器、刷新 cache、重载页面 |
+| 多窗口无数据 | 没有唯一焦点 | 聚焦一个窗口或传入 `--target <ID>` |
+| 健康文件不更新 | 监控已停止或状态视图异常 | 检查单实例、日志和手动启动入口 |
 
-## 5. 卸载（如需回退）
+## 7. 迁移后的状态目录
 
-```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File "<包根>\plugins\tokens-ui-for-codex\uninstall-autostart.ps1" -Full
+目标机器会生成：
+
+```text
+%LOCALAPPDATA%\tokens-ui-for-codex\
+├─ logs\
+├─ monitor-health.json
+├─ autostart-state.json
+├─ last-summary.json
+└─ monitor.lock
 ```
 
-`-Full` 会清除计划任务、监控进程、状态目录、用户脚本及其备份、插件与插件缓存；
-最后手动删除包目录。默认模式只停进程并删除计划任务，保留日志与状态目录，便于复查。
+这些文件不要从旧机器覆盖。
 
-## 6. 权限说明（迁移相关）
+## 8. 卸载和重新迁移
 
-- 全程不需要管理员权限，不弹 UAC；
-- 计划任务注册在**当前用户**下（登录触发 + 每 5 分钟巡检 + 安装后立即执行）；
-- 不提供"未登录也运行"：那需要管理员权限或存储凭据，本项目明确不使用；
-- 进程检测依赖 `Get-CimInstance` 读取命令行，对其他用户/提权进程可能读不到（已做容错，
-  只影响检测精度，不影响运行）。
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<包根>\plugins\tokens-ui-for-codex\uninstall-autostart.ps1" -Full
+```
 
-## 7. 隐私边界（跨设备一致）
+该命令清理任务、进程、用户脚本、插件、cache 和状态目录。
+之后手动删除包目录即可。
 
-迁移不会改变隐私边界，新机器上同样成立：
+## 9. 权限要求
 
-- 页面负载只含数字统计、时间标签、各轮摘要与当前轮有限请求明细；
-- **不含**会话文件路径、线程 ID、用户消息正文、Token、密钥或任何凭据；
-- 监控读取本地会话日志，但只提取结构化数值，不复制、不展示、不外传正文；
-- 页面与监控通过本机 CDP（默认 `127.0.0.1:9229`）通信，不经过网络；
-- 面板不注册键盘监听、不修改 Codex 的 React bundle、不写入 Codex 配置文件。
+- 当前用户即可
+- 不请求 UAC
+- 计划任务以 Limited 运行
+- 不提供“未登录也运行”
+- 进程枚举可能看不到其他用户或更高权限进程，但不影响本插件运行
 
-因此日志、状态目录与 `client-thread-map.json` 都属于**本机私有数据**，迁移时不建议复制。
+## 10. 隐私边界
+
+迁移后仍保持：
+
+- 页面负载只有数值、时间和有限摘要
+- 不包含会话路径、线程 ID、消息正文、密钥或 Token
+- 本地 CDP 通信不经过网络
+- schema v3 必须通过 HMAC、时间窗、nonce 与 seq 校验
+- 不注册键盘监听
+- 不修改 Codex React bundle

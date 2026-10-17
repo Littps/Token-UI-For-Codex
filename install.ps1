@@ -15,10 +15,102 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$pluginRoot = Join-Path $root "plugins\tokens-ui-for-codex"
-$marketplaceFile = Join-Path $root ".agents\plugins\marketplace.json"
+$releasePluginRoot = Join-Path $root "plugins\tokens-ui-for-codex"
+
+# 发布包模式：install.ps1 位于含 plugins/ 与 .agents/ 的部署根。
+# 源码包模式：仓库根只有 token-stats.mjs 等源码。此时在 LOCALAPPDATA 生成
+# 一份可注册的 staging 布局，避免把源码手工复制成第二份长期维护副本。
+if (Test-Path -LiteralPath (Join-Path $releasePluginRoot ".codex-plugin\plugin.json")) {
+  $layoutRoot = $root
+  $pluginRoot = $releasePluginRoot
+} elseif (Test-Path -LiteralPath (Join-Path $root "token-stats.mjs") -PathType Leaf) {
+  $stageRoot = Join-Path $env:LOCALAPPDATA "tokens-ui-for-codex\install-stage"
+  $expectedStageBase = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "tokens-ui-for-codex"))
+  $resolvedStage = [System.IO.Path]::GetFullPath($stageRoot)
+  if (-not $resolvedStage.StartsWith($expectedStageBase, [System.StringComparison]::OrdinalIgnoreCase) -or
+      $resolvedStage.TrimEnd("\") -eq $expectedStageBase.TrimEnd("\")) {
+    throw "拒绝清理未验证的 staging 路径：$resolvedStage"
+  }
+  if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
+  $pluginRoot = Join-Path $stageRoot "plugins\tokens-ui-for-codex"
+  New-Item -ItemType Directory -Path $pluginRoot -Force | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $stageRoot ".agents\plugins") -Force | Out-Null
+
+  foreach ($file in @(
+      "token-stats.mjs", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js",
+      "find-codex.ps1", "install-autostart.ps1", "uninstall-autostart.ps1",
+      "install.bat", "install.ps1", "README.md", "README.en.md", "README.agent.md",
+      "MIGRATION-FOR-AGENTS.md", "AGENTS.md", "LICENSE", "CHANGELOG.md", "package.json"
+    )) {
+    $source = Join-Path $root $file
+    if (Test-Path -LiteralPath $source -PathType Leaf) {
+      Copy-Item -LiteralPath $source -Destination (Join-Path $pluginRoot $file) -Force
+    }
+  }
+  foreach ($dirName in @("skills", "scripts", "docs", "schemas")) {
+    $sourceDir = Join-Path $root $dirName
+    if (Test-Path -LiteralPath $sourceDir -PathType Container) {
+      Copy-Item -LiteralPath $sourceDir -Destination (Join-Path $pluginRoot $dirName) -Recurse -Force
+    }
+  }
+
+  # 版本基线来自 package.json，避免源码 staging 与正式插件版本漂移。
+  $packageVersion = "1.0.0"
+  try {
+    $packageJsonPath = Join-Path $root "package.json"
+    if (Test-Path -LiteralPath $packageJsonPath) {
+      $declaredVersion = [string](Get-Content -Raw -LiteralPath $packageJsonPath | ConvertFrom-Json).version
+      if ($declaredVersion -match "^(\d+\.\d+\.\d+)") { $packageVersion = $Matches[1] }
+    }
+  } catch {}
+  $pluginVersion = $packageVersion + "+codex." + (Get-Date -Format "yyyyMMddHHmmss")
+  $pluginManifest = [ordered]@{
+    name = "tokens-ui-for-codex"
+    version = $pluginVersion
+    description = "Codex 桌面版 Token 使用量原生风格统计与详情面板。"
+    author = @{ name = "Littps" }
+    keywords = @("codex", "tokens", "usage", "observability", "desktop-ui")
+    skills = "./skills/"
+    interface = [ordered]@{
+      displayName = "Tokens UI For Codex"
+      shortDescription = "在 Codex 中查看会话 Token、缓存与请求统计。"
+      developerName = "Littps"
+      category = "Productivity"
+      capabilities = @("Read", "Interactive", "Productivity")
+      brandColor = "#6E7BF2"
+    }
+  }
+  $pluginManifestDir = Join-Path $pluginRoot ".codex-plugin"
+  New-Item -ItemType Directory -Path $pluginManifestDir -Force | Out-Null
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  $pluginJsonText = ($pluginManifest | ConvertTo-Json -Depth 8) + "`r`n"
+  [System.IO.File]::WriteAllText((Join-Path $pluginManifestDir "plugin.json"), $pluginJsonText, $utf8NoBom)
+
+  $marketplace = [ordered]@{
+    name = "tokens-ui-for-codex-local"
+    interface = @{ displayName = "Tokens UI For Codex" }
+    plugins = @(
+      [ordered]@{
+        name = "tokens-ui-for-codex"
+        source = @{ source = "local"; path = "./plugins/tokens-ui-for-codex" }
+        policy = @{ installation = "AVAILABLE"; authentication = "ON_INSTALL" }
+        category = "Productivity"
+      }
+    )
+  }
+  $marketplaceJsonText = ($marketplace | ConvertTo-Json -Depth 8) + "`r`n"
+  [System.IO.File]::WriteAllText((Join-Path $stageRoot ".agents\plugins\marketplace.json"), $marketplaceJsonText, $utf8NoBom)
+  $layoutRoot = $stageRoot
+} else {
+  # 交给后续检查给出统一、可读的“缺少文件”错误。
+  $layoutRoot = $root
+  $pluginRoot = $releasePluginRoot
+}
+
+$marketplaceFile = Join-Path $layoutRoot ".agents\plugins\marketplace.json"
 $panelSource = Join-Path $pluginRoot "tokens-ui-for-codex-panel.js"
 $statsScript = Join-Path $pluginRoot "token-stats.mjs"
 $userScripts = Join-Path $env:APPDATA "Codex++\user_scripts"
@@ -181,7 +273,11 @@ if ($SkipPlugin -or -not $codex) {
     $marketName = (Get-Content -Raw -LiteralPath $marketplaceFile | ConvertFrom-Json).name
     if ($marketName) { $marketplaceName = $marketName }
   }
-  $addOutput = & $codex.Source plugin marketplace add $root 2>&1
+  # 同名 marketplace 可能仍指向旧部署目录（换盘、源码 staging、升级路径变化）。
+  # 先摘除旧注册，确保下面的 add 一定采用本次 $layoutRoot，而不是静默复用旧根目录。
+  try { & $codex.Source plugin remove ("tokens-ui-for-codex@" + $marketplaceName) 2>&1 | Out-Null } catch {}
+  try { & $codex.Source plugin marketplace remove $marketplaceName 2>&1 | Out-Null } catch {}
+  $addOutput = & $codex.Source plugin marketplace add $layoutRoot 2>&1
   ($addOutput | Out-String).Trim() -split "`n" | ForEach-Object { if ($_.Trim()) { Write-Host ("   " + $_.Trim()) } }
   $installOutput = & $codex.Source plugin add ("tokens-ui-for-codex@" + $marketplaceName) 2>&1
   ($installOutput | Out-String).Trim() -split "`n" | ForEach-Object { if ($_.Trim()) { Write-Host ("   " + $_.Trim()) } }
@@ -253,16 +349,26 @@ if (Get-Command Test-CodexRunning -ErrorAction SilentlyContinue) {
 $selfMonitor = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -and $_.CommandLine -match 'token-stats\.mjs' })
 if ($selfMonitor.Count -gt 0) { Write-Ok ("监控进程：运行中 (PID " + $selfMonitor[0].ProcessId + ")") }
-else { Write-Note "监控进程：未运行（自启任务会在 5 分钟巡检内拉起，也可手动启动）" }
+else { Write-Note "监控进程：未运行（可从详情面板「启动监控」或开始菜单手动启动；登录时也会自启）" }
 Write-Note ("安装日志：" + $logFile)
 
 Write-Step "5/5 完成"
+$manualPort = "auto"
+try {
+  $autostartStatePath = Join-Path $env:LOCALAPPDATA "tokens-ui-for-codex\autostart-state.json"
+  if (Test-Path -LiteralPath $autostartStatePath) {
+    $savedPort = (Get-Content -Raw -LiteralPath $autostartStatePath | ConvertFrom-Json).port
+    if ($savedPort) { $manualPort = [string]$savedPort }
+  }
+} catch {
+  $manualPort = "auto"
+}
 Write-Host "后续步骤：" -ForegroundColor White
 Write-Host "   1) 完全退出并重新打开 Codex 桌面版，让用户脚本注入页面。"
 Write-Host "   2) 输入区底部、上下文用量圆圈左侧应出现 Token 统计条。"
 Write-Host "   3) 左键单击统计条可打开详情；点击弹层外部或右上角 × 关闭。"
 Write-Host "   4) 如未安装自启，可手动启动监控："
-Write-Host ("      node `"" + $statsScript + "`" --watch --cdp")
+Write-Host ("      node `"" + $statsScript + "`" --watch --cdp --port " + $manualPort)
 Write-Host ""
 Write-Host "卸载：运行 plugins\tokens-ui-for-codex\uninstall-autostart.ps1（加 -Full 为一键全清：计划任务、进程、用户脚本、插件与状态目录）" -ForegroundColor DarkGray
 exit 0

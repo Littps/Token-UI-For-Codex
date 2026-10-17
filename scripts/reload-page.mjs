@@ -1,14 +1,15 @@
 // 重载 Codex 渲染页面，让更新后的 Codex++ 用户脚本重新注入。
 // 只触发页面重载，不修改会话数据、配置或统计结果。
-// 用法：node scripts/reload-page.mjs [--port 9229] [--target <target-id>]
+// 用法：node scripts/reload-page.mjs [--port auto|<n>] [--target <target-id>]
+
+import { portArgOf, resolveCdpPort } from "./cdp-port.mjs";
 
 const argv = process.argv.slice(2);
-let port = 9229;
 let targetId = "";
 for (let index = 0; index < argv.length; index += 1) {
-  if (argv[index] === "--port" && Number.isInteger(Number(argv[index + 1]))) port = Number(argv[index + 1]);
-  else if (argv[index] === "--target" && argv[index + 1]) targetId = String(argv[index + 1]).trim();
+  if (argv[index] === "--target" && argv[index + 1]) targetId = String(argv[index + 1]).trim();
 }
+const port = await resolveCdpPort(portArgOf(argv));
 
 function eligible(target) {
   if (!target || target.type !== "page" || typeof target.webSocketDebuggerUrl !== "string") return false;

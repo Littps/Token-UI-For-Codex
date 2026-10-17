@@ -5,25 +5,49 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Node.js
+      - name: Set up Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
       - name: Syntax check
         run: npm run check
       - name: Unit tests
         run: npm test
-      - name: PowerShell parse check
+
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: PowerShell 5.1 parse + UTF-8 BOM check
+        shell: powershell
+        run: |
+          foreach ($file in @('find-codex.ps1', 'install.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1')) {
+            if (-not (Test-Path -LiteralPath $file)) { throw "PowerShell file missing: $file" }
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $file))
+            if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+              throw "PowerShell file must be UTF-8 with BOM: $file"
+            }
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { throw "PowerShell 5.1 parse failed: $file :: $($errors[0].Message)" }
+          }
+
+      - name: PowerShell 7 parse check
         shell: pwsh
         run: |
-          $errors = $null
-          foreach ($file in @('install.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1')) {
-            if (-not (Test-Path -LiteralPath $file)) { throw "PowerShell file missing: $file" }
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$null, [ref]$errors) | Out-Null
-            if ($errors) { throw "PowerShell parse failed: $file" }
+          foreach ($file in @('find-codex.ps1', 'install.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { throw "PowerShell 7 parse failed: $file :: $($errors[0].Message)" }
           }

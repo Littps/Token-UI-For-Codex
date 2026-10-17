@@ -22,7 +22,7 @@ if (-not $RepoRoot) {
 $resolvedRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 # 必需文件（缺任一即中止，避免打出残缺包）
-foreach ($required in @("README.md", "LICENSE", "package.json", "token-stats.mjs", "tokens-ui-for-codex-panel.js", "skills\tokens-ui-for-codex\SKILL.md")) {
+foreach ($required in @("README.md", "LICENSE", "package.json", "token-stats.mjs", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js", "schemas\payload-v3.schema.json", "skills\tokens-ui-for-codex\SKILL.md")) {
   $requiredPath = Join-Path $resolvedRoot $required
   if (-not (Test-Path -LiteralPath $requiredPath)) { throw "缺少文件: $requiredPath" }
 }
@@ -60,7 +60,8 @@ if (-not $files -or $files.Count -eq 0) { throw "没有可打包的文件: $reso
 # ZipFile.Open(..., Create) 要求目标不存在；只允许覆盖本脚本自己的产物。
 if (Test-Path -LiteralPath $OutputPath) {
   $targetName = Split-Path -Leaf $OutputPath
-  if ($targetName -notlike "Tokens UI For Codex-Source-*.zip") {
+  if ($targetName -notlike "Tokens UI For Codex-Source-*.zip" -and
+      $targetName -notlike "Tokens-UI-For_Codex_*-Source.zip") {
     throw "拒绝覆盖非源码包文件: $OutputPath"
   }
   Remove-Item -LiteralPath $OutputPath -Force

@@ -14,7 +14,9 @@ $ErrorActionPreference = "Stop"
 $resolvedRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $pluginJson = Join-Path $resolvedRoot "plugins\tokens-ui-for-codex\.codex-plugin\plugin.json"
 if (-not (Test-Path -LiteralPath $pluginJson)) { throw "未找到插件清单: $pluginJson" }
-$version = (Get-Content -Raw -LiteralPath $pluginJson | ConvertFrom-Json).version
+# plugin.json 固定为 UTF-8。Windows PowerShell 5.1 的 Get-Content 默认按 ANSI
+# 读取无 BOM 文件，会把中文描述解码成无效文本并导致 ConvertFrom-Json 失败。
+$version = (Get-Content -Raw -Encoding UTF8 -LiteralPath $pluginJson | ConvertFrom-Json).version
 if (-not $version) { throw "无法读取插件版本" }
 
 if (-not $OutputPath) {
@@ -43,7 +45,8 @@ foreach ($extra in @("install.bat", "install.ps1")) {
 $excluded = @(
   "\\backups\\", "\\.git\\", "\\node_modules\\",
   "\\test\\", "\\scripts\\", "\\docs\\", "\\.github\\",
-  "\\package\.json$", "\\AGENTS\.md$", "\\.gitignore$", "\.bak$"
+  "\\package\.json$", "\\AGENTS\.md$", "\\.gitignore$", "\.bak$",
+  "\\launch-silent\.vbs$", "\\launch-confirm\.vbs$", "\\start-monitor\.ps1$"
 )
 $files = $files | Where-Object {
   $path = $_.FullName

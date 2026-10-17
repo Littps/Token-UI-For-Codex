@@ -1,9 +1,10 @@
 // 只读检查：Codex 页面里插件与监控数据的当前状态。不注入任何输入。
-// 用法：node scripts/check-page-state.mjs
+// 用法：node scripts/check-page-state.mjs [--port auto|<n>]
 
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { portArgOf, resolveCdpPort } from "./cdp-port.mjs";
 
 const require = createRequire(import.meta.url);
 const globalNodeModules = path.join(os.homedir(), "AppData", "Roaming", "npm", "node_modules");
@@ -18,7 +19,8 @@ function loadPlaywright() {
 }
 
 const { chromium } = loadPlaywright();
-const browser = await chromium.connectOverCDP("http://127.0.0.1:9229");
+const port = await resolveCdpPort(portArgOf(process.argv.slice(2)));
+const browser = await chromium.connectOverCDP("http://127.0.0.1:" + port);
 const pages = browser.contexts().flatMap((context) => context.pages());
 const rows = [];
 for (const page of pages) {
@@ -40,6 +42,10 @@ for (const page of pages) {
       payloadRequestCount: window.__tuiForCodex ? window.__tuiForCodex.requestCount : null,
       payloadContextUsed: window.__tuiForCodex ? window.__tuiForCodex.contextUsed : null,
       payloadModelContextWindow: window.__tuiForCodex ? window.__tuiForCodex.modelContextWindow : null,
+      payloadCompactTps: window.__tuiForCodex ? window.__tuiForCodex.compactTps : null,
+      payloadCompactSpeedSampleCount: window.__tuiForCodex ? window.__tuiForCodex.compactSpeedSampleCount : null,
+      payloadCompactSpeedConfidence: window.__tuiForCodex ? window.__tuiForCodex.compactSpeedConfidence : null,
+      payloadTurnWallTps: window.__tuiForCodex ? window.__tuiForCodex.turnWallTps : null,
       dialogOpen: !!document.getElementById("tui-detail-dialog"),
       bodyReady: !!document.body,
       styleInstalled: !!document.getElementById("tui-native-style"),

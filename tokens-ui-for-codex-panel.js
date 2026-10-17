@@ -1,8 +1,8 @@
 // Tokens UI For Codex —— Codex++ 用户脚本（统计条 + 详情弹层）
-// 作者：Littps · 许可：MIT · 协议：tokens-ui-for-codex（schema v2）
+// 作者：Littps · 许可：MIT · 协议：tokens-ui-for-codex（签名 schema v3）
 //
 // 作用：把紧凑的 Token 统计条挂到输入区右下的「上下文用量圆圈」左侧，并提供左键单击打开的详情弹层。
-// 依赖：本地监控进程 `node token-stats.mjs --watch --cdp`（默认经 127.0.0.1:9229 推送 schema v2 负载）。
+// 依赖：本地监控进程 `node token-stats.mjs --watch --cdp`（经本地 CDP 推送签名 schema v3 负载）。
 // 边界：不修改 Codex 的 React bundle、不注册任何键盘监听、不读取或展示用户消息正文。
 // 安装：把本文件放入 %APPDATA%\Codex++\user_scripts\ ，并在 Codex++ 中启用用户脚本。
 (() => {
@@ -11,16 +11,21 @@
   // The widget is inserted beside Codex's native context ring. It deliberately
   // avoids patching React internals or showing a floating panel.
   const PROTOCOL_NAME = "tokens-ui-for-codex";
-  const PROTOCOL_SCHEMA_VERSION = 2;
+  const PROTOCOL_SCHEMA_VERSION = 3;
   const PROTOCOL_CAPABILITIES = [
     "session-total",
     "current-prompt-total",
     "request-count",
     "cache-split",
     "context-usage",
+    "speed-estimate",
+    "effective-speed",
     "turn-summaries",
     "request-details",
     "health-snapshot",
+    "current-turn-request-count",
+    "signed-payload",
+    "robust-speed",
   ];
   window.__tuiForCodexProtocol = {
     protocolName: PROTOCOL_NAME,
@@ -42,9 +47,9 @@
 
   // ---- 推送窗口（页面 -> 监控的单向信号）---------------------------------
   // 监控每秒读一次 <html data-tui-window>（"turns:requests"），窗口变化立刻推送。
-  // 弹层关闭时只要最近 5 轮（极简负载），打开时 25 轮 + 10 条请求明细；「加载更多」每次 +50 / +20。
+  // 弹层关闭时只要最近 5 轮（极简负载），打开时 10 轮 + 10 条请求明细；「加载更多」每次 +50 / +20。
   const TURN_WINDOW_CLOSED = 5;
-  const TURN_WINDOW_OPEN = 25;
+  const TURN_WINDOW_OPEN = 10;
   const TURN_WINDOW_STEP = 50;
   const REQUEST_WINDOW_CLOSED = 0;
   const REQUEST_WINDOW_OPEN = 10;
@@ -57,6 +62,7 @@
     container: null,
     resizeObserver: null,
     mutationObserver: null,
+    themeObserver: null,
     mountQueued: false,
     dialog: null,
     previousFocus: null,
@@ -69,8 +75,13 @@
     // 由监控下发（方案乙）；未收到前用 Infinity，保证不误伤
     turnsLimit: Infinity,
     requestsLimit: Infinity,
+    // 折叠态陈旧检测：最近一次收到推送的时间（空闲心跳 5s / 运行中 1s；展开态不心跳）
+    lastPayloadAt: 0,
+    monitorStale: false,
+    themeTimer: 0,
     // 上一份负载的会话总量，用于识别「切换了会话」（总量回退）
     lastSessionTotal: null,
+    lastRenderSignature: "",
   };
 
   // 把当前窗口写进 <html>，等监控下一次巡检读到（最长 1 秒）后按需推送。
@@ -127,19 +138,33 @@
     if (!data || typeof data !== "object" || Array.isArray(data)) return { ok: false, error: "负载不是对象" };
     if (data.protocolName !== PROTOCOL_NAME) return { ok: false, error: "统计协议名称不匹配" };
     if (data.schemaVersion !== PROTOCOL_SCHEMA_VERSION) return { ok: false, error: "统计协议版本不匹配" };
+    if (data.authRequired !== true) return { ok: false, error: "统计协议要求签名负载" };
     if (!Array.isArray(data.capabilities) || !data.capabilities.includes("health-snapshot")) return { ok: false, error: "统计协议能力不匹配" };
-    for (const key of ["requestCount", "turnTotal", "turnInput", "turnOutput", "currentTurnIndex", "turnTotalCount", "requestDetailTotal", "modelSwitchCount", "cumulativeResetCount"]) {
+    for (const key of ["requestCount", "currentTurnRequestCount", "turnTotal", "turnInput", "turnOutput", "currentTurnIndex", "turnTotalCount", "requestDetailTotal", "modelSwitchCount", "cumulativeResetCount"]) {
       if (!isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
     }
-    for (const key of ["sessionTotal", "contextUsed", "modelContextWindow", "sessionInput", "sessionCached", "sessionOutput", "turnCached", "turnTps"]) {
+  for (const key of ["compactSpeedSampleCount", "compactSpeedWindow"]) {
+      if (data[key] != null && !isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
+    }
+  for (const key of ["sessionTotal", "contextUsed", "modelContextWindow", "sessionInput", "sessionCached", "sessionOutput", "turnCached", "turnTps", "turnWallTps", "sessionTps", "lastRequestTps", "genEstimateTps", "compactTps", "effectiveTps", "turnEffectiveTps"]) {
       if (!isNullableNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
     }
+  for (const key of ["effectiveSampleCount", "effectiveWindow"]) {
+    if (data[key] != null && !isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
+  }
+  if (data.speedTimingConfidence != null && !["high", "medium", "low"].includes(data.speedTimingConfidence)) {
+    return { ok: false, error: "speedTimingConfidence 字段无效" };
+  }
+  if (data.compactSpeedConfidence != null && !["high", "medium", "low"].includes(data.compactSpeedConfidence)) {
+    return { ok: false, error: "compactSpeedConfidence 字段无效" };
+  }
+  if (data.snapshot != null && typeof data.snapshot !== "boolean") return { ok: false, error: "snapshot 字段无效" };
   // 这两个上限原本写成「等于监控侧上限」，形成隐藏耦合：
   // 一旦监控侧放宽上限而面板未同步，面板会拒收整个负载 → 统计条什么数字都不显示，极难排查。
   // 因此这里只拦「荒谬值」（防御异常/恶意负载），正常超限由监控侧负责截断。
   // 监控侧对应常量：MAX_TURN_SUMMARIES / MAX_REQUEST_DETAILS（改动时无需同步本行）。
-  if (!Array.isArray(data.turns) || data.turns.length > 1000) return { ok: false, error: "轮次摘要超出限制" };
-  if (!Array.isArray(data.requestDetails) || data.requestDetails.length > 1000) return { ok: false, error: "请求明细超出限制" };
+  if (!Array.isArray(data.turns) || data.turns.length > 500) return { ok: false, error: "轮次摘要超出限制" };
+  if (!Array.isArray(data.requestDetails) || data.requestDetails.length > 500) return { ok: false, error: "请求明细超出限制" };
     for (const turn of data.turns) {
       if (!turn || !Number.isInteger(turn.index) || turn.index < 1 || typeof turn.startLabel !== "string" || !isNonNegativeNumber(turn.requests)) {
         return { ok: false, error: "轮次摘要字段无效" };
@@ -243,13 +268,31 @@
       data.turnInput,
       data.turnCached,
       data.turnOutput,
+      data.turnCacheHitRate,
+      data.genEstimateTps,
+      data.compactTps,
+      data.compactSpeedSampleCount,
+      data.compactSpeedConfidence,
+      data.compactSpeedWindow,
+      data.turnWallTps,
+      data.sessionTps,
+      data.lastRequestTps,
+      data.turnTps,
+      data.effectiveTps,
+      data.turnEffectiveTps,
+      data.effectiveSampleCount,
+      data.speedTimingConfidence,
+      data.snapshot ? "snapshot" : "",
       data.turnTotalCount,
       data.turnsTruncated,
       data.requestDetailTotal,
       data.modelSwitchCount,
       data.cumulativeResetCount,
+      data.updatedAt,
       data.health && data.health.status,
       data.health && data.health.recoveryState,
+      data.health && data.health.pageAttached,
+      data.health && data.health.dataFresh,
     ].join("|");
   }
 
@@ -268,6 +311,11 @@
   --tui-text: var(--color-text, var(--text-primary, #1f2328));
   --tui-text-dim: var(--color-text-secondary, var(--color-text, currentColor));
   --tui-shadow: 0 16px 42px rgba(0, 0, 0, .22), 0 3px 12px rgba(0, 0, 0, .14);
+  /* 磨砂玻璃（Medium）：14px 模糊 + 72% 底色 */
+  --tui-glass-bg: rgba(255, 255, 255, .72);
+  --tui-glass-border: rgba(255, 255, 255, .55);
+  --tui-glass-highlight: rgba(255, 255, 255, .65);
+  --tui-glass-blur: 14px;
   color-scheme: light;
 }
 /* 深色：用从 Codex 深色界面实测取到的颜色
@@ -281,6 +329,9 @@
   --tui-text: var(--color-text, #ffffff);
   --tui-text-dim: var(--color-text-secondary, rgba(255, 255, 255, .65));
   --tui-shadow: 0 16px 42px rgba(0, 0, 0, .55), 0 3px 12px rgba(0, 0, 0, .38);
+  --tui-glass-bg: rgba(30, 30, 32, .62);
+  --tui-glass-border: rgba(255, 255, 255, .14);
+  --tui-glass-highlight: rgba(255, 255, 255, .10);
   color-scheme: dark;
 }
 #${ROOT_ID} {
@@ -348,6 +399,9 @@
 #${ROOT_ID}.tui-native-compact { max-width: min(280px, 42vw); }
 #${ROOT_ID}.tui-native-stale { opacity: .62; }
 #${ROOT_ID}.tui-native-error { color: var(--color-danger, var(--color-text-danger, #c0392b)); }
+      /* Codex++ 的服务模式提示会占用输入框 footer 的横向空间；本插件的状态已
+         移入详情标题，保留原生权限按钮不动。 */
+      .codex-service-tier-badge { display: none !important; }
 #${DIALOG_ID} {
   position: fixed;
   z-index: 2147483000;
@@ -357,15 +411,51 @@
   flex-direction: column;
   overflow: hidden;
   color: var(--tui-text);
-  background: var(--tui-surface);
-  border: 1px solid var(--tui-border);
+  background: var(--tui-glass-bg);
+  border: 1px solid var(--tui-glass-border);
   border-radius: 12px;
-  box-shadow: var(--tui-shadow);
+  box-shadow: var(--tui-shadow), inset 0 1px 0 var(--tui-glass-highlight);
+  backdrop-filter: blur(var(--tui-glass-blur)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--tui-glass-blur)) saturate(130%);
+  contain: paint;
   font-family: inherit;
   font-size: 12px;
   line-height: 1.4;
 }
-#${DIALOG_ID}[data-open="true"] { display: flex; }
+#${DIALOG_ID}[data-open="true"] { display: flex; animation: tui-dialog-in 140ms ease-out; }
+/* 细噪点：静态 SVG（feTurbulence），只做一次合成，不参与模糊计算 */
+#${DIALOG_ID}::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: .035;
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjAiIGhlaWdodD0iMTIwIj48ZmlsdGVyIGlkPSJuIj48ZmVUdXJidWxlbmNlIHR5cGU9ImZyYWN0YWxOb2lzZSIgYmFzZUZyZXF1ZW5jeT0iMC45IiBudW1PY3RhdmVzPSIyIiBzdGl0Y2hUaWxlcz0ic3RpdGNoIi8+PC9maWx0ZXI+PHJlY3Qgd2lkdGg9IjEyMCIgaGVpZ2h0PSIxMjAiIGZpbHRlcj0idXJsKCNuKSIvPjwvc3ZnPg==");
+  background-size: 120px 120px;
+}
+#${DIALOG_ID} .tui-dialog-header,
+#${DIALOG_ID} .tui-dialog-body { position: relative; z-index: 1; }
+/* 自适应降级：帧时间过长时由脚本加上此类，退回实色，保证流畅 */
+#${DIALOG_ID}.tui-glass-lite {
+  background: var(--tui-surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+@keyframes tui-dialog-in {
+  from { opacity: 0; transform: scale(.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #${DIALOG_ID}[data-open="true"] { animation: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  #${DIALOG_ID} { background: var(--tui-surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  #${DIALOG_ID} { background: var(--tui-surface); }
+}
 #${DIALOG_ID} .tui-dialog-header {
   display: flex;
   flex: 0 0 auto;
@@ -376,6 +466,15 @@
   border-bottom: 1px solid var(--tui-border);
 }
 #${DIALOG_ID} .tui-dialog-title { font-size: 14px; font-weight: 650; }
+      #${DIALOG_ID} .tui-dialog-title-row { display: flex; align-items: center; gap: 8px; }
+      #${DIALOG_ID} .tui-dialog-health-dot {
+        width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+        background: var(--color-warning, #d39e00);
+        box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent);
+      }
+      #${DIALOG_ID} .tui-dialog-health-dot--green { background: #2fb344; }
+      #${DIALOG_ID} .tui-dialog-health-dot--yellow { background: #d39e00; }
+      #${DIALOG_ID} .tui-dialog-health-dot--red { background: var(--color-danger, #c0392b); }
 #${DIALOG_ID} .tui-dialog-subtitle {
   margin-top: 2px;
   color: var(--tui-text-dim);
@@ -425,6 +524,34 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
+#${DIALOG_ID} .tui-dialog-security {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 170, 0, .45);
+  background: rgba(255, 170, 0, .08);
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+#${DIALOG_ID} .tui-dialog-security-more {
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--tui-text-dim);
+  font: inherit;
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+#${DIALOG_ID} .tui-dialog-security-list {
+  margin-top: 6px;
+  max-height: 90px;
+  overflow: auto;
+  color: var(--tui-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+#${DIALOG_ID} .tui-dialog-security-row { padding: 2px 0; }
 #${DIALOG_ID} .tui-dialog-card {
   min-width: 0;
   padding: 9px 10px;
@@ -583,7 +710,7 @@
 
     // 悬浮冻结（方案甲）：指针停留期间不改写任何显示；移出后立即补一次渲染，避免留下旧值。
     root.addEventListener("pointerenter", () => { state.hoverFrozen = true; });
-    root.addEventListener("pointerleave", () => { state.hoverFrozen = false; render(); });
+    root.addEventListener("pointerleave", () => { state.hoverFrozen = false; render(true); });
     root.addEventListener("click", (event) => {
       if (event.button != null && event.button !== 0) return;
       event.preventDefault();
@@ -695,6 +822,7 @@
     main.append(textNode("div", "tui-dialog-list-title", `第 ${index} 次请求`), note);
     row.append(textNode("div", "tui-dialog-list-index", `#${index}`), main, total);
     row.__tuiFields = { note, total };
+    row.__tuiKey = String(request.index);
     return row;
   }
 
@@ -717,6 +845,7 @@
     main.append(textNode("div", "tui-dialog-list-title", label), note);
     row.append(textNode("div", "tui-dialog-list-index", `T${turn.index || index + 1}`), main, total);
     row.__tuiFields = { note, total };
+    row.__tuiKey = String(turn.index || index + 1);
     return row;
   }
 
@@ -726,15 +855,28 @@
     setCellText(row.__tuiFields.total, fmtShort(turn.total));
   }
 
-  // 列表区增量更新：指纹不变时只更新最后一行，指纹变化才重建列表。
+  // 列表区增量更新：指纹不变时按稳定 key 更新所有行，指纹变化才重建列表。
+  // 列表是倒序的，当前轮/最新请求在最上面；旧实现固定更新 lastIndex，
+  // 实际改的是最老一行，导致当前轮摘要停在旧值。
   // 返回 true 表示发生了结构重建（调用方据此决定是否需要重新定位/恢复滚动）。
   function applyListUpdate(listState, options) {
     if (listState.fingerprint === options.fingerprint) {
-      const lastIndex = options.items.length - 1;
-      if (lastIndex >= 0 && options.updateRow) {
-        options.updateRow(listState.rows[lastIndex], options.items[lastIndex], lastIndex);
+      const rowsByKey = new Map();
+      for (const row of listState.rows) {
+        if (row && row.__tuiKey != null) rowsByKey.set(row.__tuiKey, row);
       }
-      return false;
+      let updated = true;
+      for (let index = 0; index < options.items.length; index += 1) {
+        const item = options.items[index];
+        const key = String(options.keyOf(item, index));
+        const row = rowsByKey.get(key);
+        if (!row) {
+          updated = false;
+          break;
+        }
+        if (options.updateRow) options.updateRow(row, item, index);
+      }
+      if (updated) return false;
     }
     // 重建会改变内容高度并重置滚动位置，这里先记录、后恢复。
     const body = listState.list.closest ? listState.list.closest(".tui-dialog-body") : null;
@@ -761,7 +903,7 @@
       ["总量", tokenText(data.sessionTotal)],
       ["请求", fmtInt(data.requestCount)],
       ["输入/缓存命中", makePairCell(parts.pairState, "session", m.sessionInput, m.sessionCached)],
-      ["平均速度", data.sessionTps == null ? "-- Tokens/s" : data.sessionTps.toFixed(1) + " Tokens/s"],
+      ["有效速度", data.effectiveTps == null ? "-- Tokens/s" : data.effectiveTps.toFixed(1) + " Tokens/s"],
       ["缓存未命中", tokenText(m.sessionUncached)],
       ["输出", tokenText(data.sessionOutput)],
     ]);
@@ -770,6 +912,7 @@
       total: sessionCells[0], requests: sessionCells[1], pair: sessionCells[2],
       tps: sessionCells[3], uncached: sessionCells[4], output: sessionCells[5],
     };
+    parts.session.tps.title = speedSampleTitle(data);
     parts.sections.push(dialogSection("会话累计", sessionGrid));
 
     // 当前提问统计
@@ -777,7 +920,7 @@
       ["总量", tokenText(m.turnTotal)],
       ["请求", fmtInt(m.currentRequestCount)],
       ["输入/缓存命中", makePairCell(parts.pairState, "turn", m.turnInput, m.turnCached)],
-      ["本轮平均速度", data.turnTps == null ? "-- Tokens/s" : data.turnTps.toFixed(1) + " Tokens/s"],
+      ["本轮有效速度", data.turnEffectiveTps == null ? "-- Tokens/s" : data.turnEffectiveTps.toFixed(1) + " Tokens/s"],
       ["缓存未命中", tokenText(m.turnUncached)],
       ["输出", tokenText(m.turnOutput)],
     ]);
@@ -786,6 +929,7 @@
       total: turnCells[0], requests: turnCells[1], pair: turnCells[2],
       tps: turnCells[3], uncached: turnCells[4], output: turnCells[5],
     };
+    parts.turn.tps.title = speedSampleTitle(data);
     parts.sections.push(dialogSection("当前提问统计", turnGrid));
 
     // 上下文使用
@@ -803,24 +947,39 @@
     parts.context = { value: contextValue, limit: contextLimit, fill: contextFill };
     parts.sections.push(dialogSection("上下文使用", contextBox));
 
-    // 运行状态
+    // 运行状态（6 格；窗口选择/恢复已移除，多窗口与异常信息统一由「状态」格表达）
     const health = data.health || {};
     const healthGrid = dialogGrid([
       ["状态", healthLabel(health)],
       ["监控", health.monitorRunning === false ? "未运行" : "运行中"],
       ["页面连接", health.pageAttached ? "已连接" : "等待连接"],
       ["数据", health.dataFresh ? "最新" : "等待更新"],
-      ["窗口选择", health.targetSelection === "required" ? "需要指定窗口" : (health.targetSelection || "自动")],
       ["模型切换", fmtInt(data.modelSwitchCount) + " 次"],
       ["累计重置", fmtInt(data.cumulativeResetCount) + " 次"],
-      ["恢复", health.recoveryState === "recovered" ? "已恢复" : (health.recoveryState || "正常")],
     ]);
     const healthCells = [...healthGrid.querySelectorAll(".tui-dialog-card-value")];
     parts.health = {
       status: healthCells[0], monitor: healthCells[1], page: healthCells[2], data: healthCells[3],
-      target: healthCells[4], modelSwitches: healthCells[5], resets: healthCells[6], recovery: healthCells[7],
+      modelSwitches: healthCells[4], resets: healthCells[5],
     };
-    parts.sections.push(dialogSection("运行状态", healthGrid));
+    const healthBox = textNode("div", "tui-dialog-health");
+    const securityBox = textNode("div", "tui-dialog-security");
+    securityBox.hidden = true;
+    const securityText = textNode("div", "tui-dialog-security-text", "");
+    const securityMore = textNode("button", "tui-dialog-security-more", "详情");
+    securityMore.type = "button";
+    const securityList = textNode("div", "tui-dialog-security-list");
+    securityList.hidden = true;
+    securityMore.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      securityList.hidden = !securityList.hidden;
+      securityMore.textContent = securityList.hidden ? "详情" : "收起";
+    });
+    securityBox.append(securityText, securityMore, securityList);
+    healthBox.append(healthGrid, dialogStartButton(), securityBox);
+    parts.security = { box: securityBox, text: securityText, list: securityList, more: securityMore, key: "" };
+    parts.sections.push(dialogSection("运行状态", healthBox));
 
     // 当前提问请求明细（列表内容由 applyListUpdate 填充）
     const requestSection = textNode("div", "tui-dialog-section");
@@ -841,6 +1000,53 @@
     parts.sections.push(turnSection);
 
     return parts;
+  }
+
+  // 手动启动按钮：复制一条可粘贴到 Win+R 的启动命令（打开确认终端，按 Y 才执行）。
+  // 说明：Electron 渲染进程会拦截 tokens-ui-for-codex:// 协议导航（实测 anchor/window.open 均无效），
+  // 因此这里采用"复制命令 + 明确指引"的可靠方案；开始菜单入口同样可用。
+  function dialogStartButton() {
+    const wrap = textNode("div", "tui-dialog-start");
+    const button = textNode("button", "tui-dialog-action", "启动监控");
+    button.type = "button";
+    button.style.cssText = "display:block;width:100%;margin-top:8px;padding:8px 10px;font:inherit;font-size:12px;text-align:center;cursor:pointer;color:inherit;background:var(--tui-surface-2,rgba(127,127,127,.10));border:1px solid var(--tui-border,rgba(127,127,127,.28));border-radius:8px;";
+    const hint = textNode("div", "tui-dialog-start-hint", "点击复制启动命令 → Win+R 粘贴回车 → 按 Y 启动（自动关闭终端）");
+    hint.style.cssText = "margin-top:6px;font-size:11px;line-height:1.5;text-align:center;opacity:.7;";
+    // Win+R 不是 cmd.exe，不能使用 cmd 内建命令 start。
+    // explorer.exe 是系统可执行文件，能稳定打开安装器创建的开始菜单快捷方式。
+    const command = 'explorer.exe "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Tokens UI For Codex - 启动监控.lnk"';
+    const copyCommand = async () => {
+      try {
+        await navigator.clipboard.writeText(command);
+        return true;
+      } catch {}
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = command;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+        return true;
+      } catch {}
+      return false;
+    };
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyCommand().then((ok) => {
+        hint.textContent = ok
+          ? "已复制：按 Win+R → Ctrl+V → 回车；按 Y 启动并自动关闭终端"
+          : "复制失败：请在开始菜单运行「Tokens UI For Codex - 启动监控」";
+        setTimeout(() => {
+          hint.textContent = "点击复制启动命令 → Win+R 粘贴回车 → 按 Y 启动（自动关闭终端）";
+        }, 6000);
+      });
+    });
+    wrap.append(button, hint);
+    return wrap;
   }
 
   // 「加载更多」宽按钮：撑满列表宽度；点击后扩大推送窗口，由监控按需回推。
@@ -867,6 +1073,8 @@
     if (!truncated) {
       button.hidden = true;
       button.disabled = false;
+      button.textContent = "加载更多";
+      button.removeAttribute("title");
       return;
     }
     const atLimit = Number.isFinite(limit) && loaded >= limit;
@@ -874,6 +1082,9 @@
     button.textContent = atLimit
       ? "已加载最新 " + fmtInt(loaded) + " " + unit + "（已达上限）"
       : "加载更多（已加载最新 " + fmtInt(loaded) + " / 共 " + fmtInt(total) + " " + unit + "）";
+    button.title = atLimit
+      ? "界面最多显示最近 500 " + unit + "；完整结构化记录保存在本地历史文件"
+      : "";
     button.hidden = false;
   }
 
@@ -884,14 +1095,16 @@
     setCellText(parts.session.total, tokenText(data.sessionTotal));
     setCellText(parts.session.requests, fmtInt(data.requestCount));
     updatePairCell(parts.session.pair, m.sessionInput, m.sessionCached);
-    setCellText(parts.session.tps, data.sessionTps == null ? "-- Tokens/s" : data.sessionTps.toFixed(1) + " Tokens/s");
+    setCellText(parts.session.tps, data.effectiveTps == null ? "-- Tokens/s" : data.effectiveTps.toFixed(1) + " Tokens/s");
+    parts.session.tps.title = speedSampleTitle(data);
     setCellText(parts.session.uncached, tokenText(m.sessionUncached));
     setCellText(parts.session.output, tokenText(data.sessionOutput));
 
     setCellText(parts.turn.total, tokenText(m.turnTotal));
     setCellText(parts.turn.requests, fmtInt(m.currentRequestCount));
     updatePairCell(parts.turn.pair, m.turnInput, m.turnCached);
-    setCellText(parts.turn.tps, data.turnTps == null ? "-- Tokens/s" : data.turnTps.toFixed(1) + " Tokens/s");
+    setCellText(parts.turn.tps, data.turnEffectiveTps == null ? "-- Tokens/s" : data.turnEffectiveTps.toFixed(1) + " Tokens/s");
+    parts.turn.tps.title = speedSampleTitle(data);
     setCellText(parts.turn.uncached, tokenText(m.turnUncached));
     setCellText(parts.turn.output, tokenText(m.turnOutput));
 
@@ -906,10 +1119,35 @@
     setCellText(parts.health.monitor, health.monitorRunning === false ? "未运行" : "运行中");
     setCellText(parts.health.page, health.pageAttached ? "已连接" : "等待连接");
     setCellText(parts.health.data, health.dataFresh ? "最新" : "等待更新");
-    setCellText(parts.health.target, health.targetSelection === "required" ? "需要指定窗口" : (health.targetSelection || "自动"));
     setCellText(parts.health.modelSwitches, fmtInt(data.modelSwitchCount) + " 次");
     setCellText(parts.health.resets, fmtInt(data.cumulativeResetCount) + " 次");
-    setCellText(parts.health.recovery, health.recoveryState === "recovered" ? "已恢复" : (health.recoveryState || "正常"));
+    const audit = health.cdpClients;
+    const unknownClients = audit && Array.isArray(audit.unknown) ? audit.unknown : [];
+    const injection = health.injectionAlert;
+    if (parts.security) {
+      const notices = [];
+      if (unknownClients.length) notices.push("检测到 " + unknownClients.length + " 个未知 CDP 客户端（可能也在使用 9229）");
+      if (injection && injection.count) notices.push("页面已拒绝 " + injection.count + " 条无效负载");
+      if (notices.length) {
+        parts.security.box.hidden = false;
+        setCellText(parts.security.text, notices.join(" · "));
+        const clientKey = unknownClients.map((item) => item.name + ":" + item.pid).join(",") + "|" + (injection ? injection.count : 0);
+        if (parts.security.key !== clientKey) {
+          parts.security.key = clientKey;
+          parts.security.list.replaceChildren(
+            ...unknownClients.map((item) => textNode("div", "tui-dialog-security-row",
+              item.name + "  PID " + item.pid + "  ×" + (item.connections || 1))),
+            ...(injection && injection.count
+              ? [textNode("div", "tui-dialog-security-row", "被拒绝负载: " + injection.count + " 条")]
+              : []),
+          );
+        }
+      } else {
+        parts.security.box.hidden = true;
+        parts.security.list.hidden = true;
+        parts.security.more.textContent = "详情";
+      }
+    }
 
     // 倒序展示：最新的请求在最上面（负载本身是升序，这里只反转展示顺序）。
     // 上限由监控下发；会话总量回退（通常=切换了会话/会话重置）时把翻页位置收回默认档，
@@ -927,6 +1165,7 @@
       ].join("|"),
       noticeText: "",
       items: requests,
+      keyOf: (request) => request.index,
       buildRow: (request) => buildRequestRow(request),
       updateRow: (row, request) => updateRequestRow(row, request),
     });
@@ -950,6 +1189,7 @@
       ].join("|"),
       noticeText: "",
       items: turns,
+      keyOf: (turn, index) => turn.index || index + 1,
       buildRow: (turn, index) => buildTurnRow(turn, index, index === 0),
       updateRow: (row, turn) => updateTurnRow(row, turn),
     });
@@ -964,9 +1204,55 @@
     return `更新于 ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
   }
 
+  function serviceBadgeText() {
+    const badge = document.querySelector(".codex-service-tier-badge");
+    if (!badge) return "";
+    return String(
+      badge.getAttribute("aria-label") ||
+      badge.getAttribute("title") ||
+      badge.textContent ||
+      "",
+    ).trim();
+  }
+
+  function healthTone(data) {
+    if (!data || state.protocolError) return "red";
+    const status = data.health && data.health.status;
+    if (status === "healthy" && data.health.pageAttached && data.health.dataFresh) return "green";
+    if (["failed", "protocol-mismatch", "target-selection-required"].includes(status)) return "red";
+    if (state.monitorStale || status === "stale-data" || status === "recovering" ||
+      (typeof status === "string" && status.startsWith("waiting-"))) return "yellow";
+    return "yellow";
+  }
+
+  function updateHealthDot(dot, data) {
+    if (!dot) return;
+    const tone = healthTone(data);
+    dot.className = "tui-dialog-health-dot tui-dialog-health-dot--" + tone;
+    dot.title = "运行状态：" + (data ? healthLabel(data.health) : "等待监控数据");
+  }
+
   function formatSubtitle(data) {
     if (!data) return state.protocolError ? "协议不匹配 · 请重新加载 Codex++ 用户脚本" : "等待监控数据";
-    return `${healthLabel(data.health)} · ${formatUpdatedAt(data.updatedAt)}`;
+    const service = serviceBadgeText();
+    const prefix = data.snapshot ? "上次数据 · " : "";
+    return `${prefix}${healthLabel(data.health)} · ${formatUpdatedAt(data.updatedAt)}${service ? " · " + service : ""}`;
+  }
+
+  function speedSampleTitle(data) {
+    const count = Number.isFinite(data && data.effectiveSampleCount) ? data.effectiveSampleCount : 0;
+    const window = Number.isFinite(data && data.effectiveWindow) ? data.effectiveWindow : 25;
+    const confidence = data && data.speedTimingConfidence ? data.speedTimingConfidence : "low";
+    const confidenceLabel = confidence === "high" ? "高" : confidence === "medium" ? "中" : "低";
+    const compactCount = Number.isFinite(data && data.compactSpeedSampleCount) ? data.compactSpeedSampleCount : 0;
+    const compactWindow = Number.isFinite(data && data.compactSpeedWindow) ? data.compactSpeedWindow : 5;
+    const compactConfidence = data && data.compactSpeedConfidence ? data.compactSpeedConfidence : "low";
+    const compactLabel = compactConfidence === "high" ? "高" : compactConfidence === "medium" ? "中" : "低";
+    const compact = Number.isFinite(data && data.compactTps) ? `≈${Math.round(data.compactTps)} Tokens/s` : "-- Tokens/s";
+    const wall = Number.isFinite(data && data.turnWallTps) ? `${data.turnWallTps.toFixed(1)} Tokens/s` : "-- Tokens/s";
+    return `有效速度 · 最近 ${count}/${window} 个有效轮次 · 时间置信度 ${confidenceLabel}；` +
+      `紧凑条稳健估算 ${compact}（${compactCount}/${compactWindow} 样本，置信度 ${compactLabel}）；` +
+      `本轮墙钟平均 ${wall}`;
   }
 
  function detailMetrics(data) {
@@ -986,8 +1272,10 @@
       turnUncached: turnSplit.uncached,
       turnOutput: data && data.turnOutput != null ? data.turnOutput : turn && turn.output,
       turnTotal: data && data.turnTotal != null ? data.turnTotal : turn && turn.total,
-      currentRequestCount: data && data.requestDetailTotal != null
-        ? data.requestDetailTotal
+      currentRequestCount: data && data.currentTurnRequestCount != null
+        ? data.currentTurnRequestCount
+        : data && data.requestDetailTotal != null
+          ? data.requestDetailTotal
         : turn && turn.requests != null
           ? turn.requests
           : 0,
@@ -1004,6 +1292,7 @@
     const body = dialog.__tuiBody;
     const data = state.data;
     if (dialog.__tuiSubtitle) setCellText(dialog.__tuiSubtitle, formatSubtitle(data));
+    updateHealthDot(dialog.__tuiStatusDot, data);
     dialog.__tuiRenderedDataKey = dataKeyOf(data);
 
     if (!data) {
@@ -1035,12 +1324,15 @@
     dialog.setAttribute("aria-describedby", `${DIALOG_ID}-subtitle`);
     const header = textNode("div", "tui-dialog-header");
     const heading = textNode("div");
-    heading.append(
-      textNode("div", "tui-dialog-title", "Token 用量详情"),
-      textNode("div", "tui-dialog-subtitle", "原生统计条 · 仅展示本地脱敏统计"),
-    );
-    heading.firstChild.id = `${DIALOG_ID}-title`;
-    heading.lastChild.id = `${DIALOG_ID}-subtitle`;
+    const titleRow = textNode("div", "tui-dialog-title-row");
+    const healthDot = textNode("span", "tui-dialog-health-dot tui-dialog-health-dot--yellow");
+    healthDot.setAttribute("aria-hidden", "true");
+    const title = textNode("div", "tui-dialog-title", "Token 用量详情");
+    const subtitle = textNode("div", "tui-dialog-subtitle", "原生统计条 · 仅展示本地脱敏统计");
+    titleRow.append(healthDot, title);
+    heading.append(titleRow, subtitle);
+    title.id = `${DIALOG_ID}-title`;
+    subtitle.id = `${DIALOG_ID}-subtitle`;
     const close = textNode("button", "tui-dialog-close", "×");
     close.type = "button";
     close.setAttribute("aria-label", "关闭详情");
@@ -1049,7 +1341,8 @@
     const body = textNode("div", "tui-dialog-body");
     dialog.append(header, body);
    dialog.__tuiBody = body;
-   dialog.__tuiSubtitle = heading.lastChild;
+   dialog.__tuiSubtitle = subtitle;
+   dialog.__tuiStatusDot = healthDot;
     dialog.__tuiClose = close;
    return dialog;
   }
@@ -1078,6 +1371,26 @@
     closeDetails();
   }
 
+  // 磨砂玻璃自适应：弹层打开时采样约 0.8 秒帧时间；
+  // 若平均帧时间明显超标（<50fps），加 tui-glass-lite 退回实色，避免在低端设备上拖慢流式输出。
+  function tuneGlass(dialog) {
+    if (!dialog) return;
+    if (document.visibilityState !== "visible") return;
+    let frames = 0;
+    const startedAt = performance.now();
+    const tick = () => {
+      frames += 1;
+      const elapsed = performance.now() - startedAt;
+      if (elapsed < 800) {
+        requestAnimationFrame(tick);
+        return;
+      }
+      const avg = elapsed / Math.max(1, frames);
+      if (avg > 20) dialog.classList.add("tui-glass-lite");
+    };
+    requestAnimationFrame(tick);
+  }
+
   function openDetails() {
     if (!document.body) return;
     if (state.dialog && state.dialog.getAttribute("data-open") === "true") return;
@@ -1097,6 +1410,7 @@
     renderDetails();
     positionDialog();
    state.dialog.style.visibility = "visible";
+    tuneGlass(state.dialog);
     if (state.dialog.__tuiClose && typeof state.dialog.__tuiClose.focus === "function") {
       try { state.dialog.__tuiClose.focus({ preventScroll: true }); } catch { state.dialog.__tuiClose.focus(); }
     }
@@ -1114,6 +1428,10 @@
     state.windowTurns = TURN_WINDOW_CLOSED;
     state.windowRequests = REQUEST_WINDOW_CLOSED;
     publishWindow();
+    // 关闭后给监控一个重新推送的宽限期（窗口变化会在 ~1s 内触发推送），
+    // 避免把"展开期间没有心跳"误判成监控停止。
+    state.lastPayloadAt = Date.now();
+    state.monitorStale = false;
     document.removeEventListener("pointerdown", onDocumentPointerDown, true);
     document.removeEventListener("mousedown", onDocumentPointerDown, true);
     window.removeEventListener("resize", positionDialog);
@@ -1210,12 +1528,21 @@
     if (metric && metric.valueNode && metric.valueNode.textContent !== value) metric.valueNode.textContent = value;
   }
 
-  function render() {
+  function render(force = false) {
     if (!state.root) return;
     applyTheme();
     const metrics = state.root.__tuiMetrics;
     const d = state.data;
     const hasData = !!d;
+    const renderSignature = [
+      dataKeyOf(d),
+      state.protocolError,
+      state.monitorStale,
+      JSON.stringify(d && d.health ? d.health : null),
+      d && d.sessionChanged ? "changed" : "",
+    ].join("|");
+    if (!force && !state.dialog && renderSignature === state.lastRenderSignature) return;
+    state.lastRenderSignature = renderSignature;
     const legacyTurn = d && Array.isArray(d.turns) && d.turns.length ? d.turns[d.turns.length - 1] : null;
     const turnTotal = d && d.turnTotal != null ? d.turnTotal : legacyTurn && legacyTurn.total;
     const turnInputValue = d && d.turnInput != null ? d.turnInput : legacyTurn && legacyTurn.input;
@@ -1234,11 +1561,17 @@
       publishWindow();
     }
 
-    // 速度格：整数 + T/s；无数据时为 --T/s。
-    // 注：T1 实测已确认「生成过程中的实时估算」在当前 Codex 渲染方式下不可实现
-    //（页面按节点替换而非字符追加，且工具块会折叠/展开），因此这里暂时显示官方口径：
-    // 上一条已完成请求的速度（lastRequestTps）；待替代信号确定后再切实时值。
-    const tpsText = hasData && Number.isFinite(d.lastRequestTps) ? Math.round(d.lastRequestTps) + "T/s" : "--T/s";
+    // 新监控优先使用稳健的中位数估算。字段存在但样本不足时必须显示 --，
+    // 不能回退到单条尖峰；只有旧监控完全没有 compactTps 字段时才兼容回退。
+    const hasCompactField = hasData && Object.prototype.hasOwnProperty.call(d, "compactTps");
+    const estimatedSpeed = hasCompactField
+      ? (Number.isFinite(d.compactTps) ? d.compactTps : null)
+      : hasData && Number.isFinite(d.genEstimateTps)
+        ? d.genEstimateTps
+        : hasData && Number.isFinite(d.lastRequestTps)
+          ? d.lastRequestTps
+          : null;
+    const tpsText = estimatedSpeed == null ? "--T/s" : "≈" + Math.round(estimatedSpeed) + "T/s";
 
     // 悬浮冻结：以下所有写入在指针悬停时整体跳过（移出后由 pointerleave 补渲染）。
     if (!state.hoverFrozen) {
@@ -1258,12 +1591,13 @@
     const sessionCached = sessionSplit.cached;
     const sessionUncached = sessionSplit.uncached;
     const label = hasData
-      ? `速度 ${tpsText}，会话 ${fmtInt(d.sessionTotal)}，当前提问 ${fmtInt(turnTotal)}，请求 ${fmtInt(d.requestCount)}；当前提问命中 ${fmtInt(turnCached)}，未命中 ${fmtInt(turnUncached)}，输出 ${fmtInt(turnOutput)}；会话输入 ${fmtInt(sessionInput)}，命中 ${fmtInt(sessionCached)}，未命中 ${fmtInt(sessionUncached)}，输出 ${fmtInt(d.sessionOutput)}`
+      ? `生成估算速度 ${tpsText}，会话 ${fmtInt(d.sessionTotal)}，当前提问 ${fmtInt(turnTotal)}，请求 ${fmtInt(d.requestCount)}；当前提问命中 ${fmtInt(turnCached)}，未命中 ${fmtInt(turnUncached)}，输出 ${fmtInt(turnOutput)}；会话输入 ${fmtInt(sessionInput)}，命中 ${fmtInt(sessionCached)}，未命中 ${fmtInt(sessionUncached)}，输出 ${fmtInt(d.sessionOutput)}`
       : state.protocolError ? "Token 统计协议不匹配" : "Token 统计等待监控数据";
-    const accessibleLabel = `${label}；左键查看详细统计`;
+    const staleNote = state.monitorStale ? "；监控可能已停止，打开详情可手动启动" : "";
+    const accessibleLabel = `${label}${staleNote}；左键查看详细统计`;
     if (state.root.getAttribute("aria-label") !== accessibleLabel) state.root.setAttribute("aria-label", accessibleLabel);
     state.root.title = accessibleLabel;
-    state.root.classList.toggle("tui-native-stale", !hasData || !!(d && d.health && d.health.status !== "healthy"));
+    state.root.classList.toggle("tui-native-stale", !hasData || state.monitorStale || !!(d && d.health && d.health.status !== "healthy"));
     state.root.classList.toggle("tui-native-error", !!state.protocolError || !!(d && d.health && ["failed", "protocol-mismatch", "target-selection-required"].includes(d.health.status)));
     }
     if (state.dialog) {
@@ -1325,7 +1659,10 @@
       window.__tuiForCodexStatusAt = "";
     }
 
-    if (!state.root) state.root = buildRoot();
+    if (!state.root) {
+      state.root = buildRoot();
+      state.lastRenderSignature = "";
+    }
     // insertBefore 的参考节点必须是容器的「直接子节点」，否则抛 NotFoundError
     // （浏览器原文：The node before which the new node is to be inserted is not a child of this node）。
     // 两种会踩中的真实场景：
@@ -1425,13 +1762,120 @@
       attributes: true,
       attributeFilter: ["aria-label", "data-state", "data-testid"],
     });
+    // 主题观察单独挂在 <html> 上，不订阅整棵子树的 class/style，
+    // 避免宿主频繁更新普通元素时让插件做无意义的全树回调。
+    state.themeObserver = new MutationObserver(() => {
+      clearTimeout(state.themeTimer);
+      state.themeTimer = setTimeout(applyTheme, 30);
+    });
+    state.themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme", "data-color-scheme", "class", "style"],
+    });
+    try {
+      const media = window.matchMedia("(prefers-color-scheme: dark)");
+      const onThemePreference = () => {
+        clearTimeout(state.themeTimer);
+        state.themeTimer = setTimeout(applyTheme, 30);
+      };
+      if (typeof media.addEventListener === "function") media.addEventListener("change", onThemePreference);
+      else if (typeof media.addListener === "function") media.addListener(onThemePreference);
+      state.themeMedia = media;
+    } catch {}
     window.addEventListener("resize", updateDensity, { passive: true });
   }
 
+  // ---- 负载验签（HMAC + nonce + 时间窗 + seq）---------------------------
+  // schema v3 是严格的签名-only 协议：boot 负载也必须验签。
+  // 监控用会话级密钥签名，密钥经 CDP 注入；任何缺 auth、坏 MAC、过期、
+  // nonce 重放或 seq 倒退的负载都不会进入 adoptData()。
+  const seenNonces = new Set();
+  let rejectedPayloads = 0;
+  let lastAuthKey = "";
+  let lastAuthSeq = 0;
+  let dataEventSeq = 0;
+  const hmacKeyCache = new Map();
+
+  function canonicalJson(value) {
+    if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+    if (value && typeof value === "object") {
+      return "{" + Object.keys(value).sort()
+        .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+    }
+    return JSON.stringify(value);
+  }
+
+  async function hmacHex(key, text) {
+    let imported = hmacKeyCache.get(key);
+    if (!imported) {
+      imported = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      hmacKeyCache.set(key, imported);
+    }
+    const signature = await crypto.subtle.sign("HMAC", imported, new TextEncoder().encode(text));
+    return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function verifyPayloadAuth(data) {
+    if (!data || typeof data !== "object") return { ok: false, reason: "no-data" };
+    if (data.authRequired !== true) return { ok: false, reason: "auth-required" };
+    const auth = data.auth;
+    if (!auth || typeof auth !== "object") return { ok: false, reason: "unsigned" };
+    if (auth.v !== 1) return { ok: false, reason: "auth-version" };
+    const key = window.__tuiForCodexAuthKey;
+    if (typeof key !== "string" || !key) return { ok: false, reason: "no-key" };
+    // 监控重启会轮换密钥：新会话开始时清零上次会话的拒绝计数，
+    // 否则 data-tui-security 会一直把旧告警带回来。
+    if (key !== lastAuthKey) {
+      lastAuthKey = key;
+      rejectedPayloads = 0;
+      seenNonces.clear();
+      lastAuthSeq = 0;
+      document.documentElement.setAttribute("data-tui-security", "0");
+    }
+    const ts = Number(auth.ts);
+    if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > 30000) return { ok: false, reason: "stale" };
+    if (!Number.isInteger(auth.seq) || auth.seq < 1 || auth.seq <= lastAuthSeq) return { ok: false, reason: "sequence" };
+    if (!auth.nonce || seenNonces.has(auth.nonce)) return { ok: false, reason: "replay" };
+    const body = { ...data };
+    delete body.auth;
+    const expected = await hmacHex(key, canonicalJson(body) + "|" + ts + "|" + auth.nonce);
+    if (typeof auth.mac !== "string" || expected.length !== auth.mac.length) return { ok: false, reason: "mac" };
+    let diff = 0;
+    for (let index = 0; index < expected.length; index += 1) {
+      diff |= expected.charCodeAt(index) ^ auth.mac.charCodeAt(index);
+    }
+    if (diff !== 0) return { ok: false, reason: "mac" };
+    seenNonces.add(auth.nonce);
+    if (seenNonces.size > 512) seenNonces.delete(seenNonces.values().next().value);
+    lastAuthSeq = auth.seq;
+    return { ok: true };
+  }
+
+  function clonePayload(data) {
+    if (data == null) return null;
+    try {
+      return structuredClone(data);
+    } catch {
+      return JSON.parse(JSON.stringify(data));
+    }
+  }
+
   // 数据事件：监控进程写入 window.__tuiForCodex 后派发 tokens-ui-for-codex。
-  const handleDataEvent = () => {
-    const nextData = window.__tuiForCodex || null;
+  const handleDataEvent = async () => {
+    const seq = ++dataEventSeq;
+    // 先深拷贝再做异步 WebCrypto 验签；验证与应用必须是同一份不可变快照。
+    const nextData = clonePayload(window.__tuiForCodex || null);
+    const verdict = await verifyPayloadAuth(nextData);
+    if (seq !== dataEventSeq) return;
+    if (!verdict.ok) {
+      rejectedPayloads += 1;
+      document.documentElement.setAttribute("data-tui-security", String(rejectedPayloads));
+      return;
+    }
     adoptData(nextData);
+    // 收到任何推送（含 1s/5s 心跳）即刷新"监控存活"时间
+    state.lastPayloadAt = Date.now();
+    state.monitorStale = false;
     // 每次数据事件都渲染：内部全部是增量更新（实测 <1ms，最低成本已做 !== 检查）。
     // 不再用 dataKey 门控 —— 它曾漏掉 sessionTps / lastRequestTps / health 等字段，
     // 导致「速度或健康状态变化但界面不刷新」（P4）；去掉字段清单依赖后，
@@ -1441,13 +1885,34 @@
   };
   window.addEventListener(DATA_EVENT, handleDataEvent);
 
-  const bootPayload = window.__tuiForCodex || null;
+  const bootPayload = clonePayload(window.__tuiForCodex || null);
   if (bootPayload) {
-    adoptData(bootPayload);
+    const bootSeq = ++dataEventSeq;
+    verifyPayloadAuth(bootPayload).then((verdict) => {
+      if (bootSeq !== dataEventSeq) return;
+      if (!verdict.ok) {
+        rejectedPayloads += 1;
+        document.documentElement.setAttribute("data-tui-security", String(rejectedPayloads));
+        return;
+      }
+      adoptData(bootPayload);
+      state.lastPayloadAt = Date.now();
+    });
   }
 
   const start = () => {
     installObservers();
+    // 折叠态陈旧检测：90 秒没收到任何推送（空闲心跳 5 秒一次）→ 视为监控可能已停止。
+    // 展开态不做心跳（仅数据变化才推），因此弹层打开时跳过判断，避免误报。
+    setInterval(() => {
+      if (state.dialog) return;
+      if (!state.lastPayloadAt) return;
+      const stale = Date.now() - state.lastPayloadAt > 90000;
+      if (stale !== state.monitorStale) {
+        state.monitorStale = stale;
+        render();
+      }
+    }, 30000);
     // 初始挂载统一走 queueMount：与后续重挂载共用同一层异常保护与诊断状态。
     // 直接调用 mount() 时，初始异常只是一条裸的未捕获错误、且不写诊断状态，
     // 排障时无法区分「锚点缺失（Codex 改版）」与「插件自身抛错」。

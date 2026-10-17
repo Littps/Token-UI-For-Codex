@@ -11,13 +11,17 @@
 //   node token-stats.mjs --detail           include per-request rows in the printed table
 //   node token-stats.mjs --watch [--cdp]    watch the active conversation (push to page with --cdp)
 //   node token-stats.mjs --cdp              one-shot push of a sanitized summary into the Codex page
-//   node token-stats.mjs --port <port>      CDP port override (default 9229)
+//   node token-stats.mjs --port <port|auto> CDP port override, or auto-detect from ChatGPT.exe (default 9229)
+//   node token-stats.mjs --instance-status  report whether the monitor lock belongs to a live monitor
 //
 // The tool only reads Codex's own session logs and never prints secrets.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   PROTOCOL_NAME,
   PROTOCOL_CAPABILITIES,
@@ -26,6 +30,12 @@ import {
   normalizeHealth,
   validatePayload,
 } from "./protocol.mjs";
+import {
+  robustSpeedSummary,
+  unionDurationMs,
+  SPEED_SAMPLE_WINDOW,
+} from "./speed-stats.mjs";
+import { UsageHistoryArchive } from "./history-archive.mjs";
 
 const SESSIONS_DIR = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
 const ROLLOUT_RE = /^rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(.+)\.jsonl$/;
@@ -33,12 +43,15 @@ const ROLLOUT_FILE_RE = /^rollout-.*\.jsonl$/;
 const ROLLOUT_FILE_LIST_CACHE_MS = 1500;
 // 轮次摘要：内存保留全部，「推送多少」由页面的窗口请求决定（见 TURN_WINDOW_* 与 readWindowWant）。
 const MAX_TURN_SUMMARIES = 500;
-// 推送窗口：弹层关闭时只推最近 5 轮（极简），打开时 25 轮 + 10 条请求明细，「加载更多」每次 +50 / +20。
+// 推送窗口：弹层关闭时只推最近 5 轮（极简），打开时 10 轮 + 10 条请求明细，「加载更多」每次 +50 / +20。
 const TURN_WINDOW_CLOSED = 5;
-const TURN_WINDOW_OPEN = 25;
+const TURN_WINDOW_OPEN = 10;
 const TURN_WINDOW_STEP = 50;
 const ACTIVE_ID_CACHE_MS = 15000;
+const CLIENT_AUDIT_INTERVAL_MS = 15000;
+const CLIENT_AUDIT_LOG_COOLDOWN_MS = 300000;
 const THREAD_PROBE_INTERVAL_MS = 2000;
+const TARGET_FOCUS_CHECK_MS = 10000;
 // 数据变化时立即推送；无变化时按固定周期推送，保证页面每 5 秒至少刷新一次。
 const HEARTBEAT_INTERVAL_MS = 5000;
 // 「有任务在跑」时把心跳加密到 1 秒：让「更新于 HH:MM:SS」与实际生成节奏同步，
@@ -72,6 +85,14 @@ const FILE_FINGERPRINT_BYTES = 4096;
 const LOCAL_ROOT_DIR = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const STATE_DIR_NAME = "tokens-ui-for-codex";
 const LOCAL_STATE_DIR = path.join(LOCAL_ROOT_DIR, STATE_DIR_NAME);
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const usageHistoryArchive = new UsageHistoryArchive(path.join(LOCAL_STATE_DIR, "history"));
+
+// PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM；JSON.parse 不接受 BOM。
+// 读取时统一剥离，兼容历史状态文件与用户手工编辑。
+function readJsonFileUtf8(file) {
+  return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+}
 
 // 单实例锁：计划任务、兜底巡检、手动启动都可能同时拉起监控，这里保证只保留一个。
 // Node 没有 flock，因此用「PID 锁文件 + 存活探测」：持有者进程不存在时视为陈旧锁并接管。
@@ -84,8 +105,68 @@ function isProcessAlive(pid) {
   }
 }
 
-function acquireSingleInstanceLock() {
-  const lockFile = path.join(LOCAL_STATE_DIR, "monitor.lock");
+function monitorLockPath() {
+  return path.join(LOCAL_STATE_DIR, "monitor.lock");
+}
+
+function readMonitorLock() {
+  try {
+    const lock = readJsonFileUtf8(monitorLockPath());
+    return lock && Number.isInteger(lock.pid) && lock.pid > 0 ? lock : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearMonitorLock() {
+  try {
+    fs.rmSync(monitorLockPath(), { force: true });
+  } catch {
+    // 状态查询不能因为清理失败而阻塞启动；下次 acquire 会继续处理。
+  }
+}
+
+function readProcessCommandLineByPid(pid) {
+  return new Promise((resolve) => {
+    const script = "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=" + pid + "\"; if ($p) { $p.CommandLine }";
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { windowsHide: true, timeout: 3000, maxBuffer: 256 * 1024 },
+      (error, stdout) => resolve(error ? null : String(stdout || "").trim()),
+    );
+  });
+}
+
+// 给手工启动器做预检查：锁文件里的 PID 必须仍存活，且命令行确实指向本监控脚本。
+// 这样既能拦住“已经有一个实例”的手工启动，也能清掉 PID 被系统复用后的陈旧锁。
+async function monitorInstanceState() {
+  const lock = readMonitorLock();
+  if (!lock) return { running: false, reason: "no-lock", pid: null };
+  if (!isProcessAlive(lock.pid)) {
+    clearMonitorLock();
+    return { running: false, reason: "stale-pid", pid: lock.pid };
+  }
+  const commandLine = await readProcessCommandLineByPid(lock.pid);
+  if (commandLine && !/token-stats\.mjs/i.test(commandLine)) {
+    clearMonitorLock();
+    return { running: false, reason: "pid-reused", pid: lock.pid };
+  }
+  return { running: true, reason: "running", pid: lock.pid, startedAt: lock.startedAt || null };
+}
+
+async function printMonitorInstanceState() {
+  const state = await monitorInstanceState();
+  if (state.running) {
+    console.log("monitor already running (PID " + state.pid + ")");
+    return 0;
+  }
+  console.log("monitor not running" + (state.reason ? " (" + state.reason + ")" : ""));
+  return 1;
+}
+
+async function acquireSingleInstanceLock() {
+  const lockFile = monitorLockPath();
   const payload = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
   try {
     fs.mkdirSync(LOCAL_STATE_DIR, { recursive: true });
@@ -95,8 +176,12 @@ function acquireSingleInstanceLock() {
     if (!error || error.code !== "EEXIST") return true; // 其它异常不阻塞启动
   }
   try {
-    const held = JSON.parse(fs.readFileSync(lockFile, "utf8"));
-    if (held && Number.isInteger(held.pid) && isProcessAlive(held.pid)) return false;
+    const held = readJsonFileUtf8(lockFile);
+    if (held && Number.isInteger(held.pid) && isProcessAlive(held.pid)) {
+      // PID 存活还不够：系统可能已复用该 PID。只有命令行仍指向本监控时才认为实例存活。
+      const commandLine = await readProcessCommandLineByPid(held.pid);
+      if (!commandLine || /token-stats\.mjs/i.test(commandLine)) return false;
+    }
   } catch {
     // 锁文件损坏 → 按陈旧锁处理
   }
@@ -109,6 +194,8 @@ function acquireSingleInstanceLock() {
 }
 const MONITOR_HEALTH_FILE = path.join(LOCAL_STATE_DIR, "monitor-health.json");
 const AUTOSTART_STATE_FILE = path.join(LOCAL_STATE_DIR, "autostart-state.json");
+const LAST_SUMMARY_FILE = path.join(LOCAL_STATE_DIR, "last-summary.json");
+const LAST_SUMMARY_VERSION = 3;
 const LOG_DIR = path.join(LOCAL_STATE_DIR, "logs");
 const LOG_ROTATE_BYTES = 1024 * 1024;
 const MAX_LOG_FILES = 30;
@@ -225,6 +312,22 @@ function modelValueFromEvent(event) {
 // 单段上限 5 分钟：超过视为空闲/挂起，避免把长时间无人操作的间隔算成生成时间。
 // ---------------------------------------------------------------------------
 const MAX_GEN_GAP_MS = 5 * 60 * 1000;
+// 有效速度的近邻窗口。25 次在稳定性和响应速度之间更均衡；可改为 30。
+const EFFECTIVE_SPEED_WINDOW = 25;
+
+function normalizedItemType(value) {
+  return String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function isGenerationItemType(value) {
+  const type = normalizedItemType(value);
+  return type === "reasoning" || type === "agentmessage" || type === "message";
+}
+
+function isToolItemType(value) {
+  const type = normalizedItemType(value);
+  return ["commandexecution", "filechange", "mcptoolcall", "websearch", "imagegeneration", "toolexecution"].includes(type);
+}
 
 function trackGenWindow(state, event, timestamp) {
   const payload = event && event.payload;
@@ -302,6 +405,51 @@ function processParserEvent(state, event) {
     }
     if (windowPayload.info && Number.isFinite(windowPayload.info.model_context_window)) {
       state.modelContextWindow = windowPayload.info.model_context_window;
+    }
+    // 结构化时间：task_complete 提供整轮耗时与 TTFT，item_completed
+    // 提供 Reasoning / AgentMessage / CommandExecution 等条目的起止时间。
+    // 只保存数字和时间标签，不复制 item.content。
+    if (windowPayload.type === "task_complete") {
+      const taskKey = [
+        windowPayload.turn_id || "",
+        windowPayload.completed_at ?? timestamp,
+        windowPayload.duration_ms ?? "",
+      ].join("|");
+      if (!state.taskCompletionKeys.has(taskKey)) {
+        state.taskCompletionKeys.add(taskKey);
+        state.taskCompletions.push({
+          turnId: typeof windowPayload.turn_id === "string" ? windowPayload.turn_id : "",
+          ts: timestamp,
+          startedAt: windowPayload.started_at ?? null,
+          completedAt: windowPayload.completed_at ?? null,
+          durationMs: Number.isFinite(windowPayload.duration_ms) ? windowPayload.duration_ms : null,
+          ttftMs: Number.isFinite(windowPayload.time_to_first_token_ms) ? windowPayload.time_to_first_token_ms : null,
+        });
+      }
+    } else if (windowPayload.type === "item_completed" && windowPayload.item) {
+      const item = windowPayload.item;
+      const startedAtMs = Number(windowPayload.started_at_ms);
+      const completedAtMs = Number(windowPayload.completed_at_ms);
+      const itemType = typeof item.type === "string" ? item.type : "";
+      const itemId = item.id || item.client_id || "";
+      const itemKey = [
+        windowPayload.turn_id || "",
+        itemId,
+        itemType,
+        windowPayload.started_at_ms ?? "",
+        windowPayload.completed_at_ms ?? "",
+      ].join("|");
+      if (Number.isFinite(startedAtMs) && Number.isFinite(completedAtMs) && !state.itemTimingKeys.has(itemKey)) {
+        state.itemTimingKeys.add(itemKey);
+        state.itemTimings.push({
+          turnId: typeof windowPayload.turn_id === "string" ? windowPayload.turn_id : "",
+          ts: timestamp,
+          itemType,
+          durationMs: Math.max(0, completedAtMs - startedAtMs),
+          startedAtMs,
+          completedAtMs,
+        });
+      }
     }
   }
 
@@ -427,6 +575,10 @@ class IncrementalRolloutParser {
     // 同 response_id 的重复记录只算一次；但若两次的线程累计不同，说明是"真冲突"（非 0 即报警）。
     this.usageRecordTotals = new Map();
     this.formatConflicts = 0;
+    this.taskCompletions = [];
+    this.itemTimings = [];
+    this.taskCompletionKeys = new Set();
+    this.itemTimingKeys = new Set();
     this.userMessages = [];
     this.userMessageKeys = new Set();
     // 会话日志里的任务运行状态（task_started / task_complete）
@@ -519,7 +671,8 @@ class IncrementalRolloutParser {
 
   toParsed() {
     if (!this.dirty && this.snapshotCache) return this.snapshotCache;
-    if (!this.counts.length && !this.usageRecords.length && !this.userMessages.length && !this.turnContexts.length) {
+    if (!this.counts.length && !this.usageRecords.length && !this.userMessages.length && !this.turnContexts.length
+      && !this.taskCompletions.length && !this.itemTimings.length) {
       this.snapshotCache = null;
       this.dirty = false;
       return null;
@@ -532,6 +685,8 @@ class IncrementalRolloutParser {
       usageRecords: this.usageRecords,
       userMessages: this.userMessages,
       turnContexts: this.turnContexts,
+      taskCompletions: this.taskCompletions,
+      itemTimings: this.itemTimings,
       taskRunning: this.taskRunning === true,
       modelContextWindow: this.modelContextWindow,
       modelChanges: this.modelChanges,
@@ -717,6 +872,23 @@ function contentKeyOf(record) {
   return String(thread) + "|" + String(last);
 }
 
+// 真冲突判定使用完整数值构成；contentKey 只用于跨格式身份认领。
+// 同 ts、同 total 但 cached/input/output 不同必须被视为冲突，不能被“身份相同”掩盖。
+function conflictSignatureOf(record) {
+  const thread = record.threadUsage || {};
+  return JSON.stringify([
+    record.ts,
+    record.input,
+    record.output,
+    record.cached,
+    record.requestTotal,
+    thread.input,
+    thread.output,
+    thread.cached,
+    thread.total,
+  ]);
+}
+
 // (ts, ordinal) 稳定比较：ordinal 是宿主写出的全局事件序号，跨分片合并后仍是全序。
 // 任一侧缺 ordinal 时退化为「只比 ts」（返回 0 表示同序，交给调用方的既有规则处理）。
 function compareTsOrdinal(a, b) {
@@ -751,7 +923,19 @@ function collectUnifiedRecords(parsed) {
   const legacyRecords = [];
   const seenCounts = new Set();
   for (const count of parsed.counts || []) {
-    const key = String(count.ts) + "|" + String(count.total) + "|" + String(count.lastTotal);
+    // legacy 自身去重必须包含完整内容构成；只用 ts|total|lastTotal 会把同时间戳、
+    // 同总量但 cached/input/output 不同的真实事件静默合并，既少算请求也掩盖真冲突。
+    const key = JSON.stringify([
+      count.ts,
+      count.total,
+      count.lastTotal,
+      count.input,
+      count.output,
+      count.cached,
+      count.totalInfo ? count.totalInfo.input : null,
+      count.totalInfo ? count.totalInfo.output : null,
+      count.totalInfo ? count.totalInfo.cached : null,
+    ]);
     if (seenCounts.has(key)) continue;
     seenCounts.add(key);
     legacyRecords.push({
@@ -806,17 +990,16 @@ function collectUnifiedRecords(parsed) {
   // 真冲突（非 0 即报警）：同 response_id 但数值不同，或同 ts 但数值不同。
   const keptModern = [];
   const seenResponseIds = new Map();
-  const seenTsKeys = new Map();
+  const seenTsSignatures = new Map();
   const seenModernKeys = new Set();
   // 解析阶段的真冲突（同 response_id 但数值不同）由 IncrementalRolloutParser 统计后带进来。
   let formatConflictCount = Number.isFinite(parsed.formatConflicts) ? parsed.formatConflicts : 0;
   for (const record of records) {
     const key = contentKeyOf(record);
-    if (key != null) {
-      const sameStamp = seenTsKeys.get(record.ts);
-      if (sameStamp == null) seenTsKeys.set(record.ts, key);
-      else if (sameStamp !== key) formatConflictCount += 1;
-    }
+    const signature = conflictSignatureOf(record);
+    const sameStamp = seenTsSignatures.get(record.ts);
+    if (sameStamp == null) seenTsSignatures.set(record.ts, signature);
+    else if (sameStamp !== signature) formatConflictCount += 1;
     if (record.source !== "record") continue;
     if (record.responseId) {
       if (seenResponseIds.has(record.responseId)) {
@@ -923,7 +1106,77 @@ function collectUnifiedRecords(parsed) {
   return { records: merged, formatConflictCount, echoStats, replayStats, uniqueStats, legacyStats };
 }
 
-function buildStatsUnified(parsed, { retainRequests = true } = {}) {
+function buildTimingMaps(parsed) {
+  const tasks = new Map();
+  for (const task of parsed.taskCompletions || []) {
+    if (!task || !task.turnId) continue;
+    tasks.set(task.turnId, task);
+  }
+  const items = new Map();
+  const seen = new Set();
+  for (const item of parsed.itemTimings || []) {
+    if (!item || !item.turnId) continue;
+    const key = [item.turnId, item.itemType, item.startedAtMs, item.completedAtMs].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!items.has(item.turnId)) items.set(item.turnId, []);
+    items.get(item.turnId).push(item);
+  }
+  return { tasks, items };
+}
+
+function calculateTurnSpeedSample(turn, task, items) {
+  const output = Number.isFinite(turn.output) && turn.output > 0 ? turn.output : 0;
+  const generationIntervals = (items || [])
+    .filter((item) => isGenerationItemType(item.itemType))
+    .map((item) => [item.startedAtMs, item.completedAtMs]);
+  const generationMs = unionDurationMs(generationIntervals);
+  const generationSpanMs = generationIntervals.length
+    ? Math.max(...generationIntervals.map((interval) => interval[1])) -
+      Math.min(...generationIntervals.map((interval) => interval[0]))
+    : 0;
+  const toolMs = (items || [])
+    .filter((item) => isToolItemType(item.itemType))
+    .reduce((sum, item) => sum + (Number.isFinite(item.durationMs) ? item.durationMs : 0), 0);
+  const legacyGenerationMs = Number.isFinite(turn.legacyGenMs) && turn.legacyGenMs > 0 ? turn.legacyGenMs : 0;
+  const genMs = generationMs > 0 ? generationMs : legacyGenerationMs;
+  const durationMs = task && Number.isFinite(task.durationMs) && task.durationMs > 0 ? task.durationMs : null;
+  const effectiveMs = durationMs != null ? Math.max(0, durationMs - toolMs) : null;
+  const ttftMs = task && Number.isFinite(task.ttftMs) && task.ttftMs >= 0 ? task.ttftMs : null;
+  const genEstimateTps = output > 0 && genMs > 0 ? output / (genMs / 1000) : null;
+  const effectiveTps = output > 0 && effectiveMs > 0 ? output / (effectiveMs / 1000) : null;
+  const timingCoverage = durationMs > 0
+    ? Math.max(0, Math.min(1, ((ttftMs || 0) + genMs + toolMs) / durationMs))
+    : null;
+  const timingSource = task && generationMs > 0
+    ? "task+item"
+    : task && legacyGenerationMs > 0
+      ? "task+legacy"
+      : generationMs > 0
+        ? "item"
+        : legacyGenerationMs > 0
+          ? "legacy"
+          : "none";
+  let timingQuality = "low";
+  if (effectiveTps != null && task && genMs > 0) {
+    timingQuality = generationMs > 0 && timingCoverage != null && timingCoverage >= 0.8 ? "high" : "medium";
+  }
+  return {
+    output,
+    genMs,
+    generationSpanMs,
+    effectiveMs,
+    toolMs,
+    ttftMs,
+    genEstimateTps,
+    effectiveTps,
+    timingCoverage,
+    timingSource,
+    timingQuality,
+  };
+}
+
+function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
   const collected = collectUnifiedRecords(parsed);
   const records = collected.records;
   const starts = orderedByTimestamp(parsed.userMessages || []);
@@ -941,6 +1194,7 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
       turnId,
       start: startValue,
       startLabel: clockLabel(startValue),
+      lastTs: "",
       requests: [],
       requestCount: 0,
       input: 0,
@@ -949,9 +1203,22 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
       cacheAvailable: true,
       total: 0,
       cumulative: false,
+      // 本轮第一条记录之前的线程累计基线；用于把 legacy 的线程累计差值映射成当前轮增量。
+      threadBase: null,
       // 本轮加权平均速度的分子/分母（与 lastRequestTps 同口径：逐请求输出 ÷ 逐请求生成耗时）
       genMsTotal: 0,
       genOutputTotal: 0,
+      legacyGenMs: 0,
+      genEstimateMs: null,
+      genEstimateTps: null,
+      wallMs: null,
+      wallTps: null,
+      effectiveMs: null,
+      effectiveTps: null,
+      ttftMs: null,
+      toolMs: null,
+      timingCoverage: null,
+      timingSource: "none",
     });
     return turns.length - 1;
   };
@@ -1031,6 +1298,7 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
     const turnGenMs = Number.isFinite(record.genMs) ? record.genMs : 0;
     if (turnGenMs > 0) {
       turn.genMsTotal += turnGenMs;
+      turn.legacyGenMs += turnGenMs;
       if (Number.isFinite(record.output) && record.output > 0) turn.genOutputTotal += record.output;
     }
     const turnKey = record.turnId || ("boundary:" + String(turnIndex));
@@ -1040,6 +1308,30 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
     const normalizedTurnUsage = record.turnUsage
       ? normalizeCumulativeUsage(record.turnUsage, turnCounters.get(turnKey))
       : {};
+    if (turn.threadBase == null) {
+      turn.threadBase = {};
+      const requestValues = {
+        input: record.input,
+        output: record.output,
+        cached: record.cached,
+        total: record.requestTotal,
+      };
+      for (const key of ["input", "output", "cached", "total"]) {
+        const normalized = normalizedThreadUsage[key];
+        const current = requestValues[key];
+        turn.threadBase[key] = Number.isFinite(normalized) && Number.isFinite(current)
+          ? Math.max(0, normalized - current)
+          : null;
+      }
+    }
+    const derivedTurnUsage = {};
+    for (const key of ["input", "output", "cached", "total"]) {
+      const normalized = normalizedThreadUsage[key];
+      const base = turn.threadBase[key];
+      derivedTurnUsage[key] = Number.isFinite(normalized) && Number.isFinite(base)
+        ? Math.max(0, normalized - base)
+        : null;
+    }
     latestThreadUsage = mergeUsage(latestThreadUsage, normalizedThreadUsage);
     if (Number.isFinite(record.requestTotal)) latestContextUsed = record.requestTotal;
 
@@ -1052,6 +1344,7 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
       totalInfo: normalizedThreadUsage,
       model: record.model || null,
     };
+    turn.lastTs = record.ts || turn.lastTs;
     if (retainRequests) {
       turn.requests.push(request);
     } else {
@@ -1066,10 +1359,14 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
 
     if (Object.values(normalizedTurnUsage).some((value) => value != null)) turn.cumulative = true;
     if (turn.cumulative) {
-      if (normalizedTurnUsage.input != null) turn.input = normalizedTurnUsage.input;
-      if (normalizedTurnUsage.output != null) turn.output = normalizedTurnUsage.output;
-      if (normalizedTurnUsage.cached != null) turn.cached = normalizedTurnUsage.cached;
-      if (normalizedTurnUsage.total != null) turn.total = normalizedTurnUsage.total;
+      // 混合格式：现代记录写入本轮累计，legacy 记录只有线程累计。
+      // legacy 缺失的 turnUsage 必须用「线程累计 - 本轮起点基线」补齐，
+      // 否则一旦 turn.cumulative=true，后续 legacy 只会增加请求数而不再更新本轮数字。
+      for (const key of ["input", "output", "cached", "total"]) {
+        const value = normalizedTurnUsage[key] != null ? normalizedTurnUsage[key] : derivedTurnUsage[key];
+        if (value != null) turn[key] = value;
+      }
+      if (normalizedTurnUsage.cached == null && derivedTurnUsage.cached == null) turn.cacheAvailable = false;
     } else {
       if (record.input != null) turn.input += record.input;
       if (record.output != null) turn.output += record.output;
@@ -1077,6 +1374,30 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
       else turn.cacheAvailable = false;
       if (record.requestTotal != null) turn.total += record.requestTotal;
     }
+  }
+
+  const timing = buildTimingMaps(parsed);
+  for (const turn of turns) {
+    const task = turn.turnId ? timing.tasks.get(turn.turnId) : null;
+    const sample = calculateTurnSpeedSample(turn, task, turn.turnId ? timing.items.get(turn.turnId) : null);
+    turn.genEstimateMs = sample.genMs || null;
+    turn.genEstimateTps = sample.genEstimateTps;
+    const startMs = turn.start ? Date.parse(turn.start) : null;
+    const lastMs = turn.lastTs ? Date.parse(turn.lastTs) : null;
+    const observedWallMs = Number.isFinite(startMs) && Number.isFinite(lastMs) && lastMs > startMs
+      ? lastMs - startMs
+      : null;
+    turn.wallMs = task && task.durationMs
+      ? task.durationMs
+      : (observedWallMs != null ? observedWallMs : (sample.generationSpanMs > 0 ? sample.generationSpanMs : null));
+    turn.wallTps = turn.output > 0 && turn.wallMs > 0 ? turn.output / (turn.wallMs / 1000) : null;
+    turn.effectiveMs = sample.effectiveMs;
+    turn.effectiveTps = sample.effectiveTps;
+    turn.ttftMs = sample.ttftMs;
+    turn.toolMs = sample.toolMs;
+    turn.timingCoverage = sample.timingCoverage;
+    turn.timingSource = sample.timingSource;
+    turn.timingQuality = sample.timingQuality;
   }
 
   const threadUsage = latestThreadUsage || {};
@@ -1100,6 +1421,31 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
   const turnTps = lastTurnForTps && lastTurnForTps.genMsTotal > 0 && lastTurnForTps.genOutputTotal > 0
     ? lastTurnForTps.genOutputTotal / (lastTurnForTps.genMsTotal / 1000)
     : null;
+  const speedSamples = turns.filter((turn) => turn.effectiveTps != null && turn.output > 0 && turn.timingQuality !== "low");
+  const effectiveWindowSamples = speedSamples.slice(-EFFECTIVE_SPEED_WINDOW);
+  const effectiveOutputTotal = effectiveWindowSamples.reduce((sum, turn) => sum + turn.output, 0);
+  const effectiveMsTotal = effectiveWindowSamples.reduce((sum, turn) => sum + turn.effectiveMs, 0);
+  const effectiveTps = effectiveOutputTotal > 0 && effectiveMsTotal > 0
+    ? effectiveOutputTotal / (effectiveMsTotal / 1000)
+    : null;
+  const latestGenSample = [...turns].reverse().find((turn) => turn.genEstimateTps != null);
+  const lastTurn = turns.length ? turns[turns.length - 1] : null;
+  const currentModel = [...records].reverse().find((record) => record.model)?.model || null;
+  const speedSeries = records
+    .filter((record) =>
+      Number.isFinite(record.genMs) && record.genMs >= 500 &&
+      Number.isFinite(record.output) && record.output >= 16 &&
+      (!currentModel || !record.model || record.model === currentModel),
+    )
+    .map((record) => ({
+      output: record.output,
+      genMs: record.genMs,
+      model: record.model || currentModel,
+      timingSource: "record",
+    }));
+  const compactSpeed = robustSpeedSummary(speedSeries);
+  const latestEffectiveSample = effectiveWindowSamples.length ? effectiveWindowSamples[effectiveWindowSamples.length - 1] : null;
+  const speedTimingConfidence = latestEffectiveSample ? latestEffectiveSample.timingQuality : "low";
   const cumulativeResetCount = threadCounters.resetEvents +
     [...turnCounters.values()].reduce((sum, counters) => sum + counters.resetEvents, 0);
 
@@ -1118,6 +1464,17 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
     sessionTps,
     lastRequestTps,
     turnTps,
+    turnWallTps: lastTurn && Number.isFinite(lastTurn.wallTps) ? lastTurn.wallTps : null,
+    genEstimateTps: latestGenSample ? latestGenSample.genEstimateTps : null,
+    compactTps: compactSpeed.tps,
+    compactSpeedSampleCount: compactSpeed.sampleCount,
+    compactSpeedConfidence: compactSpeed.confidence,
+    compactSpeedWindow: SPEED_SAMPLE_WINDOW,
+    effectiveTps,
+    turnEffectiveTps: lastTurn && lastTurn.timingQuality !== "low" ? lastTurn.effectiveTps : null,
+    effectiveSampleCount: effectiveWindowSamples.length,
+    effectiveWindow: EFFECTIVE_SPEED_WINDOW,
+    speedTimingConfidence,
     formatConflictCount: collected.formatConflictCount,
     echoStats: collected.echoStats,
     replayStats: collected.replayStats,
@@ -1129,7 +1486,9 @@ function buildStatsUnified(parsed, { retainRequests = true } = {}) {
           ? Math.min(latestContextUsed, parsed.modelContextWindow)
           : latestContextUsed
         : null,
+    archiveRecords: includeArchiveRecords ? records : undefined,
     turns: turns.map((turn) => ({
+      turnId: turn.turnId,
       start: turn.start,
       startLabel: turn.startLabel,
       requests: turn.requests,
@@ -1154,7 +1513,7 @@ function turnPayloadFor(turn, index) {
   };
 }
 
-function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: true }), requestedWindow = null, sessionChanged = false) {
+function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: true }), requestedWindow = null, sessionChanged = false, snapshot = false) {
   // 窗口 = 本次推送包含多少条轮次摘要 / 请求明细。缺省按「弹层打开」的档位，保证非 CDP 路径（CLI）行为不变。
   const turnWindow = requestedWindow && Number.isFinite(requestedWindow.turns)
     ? Math.max(0, Math.min(MAX_TURN_SUMMARIES, Math.floor(requestedWindow.turns)))
@@ -1179,6 +1538,7 @@ function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: t
     protocolName: PROTOCOL_NAME,
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
     capabilities: PROTOCOL_CAPABILITIES,
+    authRequired: true,
     modelContextWindow: stats.modelContextWindow,
     requestCount: stats.requestCount,
     sessionTotal: stats.sessionTotal,
@@ -1204,6 +1564,18 @@ function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: t
     lastRequestTps: Number.isFinite(stats.lastRequestTps) ? stats.lastRequestTps : null,
     // 本轮加权平均速度（推导见 buildStats 内的 turnTps 注释）
     turnTps: Number.isFinite(stats.turnTps) ? stats.turnTps : null,
+    turnWallTps: Number.isFinite(stats.turnWallTps) ? stats.turnWallTps : null,
+    // 估算速度优先使用 Reasoning/AgentMessage 条目耗时；有效速度使用整轮耗时减工具执行。
+    genEstimateTps: Number.isFinite(stats.genEstimateTps) ? stats.genEstimateTps : null,
+    compactTps: Number.isFinite(stats.compactTps) ? stats.compactTps : null,
+    compactSpeedSampleCount: Number.isFinite(stats.compactSpeedSampleCount) ? stats.compactSpeedSampleCount : 0,
+    compactSpeedConfidence: typeof stats.compactSpeedConfidence === "string" ? stats.compactSpeedConfidence : "low",
+    compactSpeedWindow: Number.isFinite(stats.compactSpeedWindow) ? stats.compactSpeedWindow : SPEED_SAMPLE_WINDOW,
+    effectiveTps: Number.isFinite(stats.effectiveTps) ? stats.effectiveTps : null,
+    turnEffectiveTps: Number.isFinite(stats.turnEffectiveTps) ? stats.turnEffectiveTps : null,
+    effectiveSampleCount: Number.isFinite(stats.effectiveSampleCount) ? stats.effectiveSampleCount : 0,
+    effectiveWindow: Number.isFinite(stats.effectiveWindow) ? stats.effectiveWindow : EFFECTIVE_SPEED_WINDOW,
+    speedTimingConfidence: typeof stats.speedTimingConfidence === "string" ? stats.speedTimingConfidence : "low",
     currentTurnIndex: currentTurn ? stats.turns.length : 0,
     turns: stats.turns.slice(turnStart).map((turn, index) =>
       turnPayloadFor(turn, turnStart + index),
@@ -1215,11 +1587,13 @@ function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: t
     requestsLimit: MAX_REQUEST_DETAILS,
     // 一次性信号：本份负载对应的会话与上一份不同（供面板重置翻页位置）
     sessionChanged: sessionChanged === true,
+    snapshot: snapshot === true,
     requestDetails: currentRequests.slice(requestSliceStart).map((request, index) =>
       requestPayloadFor(request, requestIndexStart + index),
     ),
     requestDetailsTruncated: requestSliceStart > 0 || currentRequestTotal > currentRequests.length,
     requestDetailTotal: currentRequestTotal,
+    currentTurnRequestCount: currentRequestTotal,
     modelSwitchCount: stats.modelSwitchCount || 0,
     cumulativeResetCount: stats.cumulativeResetCount || 0,
     health: normalizeHealth(health),
@@ -1363,6 +1737,191 @@ async function findCdpPage(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
   );
 }
 
+// ---- CDP 端口自动发现 -------------------------------------------------------
+// Codex 由 Codex++ 启动时会带 --remote-debugging-port=<port>；命令行是运行时的权威来源
+// （用户/Codex++ 改端口后，插件无需改配置即可跟随）。
+function parseCdpPortsFromCommandLines(text) {
+  const ports = new Set();
+  const re = /--remote-debugging-port=(\d{1,5})\b/gi;
+  let match;
+  while ((match = re.exec(String(text || "")))) {
+    const port = Number(match[1]);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) ports.add(port);
+  }
+  return [...ports];
+}
+
+function parseCodexProcessSnapshot(text) {
+  const commandLines = [];
+  let processCount = null;
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.startsWith("TUI_CODEX_PROCESS_COUNT=")) {
+      const value = Number.parseInt(line.slice("TUI_CODEX_PROCESS_COUNT=".length), 10);
+      if (Number.isFinite(value) && value >= 0) processCount = value;
+    } else if (line.startsWith("TUI_CODEX_COMMAND=")) {
+      const commandLine = line.slice("TUI_CODEX_COMMAND=".length).trim();
+      if (commandLine) commandLines.push(commandLine);
+    }
+  }
+  // 兼容旧版 PowerShell 输出或测试桩：没有计数行时，以实际命令行条数作为计数。
+  if (processCount === null) processCount = commandLines.length;
+  return { processCount, commandLines };
+}
+
+function readCodexProcessSnapshot() {
+  return new Promise((resolve, reject) => {
+    const script = [
+      "$p = @(Get-CimInstance Win32_Process -Filter \"Name='ChatGPT.exe'\");",
+      "Write-Output ('TUI_CODEX_PROCESS_COUNT=' + $p.Count);",
+      "$p | ForEach-Object { if ($_.CommandLine) { Write-Output ('TUI_CODEX_COMMAND=' + $_.CommandLine) } }",
+    ].join(" ");
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { windowsHide: true, timeout: 6000, maxBuffer: 1024 * 1024 },
+      (error, stdout) => (error ? reject(error) : resolve(parseCodexProcessSnapshot(stdout))),
+    );
+  });
+}
+
+async function portHasCodexPage(port) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetch("http://127.0.0.1:" + port + "/json", { signal: controller.signal });
+    if (!response.ok) return false;
+    const targets = await response.json();
+    return Array.isArray(targets) && targets.some(isSafeCdpTarget);
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Codex 未运行时用短重试，尽快接住 Codex 重启后的新端口；
+// 进程存在但没有调试参数时仍用长冷却，避免 1 秒主循环反复 spawn PowerShell。
+const CDP_PORT_RETRY_MS = 30000;
+const CDP_PORT_NO_PROCESS_RETRY_MS = 5000;
+
+function cdpPortRetryDelay(processCount) {
+  return processCount === 0 ? CDP_PORT_NO_PROCESS_RETRY_MS : CDP_PORT_RETRY_MS;
+}
+
+function portDiscoveryRetryMs(snapshot) {
+  return cdpPortRetryDelay(snapshot && snapshot.processCount);
+}
+
+async function resolveCdpPort(args, { force = false } = {}) {
+  if (!args || !args.portAuto) return args && args.port;
+  const now = Date.now();
+  const retryMs = args.portRetryMs || CDP_PORT_RETRY_MS;
+  if (!force && args.portResolvedAt && now - args.portResolvedAt < retryMs) return args.port;
+  args.portResolvedAt = now;
+  try {
+    const snapshot = await readCodexProcessSnapshot();
+    args.portRetryMs = portDiscoveryRetryMs(snapshot);
+    if (!snapshot.processCount) {
+      if (args.portDiscoveryState !== "codex-not-running") {
+        monitorLog("CDP 端口自动发现：Codex 未运行，等待启动（" + CDP_PORT_NO_PROCESS_RETRY_MS + "ms 后重试）");
+      }
+      args.portDiscoveryState = "codex-not-running";
+      return args.port;
+    }
+    const ports = parseCdpPortsFromCommandLines(snapshot.commandLines.join("\n"));
+    if (!ports.length) {
+      if (args.portDiscoveryState !== "codex-running-no-port") {
+        monitorLog("CDP 端口自动发现：ChatGPT.exe 命令行未包含 --remote-debugging-port，继续使用 " + args.port);
+      }
+      args.portDiscoveryState = "codex-running-no-port";
+      return args.port;
+    }
+    args.portDiscoveryState = "resolved";
+    let chosen = ports[0];
+    if (ports.length > 1) {
+      const checks = await Promise.all(ports.map(async (port) => ({ port, ok: await portHasCodexPage(port) })));
+      const good = checks.filter((item) => item.ok).map((item) => item.port);
+      if (good.length === 1) chosen = good[0];
+      else {
+        monitorLog("CDP 端口自动发现：候选 " + ports.join(",") + "，可连页面 " + (good.join(",") || "无") + "，使用 " + chosen);
+      }
+    }
+    if (chosen !== args.port || args.portSource !== "process") {
+      monitorLog("CDP 端口自动发现：" + chosen + "（来源：ChatGPT.exe 命令行）");
+    }
+    args.port = chosen;
+    args.portSource = "process";
+    return args.port;
+  } catch (error) {
+    args.portRetryMs = CDP_PORT_RETRY_MS;
+    args.portDiscoveryState = "error";
+    monitorLog("CDP 端口自动发现失败：" + (error && error.message ? error.message : error) + "，继续使用 " + args.port);
+    return args.port;
+  }
+}
+
+// 解析 netstat 输出中「客户端 → 9229」的已建立连接（本地端口 != 9229，远端端口 == 9229）。
+function parseEstablishedCdpClients(netstatText, port) {
+  const counts = new Map();
+  for (const line of String(netstatText || "").split(/\r?\n/)) {
+    const match = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+:(\d+)\s+ESTABLISHED\s+(\d+)$/i);
+    if (!match) continue;
+    const localPort = Number(match[1]);
+    const remotePort = Number(match[2]);
+    const pid = Number(match[3]);
+    if (remotePort !== port || localPort === port || !pid) continue;
+    counts.set(pid, (counts.get(pid) || 0) + 1);
+  }
+  return counts;
+}
+
+function readProcessNameMap() {
+  return new Promise((resolve) => {
+    execFile(
+      "tasklist.exe",
+      ["/FO", "CSV", "/NH"],
+      { windowsHide: true, timeout: 5000, maxBuffer: 2 * 1024 * 1024 },
+      (error, stdout) => {
+        const map = new Map();
+        if (!error) {
+          for (const line of String(stdout || "").split(/\r?\n/)) {
+            const match = line.match(/^"([^"]+)","(\d+)"/);
+            if (match) map.set(Number(match[2]), match[1]);
+          }
+        }
+        resolve(map);
+      },
+    );
+  });
+}
+
+async function auditCdpClients(port) {
+  const netstat = await new Promise((resolve) => {
+    execFile(
+      "netstat.exe",
+      ["-ano", "-p", "tcp"],
+      { windowsHide: true, timeout: 5000, maxBuffer: 4 * 1024 * 1024 },
+      (error, stdout) => resolve(error ? "" : String(stdout || "")),
+    );
+  });
+  const counts = parseEstablishedCdpClients(netstat, port);
+  const known = { node: 0, codex: 0, codexPlusPlus: 0 };
+  const unknown = [];
+  if (counts.size) {
+    const names = await readProcessNameMap();
+    for (const [pid, connections] of counts) {
+      const name = names.get(pid) || "unknown";
+      const lower = name.toLowerCase();
+      if (lower === "node.exe") known.node += connections;
+      else if (lower === "chatgpt.exe") known.codex += connections;
+      else if (lower === "codex-plus-plus.exe") known.codexPlusPlus += connections;
+      else unknown.push({ name, pid, connections });
+    }
+  }
+  return { total: counts.size, unknown, known, auditedAt: new Date().toISOString() };
+}
+
 function rejectCdpPending(connection, error) {
   for (const [id, pending] of connection.pending) {
     clearTimeout(pending.timer);
@@ -1380,7 +1939,28 @@ function closeCdpConnection(reason = "CDP connection closed") {
 }
 
 async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
-  if (cdpConnection && cdpConnection.port === port && cdpConnection.targetSelector === targetSelector && cdpConnection.ws.readyState === 1) return cdpConnection;
+  if (cdpConnection && cdpConnection.port === port && cdpConnection.targetSelector === targetSelector && cdpConnection.ws.readyState === 1) {
+    const automaticTarget = targetSelector === "auto" || targetSelector === "focused";
+    const multiWindow = cdpConnection.targetCount > 1;
+    const due = Date.now() - (cdpConnection.lastTargetCheckAt || 0) >= TARGET_FOCUS_CHECK_MS;
+    if (automaticTarget && multiWindow && due) {
+      cdpConnection.lastTargetCheckAt = Date.now();
+      try {
+        const preferred = await findCdpPage(port, targetSelector);
+        if (preferred.id === cdpConnection.targetId) {
+          cdpConnection.targetSelection = preferred.targetSelection;
+          cdpConnection.targetCount = preferred.targetCount;
+          return cdpConnection;
+        }
+      } catch {
+        // 单次焦点探测失败时保留现有连接，避免多窗口切换造成面板短暂失联。
+        return cdpConnection;
+      }
+      closeCdpConnection("CDP focused target changed");
+    } else {
+      return cdpConnection;
+    }
+  }
   if (cdpConnectPromise) return cdpConnectPromise;
 
   cdpConnectPromise = (async () => {
@@ -1397,6 +1977,8 @@ async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTO
       ws,
       pending: new Map(),
       pageChanged: true,
+      authKeySet: false,
+      lastTargetCheckAt: Date.now(),
     };
     cdpConnection = connection;
     ws.onmessage = (ev) => {
@@ -1404,6 +1986,8 @@ async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTO
       try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.method === "Page.frameNavigated" || msg.method === "Page.frameStartedLoading" || msg.method === "Page.loadEventFired") {
         connection.pageChanged = true;
+        // 页面导航会清掉注入的 key，下一次推送前需要重新注入
+        connection.authKeySet = false;
         return;
       }
       const pending = connection.pending.get(msg.id);
@@ -1716,12 +2300,53 @@ async function activeThreadId(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
   return null;
 }
 
+// 会话级 HMAC 密钥：只存在于监控内存，经 CDP 注入页面；用于识别伪造/重放的负载。
+const SESSION_AUTH_KEY = crypto.randomBytes(32).toString("hex");
+let sessionAuthSeq = 0;
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+  if (value && typeof value === "object") {
+    return "{" + Object.keys(value).sort()
+      .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+  }
+  return JSON.stringify(value);
+}
+
+function signPayload(payload) {
+  const ts = Date.now();
+  const nonce = crypto.randomBytes(8).toString("hex");
+  sessionAuthSeq += 1;
+  const body = { ...payload };
+  delete body.auth;
+  const mac = crypto.createHmac("sha256", SESSION_AUTH_KEY)
+    .update(canonicalJson(body) + "|" + ts + "|" + nonce).digest("hex");
+  return { ...body, auth: { v: 1, ts, nonce, seq: sessionAuthSeq, mac } };
+}
+
+async function ensurePageAuthKey(port, targetSelector) {
+  if (cdpConnection && cdpConnection.authKeySet) return;
+  const expr = '(function () { window.__tuiForCodexAuthKey = ' +
+    JSON.stringify(SESSION_AUTH_KEY) + '; return true; })()';
+  await cdpEval(port, expr, targetSelector);
+  if (cdpConnection) cdpConnection.authKeySet = true;
+}
+
 async function cdpPush(port, payload, serialized = JSON.stringify(payload), targetSelector = DEFAULT_TARGET_SELECTOR) {
+  await ensurePageAuthKey(port, targetSelector);
+  const signedPayload = signPayload(payload);
+  const signedValidation = validatePayload(signedPayload, { allowLegacy: false, requireAuth: true });
+  if (!signedValidation.ok) {
+    const error = new Error("signed payload validation failed: " + signedValidation.errors.join("; "));
+    error.code = "PAYLOAD_INVALID";
+    throw error;
+  }
+  const signedSerialized = JSON.stringify(signedPayload);
   const expr = `(function () {
     var protocol = window.__tuiForCodexProtocol;
     if (!window.__tuiForCodexNativeUiInstalled) return "page-not-ready";
     if (!protocol || protocol.protocolName !== "${PROTOCOL_NAME}" || !Array.isArray(protocol.supportedSchemaVersions) || protocol.supportedSchemaVersions.indexOf(${PROTOCOL_SCHEMA_VERSION}) < 0) return "protocol-mismatch";
-    var payload = ${serialized};
+    var payload = ${signedSerialized};
     window.__tuiForCodex = payload;
     window.dispatchEvent(new Event("tokens-ui-for-codex"));
     return "ok";
@@ -1800,6 +2425,8 @@ function mergeSegments(parsedParts) {
     usageRecords: valid.flatMap((part) => part.usageRecords),
     userMessages: valid.flatMap((part) => part.userMessages),
     turnContexts: valid.flatMap((part) => part.turnContexts || []),
+    taskCompletions: valid.flatMap((part) => part.taskCompletions || []),
+    itemTimings: valid.flatMap((part) => part.itemTimings || []),
     // 运行状态是标量：取「最后一段里最后一次明确写过的值」
     taskRunning: valid.reduce((acc, part) => (typeof part.taskRunning === "boolean" ? part.taskRunning : acc), false),
     modelContextWindow,
@@ -1847,8 +2474,147 @@ function emptyStats(threadId, file) {
     contextUsed: 0,
     modelSwitchCount: 0,
     cumulativeResetCount: 0,
+    genEstimateTps: null,
+    effectiveTps: null,
+    turnEffectiveTps: null,
+    effectiveSampleCount: 0,
+    effectiveWindow: EFFECTIVE_SPEED_WINDOW,
+    speedTimingConfidence: "low",
+    turnWallTps: null,
+    compactTps: null,
+    compactSpeedSampleCount: 0,
+    compactSpeedConfidence: "low",
+    compactSpeedWindow: SPEED_SAMPLE_WINDOW,
     turns: [],
   };
+}
+
+function sessionSnapshotHash(threadId) {
+  return crypto.createHash("sha256").update(String(threadId || "")).digest("hex").slice(0, 32);
+}
+
+function writeLastSummary(session, stats, threadId) {
+  if (!stats || !threadId || threadId === NEW_THREAD || !stats.turns.length || !(stats.requestCount > 0)) return;
+  const currentTurn = stats.turns && stats.turns.length ? stats.turns[stats.turns.length - 1] : null;
+  const summary = {
+    version: LAST_SUMMARY_VERSION,
+    sessionHash: sessionSnapshotHash(threadId),
+    updatedAt: new Date().toISOString(),
+    sessionTotal: stats.sessionTotal,
+    sessionInput: stats.sessionInput,
+    sessionCached: stats.sessionCached,
+    sessionOutput: stats.sessionOutput,
+    requestCount: stats.requestCount,
+    currentTurnRequestCount: currentTurn ? currentTurn.requestCount : 0,
+    contextUsed: stats.contextUsed,
+    modelContextWindow: stats.modelContextWindow,
+    turnTotal: currentTurn ? currentTurn.total : 0,
+    turnInput: currentTurn ? currentTurn.input : 0,
+    turnCached: currentTurn ? currentTurn.cached : 0,
+    turnOutput: currentTurn ? currentTurn.output : 0,
+    genEstimateTps: stats.genEstimateTps,
+    compactTps: stats.compactTps,
+    compactSpeedSampleCount: stats.compactSpeedSampleCount,
+    compactSpeedConfidence: stats.compactSpeedConfidence,
+    compactSpeedWindow: stats.compactSpeedWindow,
+    turnWallTps: stats.turnWallTps,
+    effectiveTps: stats.effectiveTps,
+    turnEffectiveTps: stats.turnEffectiveTps,
+    effectiveSampleCount: stats.effectiveSampleCount,
+    effectiveWindow: stats.effectiveWindow,
+    speedTimingConfidence: stats.speedTimingConfidence,
+    modelSwitchCount: stats.modelSwitchCount,
+    cumulativeResetCount: stats.cumulativeResetCount,
+  };
+  const contentKey = JSON.stringify({ ...summary, updatedAt: "" });
+  const now = Date.now();
+  if (contentKey === session.lastSummaryKey && now - (session.lastSummaryAt || 0) < 5000) return;
+  try {
+    fs.mkdirSync(LOCAL_STATE_DIR, { recursive: true });
+    const tempFile = LAST_SUMMARY_FILE + "." + process.pid + ".tmp";
+    fs.writeFileSync(tempFile, JSON.stringify(summary), "utf8");
+    try {
+      fs.renameSync(tempFile, LAST_SUMMARY_FILE);
+    } catch {
+      fs.copyFileSync(tempFile, LAST_SUMMARY_FILE);
+      fs.rmSync(tempFile, { force: true });
+    }
+    session.lastSummaryKey = contentKey;
+    session.lastSummaryAt = now;
+  } catch {}
+}
+
+function readLastSummary(threadId) {
+  if (!threadId || threadId === NEW_THREAD) return null;
+  try {
+    const summary = readJsonFileUtf8(LAST_SUMMARY_FILE);
+    if (!summary || summary.version !== LAST_SUMMARY_VERSION) return null;
+    if (summary.sessionHash !== sessionSnapshotHash(threadId)) return null;
+    return summary;
+  } catch {
+    return null;
+  }
+}
+
+function snapshotStatsFrom(summary) {
+  const stats = emptyStats(null, null);
+  Object.assign(stats, {
+    sessionTotal: summary.sessionTotal,
+    sessionInput: summary.sessionInput,
+    sessionCached: summary.sessionCached,
+    sessionOutput: summary.sessionOutput,
+    requestCount: summary.requestCount,
+    contextUsed: summary.contextUsed,
+    modelContextWindow: summary.modelContextWindow,
+    genEstimateTps: summary.genEstimateTps,
+    compactTps: summary.compactTps,
+    compactSpeedSampleCount: summary.compactSpeedSampleCount,
+    compactSpeedConfidence: summary.compactSpeedConfidence,
+    compactSpeedWindow: summary.compactSpeedWindow,
+    turnWallTps: summary.turnWallTps,
+    effectiveTps: summary.effectiveTps,
+    turnEffectiveTps: summary.turnEffectiveTps,
+    effectiveSampleCount: summary.effectiveSampleCount,
+    effectiveWindow: summary.effectiveWindow,
+    speedTimingConfidence: summary.speedTimingConfidence,
+    modelSwitchCount: summary.modelSwitchCount,
+    cumulativeResetCount: summary.cumulativeResetCount,
+  });
+  stats.turns = [{
+    start: "",
+    startLabel: "上次数据",
+    requests: [],
+    requestCount: Number.isFinite(summary.currentTurnRequestCount) ? summary.currentTurnRequestCount : 0,
+    input: Number.isFinite(summary.turnInput) ? summary.turnInput : 0,
+    cached: Number.isFinite(summary.turnCached) ? summary.turnCached : 0,
+    output: Number.isFinite(summary.turnOutput) ? summary.turnOutput : 0,
+    total: Number.isFinite(summary.turnTotal) ? summary.turnTotal : 0,
+  }];
+  stats.currentTurnIndex = 1;
+  stats.turnTotalCount = 1;
+  return stats;
+}
+
+async function publishCachedSnapshot(args, session, threadId, connectionState) {
+  const summary = readLastSummary(threadId);
+  if (!summary) return false;
+  const health = monitorHealthFor(args, {
+    status: "stale-data",
+    recoveryState: "retrying",
+    cdpReachable: !!connectionState.cdpReachable,
+    pageAttached: !!connectionState.pageAttached,
+    targetSelection: connectionState.targetSelection || "unknown",
+    targetCount: connectionState.targetCount || 1,
+    dataFresh: false,
+    lastSuccessAt: summary.updatedAt,
+    lastErrorCode: null,
+    lastErrorAt: null,
+  });
+  const payload = payloadFor(snapshotStatsFrom(summary), health, null, false, true);
+  payload.updatedAt = summary.updatedAt;
+  await cdpPush(args.port, payload, JSON.stringify(payload), args.target);
+  session.snapshotPushed = true;
+  return true;
 }
 
 function environmentSnapshot() {
@@ -1858,9 +2624,13 @@ function environmentSnapshot() {
   const codexPlusPlusInstalled = fs.existsSync(CODEX_PLUS_PLUS_USER_SCRIPTS);
   let autostartInstalled = null;
   try {
-    const autostart = JSON.parse(fs.readFileSync(AUTOSTART_STATE_FILE, "utf8"));
+    const autostart = readJsonFileUtf8(AUTOSTART_STATE_FILE);
     if (autostart && typeof autostart.installed === "boolean") autostartInstalled = autostart.installed;
-  } catch {}
+  } catch {
+    // 状态目录可能处于 Windows/MSIX 的不同虚拟视图；文件不在当前视图时，
+    // 用同目录安装器生成的 launch-silent.vbs 作为“自启入口已安装”的兼容判据。
+  }
+  if (autostartInstalled == null && fs.existsSync(path.join(SCRIPT_DIR, "launch-silent.vbs"))) autostartInstalled = true;
   return {
     platform: "windows",
     platformSupported,
@@ -1883,6 +2653,8 @@ function monitorHealthFor(args, overrides = {}) {
     installationState: environment.installationState,
     autostartInstalled: environment.autostartInstalled,
     targetMode,
+    cdpPort: args && Number.isInteger(args.port) ? args.port : null,
+    cdpPortSource: (args && args.portSource) || "default",
     ...overrides,
   }));
 }
@@ -1899,8 +2671,13 @@ function healthKeyOf(health) {
     normalized.targetMode,
     normalized.targetSelection,
     normalized.targetCount,
+    normalized.cdpPort,
+    normalized.cdpPortSource,
+    JSON.stringify(normalized.cdpClients || null),
+    JSON.stringify(normalized.injectionAlert || null),
     normalized.dataFresh,
-    normalized.lastSuccessAt,
+    // lastSuccessAt 是心跳时间，不参与“健康状态是否变化”判定；
+    // 否则每次成功读取都会制造一次伪 healthChanged，导致无意义的整包推送。
     normalized.lastErrorCode,
     normalized.installationState,
   ]);
@@ -1918,7 +2695,12 @@ function persistMonitorHealth(health) {
       fs.copyFileSync(tempFile, MONITOR_HEALTH_FILE);
       fs.rmSync(tempFile, { force: true });
     }
-  } catch {}
+    return true;
+  } catch (error) {
+    // 健康文件是排障入口，写入失败必须可见；这里不能用空 catch 静默吞掉。
+    console.error("[Tokens UI For Codex] 健康状态写入失败: " + (error && error.message ? error.message : error));
+    return false;
+  }
 }
 
 // 监控自管日志：append + 按日分文件 + 超限轮转，避免 Start-Process 重定向每次截断。
@@ -2138,13 +2920,13 @@ async function readWindowWant(port, targetSelector) {
   try {
     // 注意：cdpEval 有表达式白名单（必须以 JSON.stringify( / (function () 等开头），
     // 因此这里用 JSON.stringify 包一层再在本地解析；否则会被拦下、被 catch 吞成 null。
-    const raw = await cdpEval(port, 'JSON.stringify(document.documentElement.getAttribute("data-tui-window") || "")', targetSelector);
-    const value = JSON.parse(raw == null || raw === "" ? '""' : raw);
-    const parts = String(value || "").split(":");
+    const raw = await cdpEval(port, 'JSON.stringify({ w: document.documentElement.getAttribute("data-tui-window") || "", s: document.documentElement.getAttribute("data-tui-security") || "" })', targetSelector);
+    const value = JSON.parse(raw == null || raw === "" ? '{"w":"","s":""}' : raw);
+    const parts = String(value && value.w || "").split(":");
     const turns = Number.parseInt(parts[0], 10);
     const requests = Number.parseInt(parts[1], 10);
     if (!Number.isFinite(turns) || !Number.isFinite(requests)) return null;
-    return { turns, requests };
+    return { turns, requests, security: String(value && value.s || "") };
   } catch {
     return null;
   }
@@ -2152,9 +2934,21 @@ async function readWindowWant(port, targetSelector) {
 
 function parseArgs(argv) {
   const envPort = Number(process.env.TUI_CDP_PORT || process.env.CODEX_CDP_PORT);
-  const defaultPort = Number.isInteger(envPort) && envPort >= 1 && envPort <= 65535 ? envPort : 9229;
+  const envPortValid = Number.isInteger(envPort) && envPort >= 1 && envPort <= 65535;
+  const defaultPort = envPortValid ? envPort : 9229;
   const envTarget = String(process.env.TUI_CDP_TARGET || "").trim();
-  const args = { thread: null, all: false, detail: false, watch: false, cdp: false, port: defaultPort, target: envTarget || DEFAULT_TARGET_SELECTOR };
+  const args = {
+    thread: null, all: false, detail: false, watch: false, cdp: false,
+    port: defaultPort,
+    // portAuto：启动/重连时从 ChatGPT.exe 命令行自动发现实际端口（--port auto）。
+    portAuto: false,
+    portSource: envPortValid ? "env" : "default",
+    portResolvedAt: 0,
+    portRetryMs: 0,
+    portDiscoveryState: "",
+    instanceStatus: false,
+    target: envTarget || DEFAULT_TARGET_SELECTOR,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--thread") args.thread = argv[i + 1];
@@ -2162,10 +2956,21 @@ function parseArgs(argv) {
     else if (a === "--detail") args.detail = true;
     else if (a === "--watch") args.watch = true;
     else if (a === "--cdp") args.cdp = true;
+    else if (a === "--instance-status") args.instanceStatus = true;
     else if (a === "--target" && argv[i + 1]) args.target = String(argv[i + 1]).trim() || DEFAULT_TARGET_SELECTOR;
     else if (a === "--port") {
-      const port = Number(argv[i + 1]);
-      if (Number.isInteger(port) && port >= 1 && port <= 65535) args.port = port;
+      const raw = String(argv[i + 1] || "").trim().toLowerCase();
+      if (raw === "auto") {
+        args.portAuto = true;
+        args.portSource = "auto";
+      } else {
+        const port = Number(raw);
+        if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+          args.port = port;
+          args.portAuto = false;
+          args.portSource = "cli";
+        }
+      }
     }
   }
   return args;
@@ -2250,6 +3055,17 @@ function createWatchSession(args) {
     observedFileMtime: 0,
     fileStallWarned: false,    // 一级（预警）是否已记录
     fileStallNotified: false,  // 二级（降级）是否已记录（避免日志刷屏）
+    lastClientAuditAt: 0,
+    clientAudit: null,
+    lastClientAuditKey: "",
+    lastClientAuditLogAt: 0,
+    lastSecurityRejected: 0,
+    injectionAlert: null,
+    lastSummaryKey: "",
+    lastSummaryAt: 0,
+    snapshotThreadHash: "",
+    snapshotAttempted: false,
+    snapshotPushed: false,
     lastLocateLogKey: "",      // 定位失败日志去重键
     lastSuspectKey: "",        // 疑似「命名变化」文件预警的去重键
   };
@@ -2360,7 +3176,7 @@ function readWatchStats(session, thread) {
     return { file: latestFile, parsed: null, stats: emptyStats(thread, latestFile) };
   }
 
-  const watchStats = buildStats(merged, { retainRequests: false });
+  const watchStats = buildStats(merged, { retainRequests: false, includeArchiveRecords: true });
   session.lastMerged = merged;
   session.lastStats = watchStats;
   session.lastPayload = null;
@@ -2411,9 +3227,11 @@ function nextWatchHealth(args, session, parsed, rawThread, connectionState) {
           : "waiting-for-data",
     recoveryState: recovered ? "recovered" : dataFresh ? "idle" : session.health.recoveryState,
     ...connectionState,
+    cdpClients: session.clientAudit || null,
+    injectionAlert: session.injectionAlert || null,
     dataFresh,
     lastSuccessAt: dataFresh
-      ? session.health.lastSuccessAt || new Date().toISOString()
+      ? new Date().toISOString()
       : session.health.lastSuccessAt || null,
     lastErrorCode: null,
     lastErrorAt: null,
@@ -2482,8 +3300,29 @@ async function publishWatchRound(args, session, context) {
   const lastRequest = currentTurn && currentTurn.requests.length
     ? currentTurn.requests[currentTurn.requests.length - 1]
     : null;
+  writeLastSummary(session, stats, resolvedThreadId);
+  if (resolvedThreadId && resolvedThreadId !== NEW_THREAD && stats.archiveRecords) {
+    try {
+      usageHistoryArchive.archiveSession({
+        threadId: resolvedThreadId,
+        turns: stats.turns,
+        records: stats.archiveRecords,
+        now: Date.now(),
+      });
+      session.lastArchiveErrorAt = 0;
+    } catch (error) {
+      const now = Date.now();
+      if (!session.lastArchiveErrorAt || now - session.lastArchiveErrorAt >= 60000) {
+        session.lastArchiveErrorAt = now;
+        monitorLog("历史归档失败: " + (error && error.message ? error.message : error));
+      }
+    }
+  }
 
   session.health = nextWatchHealth(args, session, context.parsed, rawThread, connectionState);
+  // 健康快照每个巡检周期都落盘（运行中 1s、空闲 5s），即使本周期没有向页面推送。
+  // 这样 monitor-health.json 的 mtime 与 lastSuccessAt 才能真正反映监控存活。
+  persistMonitorHealth(session.health);
 
   const key = buildWatchKey(file, stats, currentTurn, lastRequest);
   const changed = key !== session.lastKey;
@@ -2525,10 +3364,13 @@ async function publishWatchRound(args, session, context) {
   }
 
   session.lastHealthKey = healthKeyOf(session.health);
-  persistMonitorHealth(session.health);
 }
 
 async function handleWatchError(args, session, error) {
+  // 端口可能因 Codex 重启/Codex++ 改设置而变化：在写健康状态前重新发现（30 秒冷却）。
+  if (args.portAuto && error && ["CDP_UNREACHABLE", "CDP_PAGE_NOT_FOUND", "CDP_TARGET_NOT_FOUND"].includes(error.code)) {
+    await resolveCdpPort(args);
+  }
   session.health = healthForError(error, args, session.health);
   const errorHealthKey = healthKeyOf(session.health);
   if (errorHealthKey !== session.lastHealthKey) {
@@ -2562,6 +3404,22 @@ async function handleWatchError(args, session, error) {
 }
 
 async function runWatchRound(args, session) {
+  if (Date.now() - session.lastClientAuditAt >= CLIENT_AUDIT_INTERVAL_MS) {
+    session.lastClientAuditAt = Date.now();
+    try {
+      session.clientAudit = await auditCdpClients(args.port);
+      const unknownKey = session.clientAudit.unknown.map((item) => item.name + ":" + item.pid).join(",");
+      if (unknownKey && (unknownKey !== session.lastClientAuditKey || Date.now() - session.lastClientAuditLogAt > CLIENT_AUDIT_LOG_COOLDOWN_MS)) {
+        session.lastClientAuditKey = unknownKey;
+        session.lastClientAuditLogAt = Date.now();
+        monitorLog("CDP 客户端告警: 未知进程 " +
+          session.clientAudit.unknown.map((item) => item.name + "(PID " + item.pid + ")").join(", "));
+      }
+      if (!unknownKey) session.lastClientAuditKey = "";
+    } catch (error) {
+      monitorLog("CDP 客户端审计失败: " + (error && error.message ? error.message : error));
+    }
+  }
   const rawThread = args.thread || (await activeThreadId(args.port, args.target));
   const connection = cdpConnection && cdpConnection.port === args.port ? cdpConnection : null;
   const connectionState = {
@@ -2572,14 +3430,43 @@ async function runWatchRound(args, session) {
   };
 
   const wantWindow = args.cdp ? await readWindowWant(args.port, args.target) : null;
+  if (args.cdp && wantWindow && wantWindow.security) {
+    const rejected = Number.parseInt(String(wantWindow.security).replace(/\D+/g, ""), 10);
+    if (Number.isFinite(rejected) && rejected > (session.lastSecurityRejected || 0)) {
+      session.lastSecurityRejected = rejected;
+      session.injectionAlert = { count: rejected, lastAt: new Date().toISOString() };
+      monitorLog("CDP 负载验签失败: 页面已拒绝 " + rejected + " 条未签名/伪造负载");
+    } else if (Number.isFinite(rejected) && rejected < (session.lastSecurityRejected || 0)) {
+      // 页面重载/监控轮换密钥后计数会清零：同步清除旧告警，避免一直挂着。
+      session.lastSecurityRejected = rejected;
+      session.injectionAlert = null;
+      monitorLog("CDP 负载验签告警已清除（页面计数重置为 " + rejected + "）");
+    }
+  }
   const { thread } = await resolveWatchThread(args, session, rawThread);
+  if (args.cdp && thread && thread !== NEW_THREAD) {
+    const threadHash = sessionSnapshotHash(thread);
+    if (session.snapshotThreadHash !== threadHash) {
+      session.snapshotThreadHash = threadHash;
+      session.snapshotAttempted = false;
+      session.snapshotPushed = false;
+    }
+    if (!session.snapshotAttempted) {
+      session.snapshotAttempted = true;
+      try {
+        await publishCachedSnapshot(args, session, thread, connectionState);
+      } catch {
+        // 快照只是首帧加速；失败后继续正常解析并推送实时数据。
+      }
+    }
+  }
   const { file, parsed, stats } = readWatchStats(session, thread);
   await publishWatchRound(args, session, { thread, file, parsed, stats, rawThread, connection, connectionState, wantWindow });
 }
 
 async function runWatchLoop(args) {
   // 多来源启动（计划任务、兜底巡检、手动）时只允许一份实例存活
-  if (!acquireSingleInstanceLock()) {
+  if (!(await acquireSingleInstanceLock())) {
     monitorLog("已有监控实例在运行，本进程退出（PID " + process.pid + "）。");
     process.exit(0);
   }
@@ -2588,6 +3475,12 @@ async function runWatchLoop(args) {
   pruneMonitorLogs();
   monitorLog(
     "监控启动 (PID " + process.pid + ")，轮询 1s" + (args.cdp ? "，CDP 推送模式" : "") + "，日志目录 " + LOG_DIR,
+  );
+  const startupEnvironment = environmentSnapshot();
+  monitorLog(
+    "运行环境: nodeSupported=" + startupEnvironment.nodeSupported +
+      "，codexPlusPlusInstalled=" + startupEnvironment.codexPlusPlusInstalled +
+      "，autostartInstalled=" + String(startupEnvironment.autostartInstalled),
   );
 
   // 防御：控制台窗口被关闭时 Windows 会广播 CTRL_CLOSE，Node 把它映射成 SIGHUP。
@@ -2614,6 +3507,11 @@ async function runWatchLoop(args) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   currentTargetSelector = args.target;
+  if (args.instanceStatus) {
+    process.exitCode = await printMonitorInstanceState();
+    return;
+  }
+  if (args.cdp) await resolveCdpPort(args, { force: true });
   reportRuntimeWarnings(environmentSnapshot());
   if (args.cdp) assertCdpRuntimeAvailable();
 
@@ -2627,14 +3525,21 @@ async function main() {
     return;
   }
 
-  const file = resolveFile(args.thread);
-  if (!file) {
+  const files = args.thread
+    ? locateThreadFiles(findRolloutFiles(), args.thread)
+    : (() => {
+        const newest = newestRolloutFile(findRolloutFiles());
+        return newest ? [newest] : [];
+      })();
+  if (!files.length) {
     console.log("未找到会话记录: " + SESSIONS_DIR);
     process.exit(1);
   }
-  const parsed = parseFile(file);
+  // 单次命令必须与 watch 使用同一条「全部分片合流」路径；
+  // 只解析最新一个分片会在长会话切分后少算前面分片。
+  const parsed = mergeSegments(files.map((file) => parseFile(file)));
   if (!parsed) {
-    console.log("会话文件为空或格式无法解析: " + file);
+    console.log("会话文件为空或格式无法解析: " + files.join(" / "));
     process.exit(1);
   }
   const stats = buildStats(parsed, { retainRequests: args.detail });
@@ -2658,6 +3563,11 @@ if (!process.env.TUI_TOKENS_AS_MODULE) {
 export {
   SESSIONS_DIR,
   CLIENT_MAP_FILE,
+  parseCdpPortsFromCommandLines,
+  parseCodexProcessSnapshot,
+  portDiscoveryRetryMs,
+  monitorInstanceState,
+  parseEstablishedCdpClients,
   clientState,
   saveClientState,
   isClientNewThread,
@@ -2680,7 +3590,9 @@ export {
   parseFile,
   buildStats,
   payloadFor,
+  snapshotStatsFrom,
   monitorHealthFor,
+  environmentSnapshot,
   nextWatchHealth,
   healthKeyOf,
 };
