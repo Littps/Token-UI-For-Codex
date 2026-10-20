@@ -1305,47 +1305,36 @@ function seedTurnList(parsed, records) {
   return { turns, turnIndexById };
 }
 
-function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
-  const collected = collectUnifiedRecords(parsed);
-  const records = collected.records;
-  const { turns, turnIndexById } = seedTurnList(parsed, records);
+function locateTurnIndexByTimestamp(turnStarts, ts) {
+  if (!turnStarts.length) return -1;
+  if (!ts) return turnStarts.length - 1;
+  let low = 0;
+  let high = turnStarts.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const start = turnStarts[mid];
+    if (!start || start <= ts) {
+      found = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return found >= 0 ? found : 0;
+}
+
+function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
   const turnCounters = new Map();
   const threadCounters = createCumulativeCounters();
+  const turnStarts = turns.map((turn) => turn.start || "");
   let retainedTurnIndex = -1;
   let latestThreadUsage = null;
   let latestContextUsed = null;
 
-  // 无 turn_id 的记录（legacy）按时间窗落到「开始时间 ≤ 记录时间」的最后一轮。
-  const turnStarts = turns.map((turn) => turn.start || "");
-  const locateTurnIndexByTs = (ts) => {
-    if (!turns.length) return -1;
-    if (!ts) return turns.length - 1;
-    let low = 0;
-    let high = turns.length - 1;
-    let found = -1;
-    while (low <= high) {
-      const mid = (low + high) >> 1;
-      const start = turnStarts[mid];
-      if (!start || start <= ts) {
-        found = mid;
-        low = mid + 1;
-      } else {
-        high = mid - 1;
-      }
-    }
-    return found >= 0 ? found : 0;
-  };
-
-  const resolveTurnIndex = (record) => {
-    if (record.turnId) {
-      const mapped = turnIndexById.get(record.turnId);
-      if (mapped != null) return mapped;
-    }
-    return locateTurnIndexByTs(record.ts);
-  };
-
   for (const record of records) {
-    const turnIndex = resolveTurnIndex(record);
+    const mappedTurnIndex = record.turnId ? turnIndexById.get(record.turnId) : null;
+    const turnIndex = mappedTurnIndex != null ? mappedTurnIndex : locateTurnIndexByTimestamp(turnStarts, record.ts);
     const turn = turns[turnIndex];
     const turnGenMs = Number.isFinite(record.genMs) ? record.genMs : 0;
     if (turnGenMs > 0) {
@@ -1410,8 +1399,7 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     if (Object.values(normalizedTurnUsage).some((value) => value != null)) turn.cumulative = true;
     if (turn.cumulative) {
       // 混合格式：现代记录写入本轮累计，legacy 记录只有线程累计。
-      // legacy 缺失的 turnUsage 必须用「线程累计 - 本轮起点基线」补齐，
-      // 否则一旦 turn.cumulative=true，后续 legacy 只会增加请求数而不再更新本轮数字。
+      // legacy 缺失的 turnUsage 必须用「线程累计 - 本轮起点基线」补齐。
       for (const key of ["input", "output", "cached", "total"]) {
         const value = normalizedTurnUsage[key] != null ? normalizedTurnUsage[key] : derivedTurnUsage[key];
         if (value != null) turn[key] = value;
@@ -1425,6 +1413,20 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
       if (record.requestTotal != null) turn.total += record.requestTotal;
     }
   }
+
+  return { turnCounters, threadCounters, latestThreadUsage, latestContextUsed };
+}
+
+function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
+  const collected = collectUnifiedRecords(parsed);
+  const records = collected.records;
+  const { turns, turnIndexById } = seedTurnList(parsed, records);
+  const { turnCounters, threadCounters, latestThreadUsage, latestContextUsed } = assignRecordsToTurns(
+    records,
+    turns,
+    turnIndexById,
+    retainRequests,
+  );
 
   const timing = buildTimingMaps(parsed);
   for (const turn of turns) {
