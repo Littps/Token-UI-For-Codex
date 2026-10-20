@@ -1232,64 +1232,44 @@ function calculateTurnSpeedSample(turn, task, items) {
   };
 }
 
-function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
-  const collected = collectUnifiedRecords(parsed);
-  const records = collected.records;
+function createTurnAccumulator(start, fallbackTs, turnId = "") {
+  const startValue = start || fallbackTs || "";
+  return {
+    turnId,
+    start: startValue,
+    startLabel: clockLabel(startValue),
+    lastTs: "",
+    requests: [],
+    requestCount: 0,
+    input: 0,
+    output: 0,
+    cached: 0,
+    cacheAvailable: true,
+    total: 0,
+    cumulative: false,
+    // 本轮第一条记录之前的线程累计基线；用于把 legacy 的线程累计差值映射成当前轮增量。
+    threadBase: null,
+    // 本轮加权平均速度的分子/分母（与 lastRequestTps 同口径：逐请求输出 ÷ 逐请求生成耗时）
+    genMsTotal: 0,
+    genOutputTotal: 0,
+    legacyGenMs: 0,
+    genEstimateMs: null,
+    genEstimateTps: null,
+    wallMs: null,
+    wallTps: null,
+    effectiveMs: null,
+    effectiveTps: null,
+    ttftMs: null,
+    toolMs: null,
+    timingCoverage: null,
+    timingSource: "none",
+  };
+}
+
+function seedTurnList(parsed, records) {
   const starts = orderedByTimestamp(parsed.userMessages || []);
   const turns = [];
   const turnIndexById = new Map();
-  const turnCounters = new Map();
-  const threadCounters = createCumulativeCounters();
-  let retainedTurnIndex = -1;
-  let latestThreadUsage = null;
-  let latestContextUsed = null;
-
-  const createTurn = (start, fallbackTs, turnId = "") => {
-    const startValue = start || fallbackTs || "";
-    turns.push({
-      turnId,
-      start: startValue,
-      startLabel: clockLabel(startValue),
-      lastTs: "",
-      requests: [],
-      requestCount: 0,
-      input: 0,
-      output: 0,
-      cached: 0,
-      cacheAvailable: true,
-      total: 0,
-      cumulative: false,
-      // 本轮第一条记录之前的线程累计基线；用于把 legacy 的线程累计差值映射成当前轮增量。
-      threadBase: null,
-      // 本轮加权平均速度的分子/分母（与 lastRequestTps 同口径：逐请求输出 ÷ 逐请求生成耗时）
-      genMsTotal: 0,
-      genOutputTotal: 0,
-      legacyGenMs: 0,
-      genEstimateMs: null,
-      genEstimateTps: null,
-      wallMs: null,
-      wallTps: null,
-      effectiveMs: null,
-      effectiveTps: null,
-      ttftMs: null,
-      toolMs: null,
-      timingCoverage: null,
-      timingSource: "none",
-    });
-    return turns.length - 1;
-  };
-
-  // ---- 轮次列表：单一来源链 -------------------------------------------------
-  // 旧实现把「有 turn_id 就新建轮」与「没有 turn_id 就用用户消息序号当数组下标」两套规则
-  // 写进同一个数组，还会用 while (turns.length <= index) 填空轮；结果是
-  //   ① legacy 记录可能落进「恰好排在那个下标的别的轮」；
-  //   ② turns 尾部常是空轮，currentTurn = turns.at(-1) 于是恒为 0；
-  //   ③ 同一轮被拆成「modern 轮 + boundary 轮」两份，面板那 5 格只剩速度在动。
-  // 现在改为：
-  //   1) 首选 turn_context（宿主逐轮写出，带 turn_id；实测覆盖到日志开头，且含无记录空轮）；
-  //   2) 记录里出现、turn_context 未覆盖的 turn_id（更旧的日志可能没有该事件）；
-  //   3) 完全没有 turn_id 线索 → 退回 user_message 时间分界（保持旧日志行为）；
-  //   4) 连用户消息都没有 → 单轮。
   const seedIndexByTurnId = new Map();
   const turnSeeds = [];
   const addTurnSeed = (ts, ordinal, turnId) => {
@@ -1303,6 +1283,8 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     }
     if (compareTsOrdinal(seed, turnSeeds[existing]) < 0) turnSeeds[existing] = seed;
   };
+
+  // 轮次来源优先级：turn_context → 记录中的 turn_id → user_message 时间分界 → 单轮。
   for (const context of parsed.turnContexts || []) {
     if (context && context.turnId) addTurnSeed(context.ts, context.ordinal, context.turnId);
   }
@@ -1311,13 +1293,27 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
   if (turnSeeds.length) {
     turnSeeds.sort(compareTsOrdinal);
     for (const seed of turnSeeds) {
-      turnIndexById.set(seed.turnId, createTurn(seed.ts, seed.ts, seed.turnId));
+      turnIndexById.set(seed.turnId, turns.length);
+      turns.push(createTurnAccumulator(seed.ts, seed.ts, seed.turnId));
     }
   } else if (starts.length) {
-    for (const start of starts) createTurn(start.ts, start.ts);
+    for (const start of starts) turns.push(createTurnAccumulator(start.ts, start.ts));
   } else {
-    createTurn("", records.length ? records[0].ts : "");
+    turns.push(createTurnAccumulator("", records.length ? records[0].ts : ""));
   }
+
+  return { turns, turnIndexById };
+}
+
+function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
+  const collected = collectUnifiedRecords(parsed);
+  const records = collected.records;
+  const { turns, turnIndexById } = seedTurnList(parsed, records);
+  const turnCounters = new Map();
+  const threadCounters = createCumulativeCounters();
+  let retainedTurnIndex = -1;
+  let latestThreadUsage = null;
+  let latestContextUsed = null;
 
   // 无 turn_id 的记录（legacy）按时间窗落到「开始时间 ≤ 记录时间」的最后一轮。
   const turnStarts = turns.map((turn) => turn.start || "");
