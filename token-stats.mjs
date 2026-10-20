@@ -1331,6 +1331,12 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
   let retainedTurnIndex = -1;
   let latestThreadUsage = null;
   let latestContextUsed = null;
+  let genMsTotal = 0;
+  let genOutputTotal = 0;
+  let lastRequestTps = null;
+  let currentModel = null;
+  const rawSpeedSamples = [];
+  const requestRingStarts = new Map();
 
   for (const record of records) {
     const mappedTurnIndex = record.turnId ? turnIndexById.get(record.turnId) : null;
@@ -1341,6 +1347,21 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
       turn.genMsTotal += turnGenMs;
       turn.legacyGenMs += turnGenMs;
       if (Number.isFinite(record.output) && record.output > 0) turn.genOutputTotal += record.output;
+    }
+    if (record.model) currentModel = record.model;
+    if (turnGenMs > 0) {
+      const output = Number.isFinite(record.output) ? record.output : 0;
+      genMsTotal += turnGenMs;
+      genOutputTotal += output;
+      if (output > 0) lastRequestTps = output / (turnGenMs / 1000);
+      if (turnGenMs >= 500 && Number.isFinite(record.output) && record.output >= 16) {
+        rawSpeedSamples.push({
+          output: record.output,
+          genMs: turnGenMs,
+          model: record.model || null,
+          timingSource: "record",
+        });
+      }
     }
     const turnKey = record.turnId || "boundary:" + String(turnIndex);
     if (!turnCounters.has(turnKey)) turnCounters.set(turnKey, createCumulativeCounters());
@@ -1364,13 +1385,22 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
           Number.isFinite(normalized) && Number.isFinite(current) ? Math.max(0, normalized - current) : null;
       }
     }
-    const derivedTurnUsage = {};
-    for (const key of ["input", "output", "cached", "total"]) {
-      const normalized = normalizedThreadUsage[key];
-      const base = turn.threadBase[key];
-      derivedTurnUsage[key] =
-        Number.isFinite(normalized) && Number.isFinite(base) ? Math.max(0, normalized - base) : null;
-    }
+    const derivedInput =
+      Number.isFinite(normalizedThreadUsage.input) && Number.isFinite(turn.threadBase.input)
+        ? Math.max(0, normalizedThreadUsage.input - turn.threadBase.input)
+        : null;
+    const derivedOutput =
+      Number.isFinite(normalizedThreadUsage.output) && Number.isFinite(turn.threadBase.output)
+        ? Math.max(0, normalizedThreadUsage.output - turn.threadBase.output)
+        : null;
+    const derivedCached =
+      Number.isFinite(normalizedThreadUsage.cached) && Number.isFinite(turn.threadBase.cached)
+        ? Math.max(0, normalizedThreadUsage.cached - turn.threadBase.cached)
+        : null;
+    const derivedTotal =
+      Number.isFinite(normalizedThreadUsage.total) && Number.isFinite(turn.threadBase.total)
+        ? Math.max(0, normalizedThreadUsage.total - turn.threadBase.total)
+        : null;
     latestThreadUsage = mergeUsage(latestThreadUsage, normalizedThreadUsage);
     if (Number.isFinite(record.requestTotal)) latestContextUsed = record.requestTotal;
 
@@ -1390,21 +1420,38 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
       if (retainedTurnIndex !== turnIndex) {
         if (retainedTurnIndex >= 0) turns[retainedTurnIndex].requests = [];
         retainedTurnIndex = turnIndex;
+        requestRingStarts.set(turnIndex, 0);
       }
-      turn.requests.push(request);
-      if (turn.requests.length > MAX_REQUEST_DETAILS) turn.requests.shift();
+      if (turn.requests.length < MAX_REQUEST_DETAILS) {
+        turn.requests.push(request);
+      } else {
+        const ringStart = requestRingStarts.get(turnIndex) || 0;
+        turn.requests[ringStart] = request;
+        requestRingStarts.set(turnIndex, (ringStart + 1) % MAX_REQUEST_DETAILS);
+      }
     }
     turn.requestCount += 1;
 
-    if (Object.values(normalizedTurnUsage).some((value) => value != null)) turn.cumulative = true;
+    if (
+      normalizedTurnUsage.input != null ||
+      normalizedTurnUsage.output != null ||
+      normalizedTurnUsage.cached != null ||
+      normalizedTurnUsage.total != null
+    ) {
+      turn.cumulative = true;
+    }
     if (turn.cumulative) {
       // 混合格式：现代记录写入本轮累计，legacy 记录只有线程累计。
       // legacy 缺失的 turnUsage 必须用「线程累计 - 本轮起点基线」补齐。
-      for (const key of ["input", "output", "cached", "total"]) {
-        const value = normalizedTurnUsage[key] != null ? normalizedTurnUsage[key] : derivedTurnUsage[key];
-        if (value != null) turn[key] = value;
-      }
-      if (normalizedTurnUsage.cached == null && derivedTurnUsage.cached == null) turn.cacheAvailable = false;
+      const input = normalizedTurnUsage.input != null ? normalizedTurnUsage.input : derivedInput;
+      const output = normalizedTurnUsage.output != null ? normalizedTurnUsage.output : derivedOutput;
+      const cached = normalizedTurnUsage.cached != null ? normalizedTurnUsage.cached : derivedCached;
+      const total = normalizedTurnUsage.total != null ? normalizedTurnUsage.total : derivedTotal;
+      if (input != null) turn.input = input;
+      if (output != null) turn.output = output;
+      if (cached != null) turn.cached = cached;
+      if (total != null) turn.total = total;
+      if (cached == null) turn.cacheAvailable = false;
     } else {
       if (record.input != null) turn.input += record.input;
       if (record.output != null) turn.output += record.output;
@@ -1414,7 +1461,21 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
     }
   }
 
-  return { turnCounters, threadCounters, latestThreadUsage, latestContextUsed };
+  if (!retainRequests && retainedTurnIndex >= 0) {
+    const turn = turns[retainedTurnIndex];
+    const ringStart = requestRingStarts.get(retainedTurnIndex) || 0;
+    if (ringStart > 0) {
+      turn.requests = turn.requests.slice(ringStart).concat(turn.requests.slice(0, ringStart));
+    }
+  }
+
+  return {
+    turnCounters,
+    threadCounters,
+    latestThreadUsage,
+    latestContextUsed,
+    recordMetrics: { genMsTotal, genOutputTotal, lastRequestTps, currentModel, rawSpeedSamples },
+  };
 }
 
 function attachTurnTimings(parsed, turns) {
@@ -1450,11 +1511,65 @@ function attachTurnTimings(parsed, turns) {
   return latestGenSample;
 }
 
+function buildSpeedMetrics(turns, recordMetrics, threadCounters, turnCounters) {
+  const { genMsTotal, genOutputTotal, lastRequestTps, currentModel, rawSpeedSamples } = recordMetrics;
+  const sessionTps = genMsTotal > 0 && genOutputTotal > 0 ? genOutputTotal / (genMsTotal / 1000) : null;
+  const lastTurn = turns.length ? turns[turns.length - 1] : null;
+  const turnTps =
+    lastTurn && lastTurn.genMsTotal > 0 && lastTurn.genOutputTotal > 0
+      ? lastTurn.genOutputTotal / (lastTurn.genMsTotal / 1000)
+      : null;
+
+  const effectiveWindowSamples = [];
+  for (const turn of turns) {
+    if (turn.effectiveTps == null || turn.output <= 0 || turn.timingQuality === "low") continue;
+    effectiveWindowSamples.push(turn);
+    if (effectiveWindowSamples.length > EFFECTIVE_SPEED_WINDOW) effectiveWindowSamples.shift();
+  }
+  let effectiveOutputTotal = 0;
+  let effectiveMsTotal = 0;
+  for (const turn of effectiveWindowSamples) {
+    effectiveOutputTotal += turn.output;
+    effectiveMsTotal += turn.effectiveMs;
+  }
+  const effectiveTps =
+    effectiveOutputTotal > 0 && effectiveMsTotal > 0 ? effectiveOutputTotal / (effectiveMsTotal / 1000) : null;
+
+  const speedSeries = [];
+  for (const sample of rawSpeedSamples) {
+    if (currentModel && sample.model && sample.model !== currentModel) continue;
+    speedSeries.push({
+      output: sample.output,
+      genMs: sample.genMs,
+      model: sample.model || currentModel,
+      timingSource: sample.timingSource,
+    });
+  }
+  const compactSpeed = robustSpeedSummary(speedSeries);
+  const latestEffectiveSample = effectiveWindowSamples.length
+    ? effectiveWindowSamples[effectiveWindowSamples.length - 1]
+    : null;
+  let turnResetEvents = 0;
+  for (const counters of turnCounters.values()) turnResetEvents += counters.resetEvents;
+
+  return {
+    sessionTps,
+    lastRequestTps,
+    turnTps,
+    effectiveTps,
+    effectiveSampleCount: effectiveWindowSamples.length,
+    compactSpeed,
+    speedTimingConfidence: latestEffectiveSample ? latestEffectiveSample.timingQuality : "low",
+    cumulativeResetCount: threadCounters.resetEvents + turnResetEvents,
+    lastTurn,
+  };
+}
+
 function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
   const collected = collectUnifiedRecords(parsed);
   const records = collected.records;
   const { turns, turnIndexById } = seedTurnList(parsed, records);
-  const { turnCounters, threadCounters, latestThreadUsage, latestContextUsed } = assignRecordsToTurns(
+  const { turnCounters, threadCounters, latestThreadUsage, latestContextUsed, recordMetrics } = assignRecordsToTurns(
     records,
     turns,
     turnIndexById,
@@ -1464,59 +1579,17 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
   const latestGenSample = attachTurnTimings(parsed, turns);
 
   const threadUsage = latestThreadUsage || {};
-  // 纯生成耗时聚合：sessionTps = 会话加权平均（Σ输出 ÷ Σ生成耗时）；
-  // lastRequestTps = 最后一次"有耗时的请求"的速度（方案甲：详情页两个分区分别用它与会话均值）。
-  let genMsTotal = 0;
-  let genOutputTotal = 0;
-  let lastRequestTps = null;
-  for (const record of records) {
-    const genMs = Number.isFinite(record.genMs) ? record.genMs : 0;
-    if (genMs <= 0) continue;
-    const output = Number.isFinite(record.output) ? record.output : 0;
-    genMsTotal += genMs;
-    genOutputTotal += output;
-    if (output > 0) lastRequestTps = output / (genMs / 1000);
-  }
-  const sessionTps = genMsTotal > 0 && genOutputTotal > 0 ? genOutputTotal / (genMsTotal / 1000) : null;
-  // 本轮加权平均速度：与 lastRequestTps 同口径，但把范围收在「当前这一轮」内。
-  // 必须在这里算：payloadFor 拿到的是对外映射后的 turns（不含内部累加器）。
-  const lastTurnForTps = turns.length ? turns[turns.length - 1] : null;
-  const turnTps =
-    lastTurnForTps && lastTurnForTps.genMsTotal > 0 && lastTurnForTps.genOutputTotal > 0
-      ? lastTurnForTps.genOutputTotal / (lastTurnForTps.genMsTotal / 1000)
-      : null;
-  const speedSamples = turns.filter(
-    (turn) => turn.effectiveTps != null && turn.output > 0 && turn.timingQuality !== "low",
-  );
-  const effectiveWindowSamples = speedSamples.slice(-EFFECTIVE_SPEED_WINDOW);
-  const effectiveOutputTotal = effectiveWindowSamples.reduce((sum, turn) => sum + turn.output, 0);
-  const effectiveMsTotal = effectiveWindowSamples.reduce((sum, turn) => sum + turn.effectiveMs, 0);
-  const effectiveTps =
-    effectiveOutputTotal > 0 && effectiveMsTotal > 0 ? effectiveOutputTotal / (effectiveMsTotal / 1000) : null;
-  const lastTurn = turns.length ? turns[turns.length - 1] : null;
-  const currentModel = [...records].reverse().find((record) => record.model)?.model || null;
-  const speedSeries = records
-    .filter(
-      (record) =>
-        Number.isFinite(record.genMs) &&
-        record.genMs >= 500 &&
-        Number.isFinite(record.output) &&
-        record.output >= 16 &&
-        (!currentModel || !record.model || record.model === currentModel),
-    )
-    .map((record) => ({
-      output: record.output,
-      genMs: record.genMs,
-      model: record.model || currentModel,
-      timingSource: "record",
-    }));
-  const compactSpeed = robustSpeedSummary(speedSeries);
-  const latestEffectiveSample = effectiveWindowSamples.length
-    ? effectiveWindowSamples[effectiveWindowSamples.length - 1]
-    : null;
-  const speedTimingConfidence = latestEffectiveSample ? latestEffectiveSample.timingQuality : "low";
-  const cumulativeResetCount =
-    threadCounters.resetEvents + [...turnCounters.values()].reduce((sum, counters) => sum + counters.resetEvents, 0);
+  const {
+    sessionTps,
+    lastRequestTps,
+    turnTps,
+    effectiveTps,
+    effectiveSampleCount,
+    compactSpeed,
+    speedTimingConfidence,
+    cumulativeResetCount,
+    lastTurn,
+  } = buildSpeedMetrics(turns, recordMetrics, threadCounters, turnCounters);
 
   return {
     threadId: parsed.threadId,
@@ -1541,7 +1614,7 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     compactSpeedWindow: SPEED_SAMPLE_WINDOW,
     effectiveTps,
     turnEffectiveTps: lastTurn && lastTurn.timingQuality !== "low" ? lastTurn.effectiveTps : null,
-    effectiveSampleCount: effectiveWindowSamples.length,
+    effectiveSampleCount,
     effectiveWindow: EFFECTIVE_SPEED_WINDOW,
     speedTimingConfidence,
     formatConflictCount: collected.formatConflictCount,

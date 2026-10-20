@@ -218,6 +218,31 @@ test("same-size replacement is detected by prefix fingerprint", () => {
   assert.equal(parsed.usageRecords[0].responseId, "bb");
 });
 
+test("retainRequests=false keeps only the chronological last 500 request details", () => {
+  const base = Date.parse("2026-09-16T12:20:00.000Z");
+  const lines = [user(new Date(base).toISOString())];
+  for (let index = 1; index <= 520; index += 1) {
+    lines.push(
+      usage(new Date(base + index * 1000).toISOString(), "ring-" + index, {
+        input: index,
+        output: 3,
+        cached: 0,
+        total: index + 3,
+        threadTotal: index + 3,
+        turnTotal: index + 3,
+      }),
+    );
+  }
+  writeLines(lines);
+
+  const result = stats.buildStats(new stats.IncrementalRolloutParser(file).readAll(), { retainRequests: false });
+  assert.equal(result.turns.length, 1);
+  assert.equal(result.turns[0].requestCount, 520);
+  assert.equal(result.turns[0].requests.length, 500);
+  assert.equal(result.turns[0].requests[0].ts, new Date(base + 21000).toISOString());
+  assert.equal(result.turns[0].requests[499].ts, new Date(base + 520000).toISOString());
+});
+
 test("out-of-order records are flagged and model switches are retained", () => {
   writeLines([
     user("2026-09-16T12:03:01.000Z"),
