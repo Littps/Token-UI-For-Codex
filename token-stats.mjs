@@ -368,163 +368,128 @@ function takeGenWindow(state) {
   return Number.isFinite(ms) && ms > 0 ? ms : null;
 }
 
-function processParserEvent(state, event) {
-  if (!event || typeof event !== "object") return;
-  const timestamp = typeof event.timestamp === "string" ? event.timestamp : "";
-  if (timestamp && timestamp > state.lastTimestamp) state.lastTimestamp = timestamp;
-
+function captureModelChange(state, event, timestamp) {
   const eventModel = modelValueFromEvent(event);
-  if (eventModel && eventModel !== state.currentModel) {
-    state.currentModel = eventModel;
-    if (state.modelChanges.length < MAX_MODEL_SEGMENTS) state.modelChanges.push({ ts: timestamp, model: eventModel });
+  if (!eventModel || eventModel === state.currentModel) return;
+  state.currentModel = eventModel;
+  if (state.modelChanges.length < MAX_MODEL_SEGMENTS) {
+    state.modelChanges.push({ ts: timestamp, model: eventModel });
   }
+}
 
-  // 轮次清单：宿主为「每一轮」单独写出 turn_context 事件，并带上该轮的 turn_id。
-  // 实测（本机会话）它覆盖到日志开头、且是记录里 turn_id 的超集（还多出 5 个「无用量记录的空轮」），
-  // 因此它是轮次归属的权威来源；旧日志没有该事件时才退回 user_message 分界。
-  if (event.type === "turn_context" && event.payload) {
-    if (Number.isFinite(event.payload.model_context_window)) {
-      state.modelContextWindow = event.payload.model_context_window;
-    }
-    const contextTurnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
-    if (contextTurnId) {
-      state.turnContexts.push({
-        ts: timestamp,
-        ordinal: Number.isFinite(event.ordinal) ? event.ordinal : null,
-        turnId: contextTurnId,
-      });
-    }
+function captureTurnContext(state, event, timestamp) {
+  if (event.type !== "turn_context" || !event.payload) return;
+  if (Number.isFinite(event.payload.model_context_window)) {
+    state.modelContextWindow = event.payload.model_context_window;
   }
+  const contextTurnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
+  if (!contextTurnId) return;
+  state.turnContexts.push({
+    ts: timestamp,
+    ordinal: Number.isFinite(event.ordinal) ? event.ordinal : null,
+    turnId: contextTurnId,
+  });
+}
 
-  // 上下文上限在真实日志里出现在 event_msg 上：
-  //   1) payload.type === "task_started"  → payload.model_context_window
-  //   2) payload.type === "token_count"   → payload.info.model_context_window
-  // 这里必须先于任何提前 return 提取，否则新格式日志（已存在 token_usage_record）会永远取不到上限。
-  if (event.type === "event_msg" && event.payload) {
-    const windowPayload = event.payload;
-    if (Number.isFinite(windowPayload.model_context_window)) {
-      state.modelContextWindow = windowPayload.model_context_window;
-    }
-    if (windowPayload.info && Number.isFinite(windowPayload.info.model_context_window)) {
-      state.modelContextWindow = windowPayload.info.model_context_window;
-    }
-    // 结构化时间：task_complete 提供整轮耗时与 TTFT，item_completed
-    // 提供 Reasoning / AgentMessage / CommandExecution 等条目的起止时间。
-    // 只保存数字和时间标签，不复制 item.content。
-    if (windowPayload.type === "task_complete") {
-      const taskKey = [
-        windowPayload.turn_id || "",
-        windowPayload.completed_at ?? timestamp,
-        windowPayload.duration_ms ?? "",
-      ].join("|");
-      if (!state.taskCompletionKeys.has(taskKey)) {
-        state.taskCompletionKeys.add(taskKey);
-        state.taskCompletions.push({
-          turnId: typeof windowPayload.turn_id === "string" ? windowPayload.turn_id : "",
-          ts: timestamp,
-          startedAt: windowPayload.started_at ?? null,
-          completedAt: windowPayload.completed_at ?? null,
-          durationMs: Number.isFinite(windowPayload.duration_ms) ? windowPayload.duration_ms : null,
-          ttftMs: Number.isFinite(windowPayload.time_to_first_token_ms) ? windowPayload.time_to_first_token_ms : null,
-        });
-      }
-    } else if (windowPayload.type === "item_completed" && windowPayload.item) {
-      const item = windowPayload.item;
-      const startedAtMs = Number(windowPayload.started_at_ms);
-      const completedAtMs = Number(windowPayload.completed_at_ms);
-      const itemType = typeof item.type === "string" ? item.type : "";
-      const itemId = item.id || item.client_id || "";
-      const itemKey = [
-        windowPayload.turn_id || "",
-        itemId,
-        itemType,
-        windowPayload.started_at_ms ?? "",
-        windowPayload.completed_at_ms ?? "",
-      ].join("|");
-      if (Number.isFinite(startedAtMs) && Number.isFinite(completedAtMs) && !state.itemTimingKeys.has(itemKey)) {
-        state.itemTimingKeys.add(itemKey);
-        state.itemTimings.push({
-          turnId: typeof windowPayload.turn_id === "string" ? windowPayload.turn_id : "",
-          ts: timestamp,
-          itemType,
-          durationMs: Math.max(0, completedAtMs - startedAtMs),
-          startedAtMs,
-          completedAtMs,
-        });
-      }
-    }
+function captureEventMessageContext(state, payload) {
+  if (Number.isFinite(payload.model_context_window)) {
+    state.modelContextWindow = payload.model_context_window;
   }
-
-  // 纯生成耗时跟踪：必须放在所有提前 return 之前（包括下面的用户消息分支），
-  // 否则窗口起始基准会丢失，"等待首字"的时间就统计不到。
-  trackGenWindow(state, event, timestamp);
-
-  if (event.type === "response_item" && event.payload && event.payload.role === "user") {
-    if (timestamp && !state.userMessageKeys.has(timestamp)) {
-      state.userMessageKeys.add(timestamp);
-      state.userMessages.push({ ts: timestamp, ordinal: Number.isFinite(event.ordinal) ? event.ordinal : null });
-    }
-    return;
+  if (payload.info && Number.isFinite(payload.info.model_context_window)) {
+    state.modelContextWindow = payload.info.model_context_window;
   }
+}
 
-  if (event.type === "token_usage_record" && event.payload) {
-    const payload = event.payload;
-    const usage = payload.usage || {};
-    const turnUsage = payload.turn_token_usage || {};
-    const threadUsage = payload.thread_token_usage || {};
-    const responseId = typeof payload.response_id === "string" ? payload.response_id : "";
-    const recordKey = responseId || JSON.stringify([timestamp, payload.turn_id || "", usage.total_tokens ?? null]);
-    if (state.usageRecordIds.has(recordKey)) {
-      // 同 response_id（或指纹）重复：只算一次；数值不同则记一次真冲突。
-      const firstTotal = state.usageRecordTotals.get(recordKey);
-      const nextTotal = Number.isFinite(threadUsage.total_tokens) ? threadUsage.total_tokens : null;
-      if (firstTotal != null && nextTotal != null && firstTotal !== nextTotal) state.formatConflicts += 1;
-      return;
-    }
-    state.usageRecordIds.add(recordKey);
-    state.usageRecordTotals.set(recordKey, Number.isFinite(threadUsage.total_tokens) ? threadUsage.total_tokens : null);
-    state.usageRecords.push({
-      ts: timestamp,
-      ordinal: Number.isFinite(event.ordinal) ? event.ordinal : null,
-      genMs: takeGenWindow(state),
-      responseId,
-      turnId: typeof payload.turn_id === "string" ? payload.turn_id : "",
-      model: state.currentModel,
-      input: Number.isFinite(usage.input_tokens) ? usage.input_tokens : null,
-      output: Number.isFinite(usage.output_tokens) ? usage.output_tokens : null,
-      cached: Number.isFinite(usage.cached_input_tokens) ? usage.cached_input_tokens : null,
-      total: Number.isFinite(usage.total_tokens) ? usage.total_tokens : null,
-      turnUsage: {
-        input: Number.isFinite(turnUsage.input_tokens) ? turnUsage.input_tokens : null,
-        output: Number.isFinite(turnUsage.output_tokens) ? turnUsage.output_tokens : null,
-        cached: Number.isFinite(turnUsage.cached_input_tokens) ? turnUsage.cached_input_tokens : null,
-        total: Number.isFinite(turnUsage.total_tokens) ? turnUsage.total_tokens : null,
-      },
-      threadUsage: {
-        input: Number.isFinite(threadUsage.input_tokens) ? threadUsage.input_tokens : null,
-        output: Number.isFinite(threadUsage.output_tokens) ? threadUsage.output_tokens : null,
-        cached: Number.isFinite(threadUsage.cached_input_tokens) ? threadUsage.cached_input_tokens : null,
-        total: Number.isFinite(threadUsage.total_tokens) ? threadUsage.total_tokens : null,
-      },
-    });
-    return;
-  }
+function captureTaskCompletion(state, payload, timestamp) {
+  const taskKey = [payload.turn_id || "", payload.completed_at ?? timestamp, payload.duration_ms ?? ""].join("|");
+  if (state.taskCompletionKeys.has(taskKey)) return;
+  state.taskCompletionKeys.add(taskKey);
+  state.taskCompletions.push({
+    turnId: typeof payload.turn_id === "string" ? payload.turn_id : "",
+    ts: timestamp,
+    startedAt: payload.started_at ?? null,
+    completedAt: payload.completed_at ?? null,
+    durationMs: Number.isFinite(payload.duration_ms) ? payload.duration_ms : null,
+    ttftMs: Number.isFinite(payload.time_to_first_token_ms) ? payload.time_to_first_token_ms : null,
+  });
+}
 
-  if (event.type !== "event_msg" || !event.payload) return;
+function captureItemTiming(state, payload, timestamp) {
+  if (!payload.item) return;
+  const startedAtMs = Number(payload.started_at_ms);
+  const completedAtMs = Number(payload.completed_at_ms);
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs)) return;
+  const item = payload.item;
+  const itemType = typeof item.type === "string" ? item.type : "";
+  const itemId = item.id || item.client_id || "";
+  const itemKey = [
+    payload.turn_id || "",
+    itemId,
+    itemType,
+    payload.started_at_ms ?? "",
+    payload.completed_at_ms ?? "",
+  ].join("|");
+  if (state.itemTimingKeys.has(itemKey)) return;
+  state.itemTimingKeys.add(itemKey);
+  state.itemTimings.push({
+    turnId: typeof payload.turn_id === "string" ? payload.turn_id : "",
+    ts: timestamp,
+    itemType,
+    durationMs: Math.max(0, completedAtMs - startedAtMs),
+    startedAtMs,
+    completedAtMs,
+  });
+}
+
+function captureUserMessage(state, timestamp, ordinal) {
+  if (!timestamp || state.userMessageKeys.has(timestamp)) return;
+  state.userMessageKeys.add(timestamp);
+  state.userMessages.push({ ts: timestamp, ordinal: Number.isFinite(ordinal) ? ordinal : null });
+}
+
+function captureModernUsage(state, event, timestamp) {
   const payload = event.payload;
-  // 运行状态：task_started 置真，task_complete / turn_aborted 置假（用于心跳分档）。
-  if (payload.type === "task_started") state.taskRunning = true;
-  else if (payload.type === "task_complete" || payload.type === "turn_aborted") state.taskRunning = false;
-
-  if (payload.type === "user_message") {
-    if (timestamp && !state.userMessageKeys.has(timestamp)) {
-      state.userMessageKeys.add(timestamp);
-      state.userMessages.push({ ts: timestamp, ordinal: Number.isFinite(event.ordinal) ? event.ordinal : null });
-    }
+  const usage = payload.usage || {};
+  const turnUsage = payload.turn_token_usage || {};
+  const threadUsage = payload.thread_token_usage || {};
+  const responseId = typeof payload.response_id === "string" ? payload.response_id : "";
+  const recordKey = responseId || JSON.stringify([timestamp, payload.turn_id || "", usage.total_tokens ?? null]);
+  if (state.usageRecordIds.has(recordKey)) {
+    // 同 response_id（或指纹）重复：只算一次；数值不同则记一次真冲突。
+    const firstTotal = state.usageRecordTotals.get(recordKey);
+    const nextTotal = Number.isFinite(threadUsage.total_tokens) ? threadUsage.total_tokens : null;
+    if (firstTotal != null && nextTotal != null && firstTotal !== nextTotal) state.formatConflicts += 1;
     return;
   }
-  // 旧格式计数必须始终保留：混合日志（引擎升级/回退）下不能因为存在新格式记录就整体丢弃。
-  if (payload.type !== "token_count" || !payload.info) return;
+  state.usageRecordIds.add(recordKey);
+  state.usageRecordTotals.set(recordKey, Number.isFinite(threadUsage.total_tokens) ? threadUsage.total_tokens : null);
+  state.usageRecords.push({
+    ts: timestamp,
+    ordinal: Number.isFinite(event.ordinal) ? event.ordinal : null,
+    genMs: takeGenWindow(state),
+    responseId,
+    turnId: typeof payload.turn_id === "string" ? payload.turn_id : "",
+    model: state.currentModel,
+    input: Number.isFinite(usage.input_tokens) ? usage.input_tokens : null,
+    output: Number.isFinite(usage.output_tokens) ? usage.output_tokens : null,
+    cached: Number.isFinite(usage.cached_input_tokens) ? usage.cached_input_tokens : null,
+    total: Number.isFinite(usage.total_tokens) ? usage.total_tokens : null,
+    turnUsage: {
+      input: Number.isFinite(turnUsage.input_tokens) ? turnUsage.input_tokens : null,
+      output: Number.isFinite(turnUsage.output_tokens) ? turnUsage.output_tokens : null,
+      cached: Number.isFinite(turnUsage.cached_input_tokens) ? turnUsage.cached_input_tokens : null,
+      total: Number.isFinite(turnUsage.total_tokens) ? turnUsage.total_tokens : null,
+    },
+    threadUsage: {
+      input: Number.isFinite(threadUsage.input_tokens) ? threadUsage.input_tokens : null,
+      output: Number.isFinite(threadUsage.output_tokens) ? threadUsage.output_tokens : null,
+      cached: Number.isFinite(threadUsage.cached_input_tokens) ? threadUsage.cached_input_tokens : null,
+      total: Number.isFinite(threadUsage.total_tokens) ? threadUsage.total_tokens : null,
+    },
+  });
+}
+
+function captureLegacyTokenCount(state, event, payload, timestamp) {
   const info = payload.info;
   if (Number.isFinite(info.model_context_window)) state.modelContextWindow = info.model_context_window;
   const last = info.last_token_usage || {};
@@ -566,9 +531,54 @@ function processParserEvent(state, event) {
     count.totalInfo.cached,
     count.totalInfo.output,
   ]);
-  if (countKey !== state.previousCountKey) {
-    state.previousCountKey = countKey;
-    state.counts.push(count);
+  if (countKey === state.previousCountKey) return;
+  state.previousCountKey = countKey;
+  state.counts.push(count);
+}
+
+function processParserEvent(state, event) {
+  if (!event || typeof event !== "object") return;
+  const timestamp = typeof event.timestamp === "string" ? event.timestamp : "";
+  if (timestamp && timestamp > state.lastTimestamp) state.lastTimestamp = timestamp;
+
+  captureModelChange(state, event, timestamp);
+  captureTurnContext(state, event, timestamp);
+
+  if (event.type === "event_msg" && event.payload) {
+    captureEventMessageContext(state, event.payload);
+    if (event.payload.type === "task_complete") {
+      captureTaskCompletion(state, event.payload, timestamp);
+    } else if (event.payload.type === "item_completed") {
+      captureItemTiming(state, event.payload, timestamp);
+    }
+  }
+
+  // 纯生成耗时跟踪必须位于所有提前返回之前，否则首个生成窗口会丢失。
+  trackGenWindow(state, event, timestamp);
+
+  if (event.type === "response_item" && event.payload && event.payload.role === "user") {
+    captureUserMessage(state, timestamp, event.ordinal);
+    return;
+  }
+
+  if (event.type === "token_usage_record" && event.payload) {
+    captureModernUsage(state, event, timestamp);
+    return;
+  }
+
+  if (event.type !== "event_msg" || !event.payload) return;
+  const payload = event.payload;
+  // 运行状态：task_started 置真，task_complete / turn_aborted 置假（用于心跳分档）。
+  if (payload.type === "task_started") state.taskRunning = true;
+  else if (payload.type === "task_complete" || payload.type === "turn_aborted") state.taskRunning = false;
+
+  if (payload.type === "user_message") {
+    captureUserMessage(state, timestamp, event.ordinal);
+    return;
+  }
+  // 旧格式计数必须始终保留：混合日志（引擎升级/回退）下不能因为存在新格式记录就整体丢弃。
+  if (payload.type === "token_count" && payload.info) {
+    captureLegacyTokenCount(state, event, payload, timestamp);
   }
 }
 
