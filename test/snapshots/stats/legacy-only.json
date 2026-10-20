@@ -1,0 +1,88 @@
+{
+  "modelContextWindow": 1000,
+  "requestCount": 2,
+  "sessionTotal": 250,
+  "sessionInput": 120,
+  "sessionCached": 60,
+  "sessionOutput": 30,
+  "modelSwitchCount": 0,
+  "cumulativeResetCount": 0,
+  "sessionTps": 25,
+  "lastRequestTps": 30,
+  "turnTps": 25,
+  "turnWallTps": 25,
+  "genEstimateTps": 25,
+  "compactTps": null,
+  "compactSpeedSampleCount": 2,
+  "compactSpeedConfidence": "low",
+  "compactSpeedWindow": 5,
+  "effectiveTps": null,
+  "turnEffectiveTps": null,
+  "effectiveSampleCount": 0,
+  "effectiveWindow": 25,
+  "speedTimingConfidence": "low",
+  "formatConflictCount": 0,
+  "echoStats": {
+    "total": 0,
+    "lagMaxMs": 0,
+    "overThreshold": 0,
+    "thresholdMs": 60000,
+    "topLag": []
+  },
+  "replayStats": {
+    "count": 0,
+    "lagMaxMs": 0
+  },
+  "uniqueStats": {
+    "count": 2,
+    "selfDuplicate": 0
+  },
+  "legacyStats": {
+    "raw": 2,
+    "deduped": 2,
+    "claimedModern": 0
+  },
+  "contextUsed": 150,
+  "turns": [
+    {
+      "turnId": "turn-1",
+      "start": "2026-10-20T00:00:00.000Z",
+      "startLabel": "08:00",
+      "requests": [
+        {
+          "ts": "2026-10-20T00:00:01.000Z",
+          "input": 80,
+          "output": 20,
+          "cached": 40,
+          "lastTotal": 100,
+          "totalInfo": {
+            "input": 80,
+            "output": 20,
+            "cached": 40,
+            "total": 100
+          },
+          "model": null
+        },
+        {
+          "ts": "2026-10-20T00:00:02.000Z",
+          "input": 120,
+          "output": 30,
+          "cached": 60,
+          "lastTotal": 150,
+          "totalInfo": {
+            "input": 120,
+            "output": 30,
+            "cached": 60,
+            "total": 250
+          },
+          "model": null
+        }
+      ],
+      "requestCount": 2,
+      "input": 200,
+      "output": 50,
+      "cached": 100,
+      "total": 250
+    }
+  ]
+}

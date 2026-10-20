@@ -1,0 +1,102 @@
+{
+  "modelContextWindow": 1000,
+  "requestCount": 3,
+  "sessionTotal": 680,
+  "sessionInput": 150,
+  "sessionCached": 110,
+  "sessionOutput": 30,
+  "modelSwitchCount": 0,
+  "cumulativeResetCount": 3,
+  "sessionTps": 16.666666666666668,
+  "lastRequestTps": 10,
+  "turnTps": 16.666666666666668,
+  "turnWallTps": 10,
+  "genEstimateTps": 10,
+  "compactTps": null,
+  "compactSpeedSampleCount": 2,
+  "compactSpeedConfidence": "low",
+  "compactSpeedWindow": 5,
+  "effectiveTps": null,
+  "turnEffectiveTps": null,
+  "effectiveSampleCount": 0,
+  "effectiveWindow": 25,
+  "speedTimingConfidence": "low",
+  "formatConflictCount": 0,
+  "echoStats": {
+    "total": 0,
+    "lagMaxMs": 0,
+    "overThreshold": 0,
+    "thresholdMs": 60000,
+    "topLag": []
+  },
+  "replayStats": {
+    "count": 0,
+    "lagMaxMs": 0
+  },
+  "uniqueStats": {
+    "count": 1,
+    "selfDuplicate": 0
+  },
+  "legacyStats": {
+    "raw": 1,
+    "deduped": 1,
+    "claimedModern": 0
+  },
+  "contextUsed": 60,
+  "turns": [
+    {
+      "turnId": "turn-1",
+      "start": "2026-10-20T00:00:00.000Z",
+      "startLabel": "08:00",
+      "requests": [
+        {
+          "ts": "2026-10-20T00:00:01.000Z",
+          "input": 100,
+          "output": 20,
+          "cached": 50,
+          "lastTotal": 120,
+          "totalInfo": {
+            "input": 100,
+            "output": 20,
+            "cached": 50,
+            "total": 500
+          },
+          "model": "fixture-model"
+        },
+        {
+          "ts": "2026-10-20T00:00:02.000Z",
+          "input": 100,
+          "output": 20,
+          "cached": 40,
+          "lastTotal": 120,
+          "totalInfo": {
+            "input": 100,
+            "output": 20,
+            "cached": 90,
+            "total": 620
+          },
+          "model": null
+        },
+        {
+          "ts": "2026-10-20T00:00:03.000Z",
+          "input": 50,
+          "output": 10,
+          "cached": 20,
+          "lastTotal": 60,
+          "totalInfo": {
+            "input": 150,
+            "output": 30,
+            "cached": 110,
+            "total": 680
+          },
+          "model": "fixture-model"
+        }
+      ],
+      "requestCount": 3,
+      "input": 150,
+      "output": 30,
+      "cached": 70,
+      "total": 180
+    }
+  ]
+}

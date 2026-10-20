@@ -15,7 +15,8 @@
 // 用法：
 //   node scripts/golden-baseline.mjs --write    生成基线（重构前运行一次）
 //   node scripts/golden-baseline.mjs --check    校验（重构后运行；任何差异都会以非 0 退出）
-//   node scripts/golden-baseline.mjs --check --refresh-corpus   重新冻结语料后再校验
+//   node scripts/golden-baseline.mjs --check --refresh-corpus --allow-local-corpus
+//       显式允许复制本机 rollout 后重新冻结语料
 //
 // 语料快照只冻结一次并重复复用：会话文件（尤其是正在进行的那个）会持续增长，
 // 每次重新复制会让哈希变化，从而把「会话变长」误判成「实现改坏」。
@@ -69,6 +70,14 @@ function freezeCorpus() {
   if (!force) {
     const existing = countSnapshots(snapshotSessionsDir);
     if (existing > 0) return { copied: 0, reused: existing };
+    throw new Error(
+      "Golden corpus snapshot is missing. Use --refresh-corpus --allow-local-corpus only when copying local rollout data is explicitly acceptable.",
+    );
+  }
+  if (!process.argv.includes("--allow-local-corpus")) {
+    throw new Error(
+      "Refusing to copy local rollout data. Pass --allow-local-corpus together with --refresh-corpus after reviewing the privacy impact.",
+    );
   }
   fs.rmSync(snapshotRoot, { recursive: true, force: true });
   let copied = 0;
