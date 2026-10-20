@@ -216,7 +216,7 @@ npm run test:live
 node scripts\verify-sync.mjs --deploy "<deployment root>"
 ```
 
-Current baseline: 65 unit tests, zero Golden mismatch, 15 live page checks, and
+Current baseline: 66 unit tests, zero Golden mismatch, 15 live page checks, and
 12 Playwright passes with 2 real-input tests skipped for safety.
 
 ## Update and rollback

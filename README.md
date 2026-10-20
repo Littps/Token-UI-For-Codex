@@ -284,7 +284,7 @@ Get-Content "$env:LOCALAPPDATA\tokens-ui-for-codex\monitor-health.json" -Raw
 npm ci
 npm run check
 npm test
-npm exec prettier -- --check tokens-ui-for-codex-panel.js
+npm run format:check
 node scripts\golden-baseline.mjs --check
 node scripts\verify-live.mjs
 npm run test:live
@@ -293,7 +293,7 @@ node scripts\verify-sync.mjs --deploy "<部署根>"
 
 当前基线：
 
-- 单元测试：65 项
+- 单元测试：66 项
 - Golden 行为基线：0 不一致
 - 实机页面验收：15 项
 - Playwright：12 通过，2 个真实输入用例按安全策略默认跳过

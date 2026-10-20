@@ -1,6 +1,6 @@
 {
   "name": "tokens-ui-for-codex",
-  "version": "1.0.1+codex.20261017170503",
+  "version": "1.0.2+codex.20261020131145",
   "description": "Codex desktop token usage UI with signed local CDP transport, robust speed estimates, and a 60-day local structured history archive.",
   "private": true,
   "type": "module",

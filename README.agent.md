@@ -11,7 +11,7 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件标识 | `tokens-ui-for-codex@tokens-ui-for-codex-local` |
-| 插件版本 | `1.0.1+codex.20261017170503` |
+| 插件版本 | `1.0.2+codex.20261020131145` |
 | 页面协议 | 签名 schema v3 |
 | 页面事件 | `tokens-ui-for-codex` |
 | 页面全局 | `window.__tuiForCodex` |

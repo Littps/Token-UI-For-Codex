@@ -207,7 +207,7 @@ node scripts\verify-sync.mjs --deploy "<部署根>"
 
 当前基线：
 
-- 单元测试 65
+- 单元测试 66
 - Golden 0 不一致
 - verify-live 15 项
 - Playwright 12 通过 / 2 安全跳过

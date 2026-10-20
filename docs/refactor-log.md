@@ -23,11 +23,11 @@ Codex rollout JSONL
   │    └─ 真冲突计数
   │
   ├─ buildStats
-  │    ├─ turn_context 轮次归属
-  │    ├─ reset-aware cumulative counters
-  │    ├─ cache 构成
-  │    ├─ 速度和耗时
-  │    └─ 上下文使用量
+  │    ├─ seedTurnList：turn_context 轮次归属
+  │    ├─ assignRecordsToTurns：reset-aware cumulative counters
+  │    ├─ attachTurnTimings：速度和耗时
+  │    ├─ buildSpeedMetrics：会话 / 本轮 / 稳健速度
+  │    └─ bounded request ring：最近 500 条明细
   │
   ├─ payloadFor
   │    └─ 按窗口裁剪请求/轮次
@@ -207,7 +207,7 @@ node scripts\verify-sync.mjs --deploy "<部署根>"
 
 当前结果：
 
-- 单元测试：65/65
+- 单元测试：66/66
 - Golden：0 不一致
 - verify-live：15/15
 - Playwright：12 通过 / 2 安全跳过
