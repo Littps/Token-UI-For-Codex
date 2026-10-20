@@ -15,11 +15,21 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check token-stats.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check tokens-ui-for-codex-panel.js",
+    "check": "node --check token-stats.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check tokens-ui-for-codex-panel.js && npm run lint",
+    "lint": "eslint tokens-ui-for-codex-panel.js",
     "test": "node --test --test-force-exit test/token-stats.test.mjs test/history-archive.test.mjs",
     "test:live": "node --test --test-force-exit test/live-ui.playwright.test.mjs",
     "perf": "node scripts/perf-baseline.mjs",
     "verify:live": "node scripts/verify-live.mjs",
     "reload": "node scripts/reload-page.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.13.0",
+    "globals": "17.13.0",
+    "playwright": "1.64.1",
+    "prettier": "3.9.10",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   }
 }

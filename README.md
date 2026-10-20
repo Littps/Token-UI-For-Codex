@@ -85,7 +85,9 @@ Node 定位规则：
 
 - Node.js 22 或 24
 - Windows PowerShell 5.1 / PowerShell 7
-- Playwright 仅在运行 `npm run test:live` 时需要，可安装在本地或全局 npm 目录
+- 使用 `npm ci` 安装锁定的开发依赖（ESLint、Prettier、React/ReactDOM、Playwright）
+- React/ReactDOM 暂未接入当前原生 JavaScript 用户脚本；若迁移 UI，必须将框架打包进独立产物
+- Playwright 仅在运行 `npm run test:live` 时使用；实机测试通过 CDP 连接 Codex 桌面版
 
 项目元数据以 `package.json` 和插件 `.codex-plugin/plugin.json` 为准；CI 会同时测试 Node 22 与 24。
 
@@ -279,8 +281,10 @@ Get-Content "$env:LOCALAPPDATA\tokens-ui-for-codex\monitor-health.json" -Raw
 ## 测试与验证
 
 ```powershell
+npm ci
 npm run check
 npm test
+npm exec prettier -- --check tokens-ui-for-codex-panel.js
 node scripts\golden-baseline.mjs --check
 node scripts\verify-live.mjs
 npm run test:live

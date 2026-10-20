@@ -18,6 +18,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Install locked development dependencies
+        run: npm ci
       - name: Syntax check
         run: npm run check
       - name: Unit tests
