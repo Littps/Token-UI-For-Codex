@@ -26,8 +26,18 @@ function makeRecord(index, total) {
       response_id: `perf-${index}`,
       turn_id: "perf-turn",
       usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: 50, total_tokens: 120 },
-      turn_token_usage: { input_tokens: index * 100, output_tokens: index * 20, cached_input_tokens: index * 50, total_tokens: index * 120 },
-      thread_token_usage: { input_tokens: index * 100, output_tokens: index * 20, cached_input_tokens: index * 50, total_tokens: total },
+      turn_token_usage: {
+        input_tokens: index * 100,
+        output_tokens: index * 20,
+        cached_input_tokens: index * 50,
+        total_tokens: index * 120,
+      },
+      thread_token_usage: {
+        input_tokens: index * 100,
+        output_tokens: index * 20,
+        cached_input_tokens: index * 50,
+        total_tokens: total,
+      },
     },
   });
 }
@@ -44,6 +54,9 @@ try {
   const initialStatsStart = performance.now();
   const initialStats = buildStats(parsed, { retainRequests: false });
   const initialStatsMs = performance.now() - initialStatsStart;
+  if (initialStats.requestCount !== recordCount) {
+    throw new Error(`initial request count mismatch: ${initialStats.requestCount} != ${recordCount}`);
+  }
 
   const appendStart = performance.now();
   fs.appendFileSync(file, makeRecord(recordCount + 1, (recordCount + 1) * 120) + "\n", "utf8");
@@ -54,17 +67,23 @@ try {
   const appendStatsMs = performance.now() - appendStatsStart;
   const endMemory = process.memoryUsage().heapUsed;
 
-  console.log(JSON.stringify({
-    recordCount,
-    initialParseMs: Number(initialParseMs.toFixed(3)),
-    initialStatsMs: Number(initialStatsMs.toFixed(3)),
-    appendParseMs: Number(appendParseMs.toFixed(3)),
-    appendStatsMs: Number(appendStatsMs.toFixed(3)),
-    heapDeltaMb: Number(((endMemory - startMemory) / 1024 / 1024).toFixed(3)),
-    requestCount: appendedStats.requestCount,
-    sessionTotal: appendedStats.sessionTotal,
-    retainedRequestDetails: appendedStats.turns.at(-1)?.requests.length || 0,
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        recordCount,
+        initialParseMs: Number(initialParseMs.toFixed(3)),
+        initialStatsMs: Number(initialStatsMs.toFixed(3)),
+        appendParseMs: Number(appendParseMs.toFixed(3)),
+        appendStatsMs: Number(appendStatsMs.toFixed(3)),
+        heapDeltaMb: Number(((endMemory - startMemory) / 1024 / 1024).toFixed(3)),
+        requestCount: appendedStats.requestCount,
+        sessionTotal: appendedStats.sessionTotal,
+        retainedRequestDetails: appendedStats.turns.at(-1)?.requests.length || 0,
+      },
+      null,
+      2,
+    ),
+  );
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

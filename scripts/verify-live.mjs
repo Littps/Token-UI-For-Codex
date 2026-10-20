@@ -83,8 +83,14 @@ const target = await loadTargets();
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error("CDP 连接超时")), 8000);
-  ws.addEventListener("open", () => { clearTimeout(timer); resolve(); });
-  ws.addEventListener("error", () => { clearTimeout(timer); reject(new Error("CDP 连接失败")); });
+  ws.addEventListener("open", () => {
+    clearTimeout(timer);
+    resolve();
+  });
+  ws.addEventListener("error", () => {
+    clearTimeout(timer);
+    reject(new Error("CDP 连接失败"));
+  });
 });
 
 const checks = [];
@@ -93,7 +99,9 @@ function record(name, ok, detail) {
 }
 
 try {
-  const snapshotRaw = await evaluate(ws, `(() => {
+  const snapshotRaw = await evaluate(
+    ws,
+    `(() => {
     const root = document.getElementById('tui-native');
     const ring = document.querySelector('[aria-label*="上下文用量"], [aria-label*="上下文窗口"], [aria-label*="Context usage" i], [aria-label*="Context window" i]');
     const protocol = window.__tuiForCodexProtocol || null;
@@ -115,11 +123,16 @@ try {
       panelRect: rootRect ? { left: Math.round(rootRect.left), right: Math.round(rootRect.right) } : null,
       ringRect: ringRect ? { left: Math.round(ringRect.left), right: Math.round(ringRect.right) } : null,
     });
-  })()`);
+  })()`,
+  );
   const snapshot = JSON.parse(snapshotRaw || "{}");
 
   record("协议已注册", snapshot.protocolName === "tokens-ui-for-codex", snapshot.protocolName);
-  record("支持 schema v3", Array.isArray(snapshot.supportedSchemaVersions) && snapshot.supportedSchemaVersions.includes(3), snapshot.supportedSchemaVersions);
+  record(
+    "支持 schema v3",
+    Array.isArray(snapshot.supportedSchemaVersions) && snapshot.supportedSchemaVersions.includes(3),
+    snapshot.supportedSchemaVersions,
+  );
   record("统计条唯一", snapshot.panelCount === 1, snapshot.panelCount);
   record("样式表唯一", snapshot.styleCount === 1, snapshot.styleCount);
   record("统计条位于上下文圆圈左侧", snapshot.panelLeftOfRing, { panel: snapshot.panelRect, ring: snapshot.ringRect });
@@ -127,15 +140,24 @@ try {
   record("负载 schema v3", snapshot.payloadSchemaVersion === 3, snapshot.payloadSchemaVersion);
   record("负载要求签名", snapshot.payloadAuthRequired === true, snapshot.payloadAuthRequired);
   record("负载携带 HMAC", snapshot.payloadHasMac === true, snapshot.payloadHasMac);
-  record("运行状态健康", ["healthy", "waiting-for-data", "starting"].includes(snapshot.payloadHealthStatus), snapshot.payloadHealthStatus);
+  record(
+    "运行状态健康",
+    ["healthy", "waiting-for-data", "starting"].includes(snapshot.payloadHealthStatus),
+    snapshot.payloadHealthStatus,
+  );
 
-  await evaluate(ws, `(() => {
+  await evaluate(
+    ws,
+    `(() => {
     const root = document.getElementById('tui-native');
     if (!root) return 'missing';
     root.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
     return 'clicked';
-  })()`);
-  const openRaw = await evaluate(ws, `(() => {
+  })()`,
+  );
+  const openRaw = await evaluate(
+    ws,
+    `(() => {
     const dialog = document.getElementById('tui-detail-dialog');
     const titles = dialog ? [...dialog.querySelectorAll('.tui-dialog-section-title')].map((node) => node.textContent) : [];
     const sessionSection = dialog ? dialog.querySelector('.tui-dialog-section') : null;
@@ -149,14 +171,16 @@ try {
       titles,
       sessionLabels,
     });
-  })()`);
+  })()`,
+  );
   const openState = JSON.parse(openRaw || "{}");
   record("左键可打开详情", openState.open === true, openState);
   record("详情分区已渲染", openState.sections >= 4, openState.sections);
   record("详情使用 dialog 语义", openState.role === "dialog", openState.role);
   record(
     "分区顺序正确",
-    Array.isArray(openState.titles) && openState.titles.slice(0, 4).join(",") === "会话累计,当前提问统计,上下文使用,运行状态",
+    Array.isArray(openState.titles) &&
+      openState.titles.slice(0, 4).join(",") === "会话累计,当前提问统计,上下文使用,运行状态",
     openState.titles,
   );
   record(
@@ -168,30 +192,37 @@ try {
   // 键盘监听已按设计移除（Esc 不关闭弹层），因此这里不再派发 Esc，也不再有对应断言
   // （该检查已按用户决定删除：它与产品决定相反，属于陈旧断言）。
   // 收尾仍走设计好的「点击外部关闭」路径，避免把弹层打开状态留给使用者；这里不产生断言。
-  await evaluate(ws, `(() => {
+  await evaluate(
+    ws,
+    `(() => {
     if (!document.getElementById('tui-detail-dialog')) return 'no-dialog';
     document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
     if (document.getElementById('tui-detail-dialog')) {
       document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
     }
     return document.getElementById('tui-detail-dialog') ? 'still-open' : 'closed';
-  })()`);
+  })()`,
+  );
 
   if (checkRefresh) {
     const first = await evaluate(ws, "window.__tuiForCodex && window.__tuiForCodex.updatedAt");
     await new Promise((resolve) => setTimeout(resolve, 6500));
     const second = await evaluate(ws, "window.__tuiForCodex && window.__tuiForCodex.updatedAt");
     const deltaMs = Date.parse(second) - Date.parse(first);
-    record(
-      "每 5 秒固定刷新",
-      Number.isFinite(deltaMs) && deltaMs >= 3000 && deltaMs <= 9000,
-      { first, second, deltaMs },
-    );
+    record("每 5 秒固定刷新", Number.isFinite(deltaMs) && deltaMs >= 3000 && deltaMs <= 9000, {
+      first,
+      second,
+      deltaMs,
+    });
   }
 } finally {
-  try { ws.close(); } catch {}
+  try {
+    ws.close();
+  } catch {}
 }
 
 const failed = checks.filter((check) => !check.ok);
-console.log(JSON.stringify({ port, targetId: target.id, title: target.title || "", checks, failed: failed.length }, null, 2));
+console.log(
+  JSON.stringify({ port, targetId: target.id, title: target.title || "", checks, failed: failed.length }, null, 2),
+);
 if (failed.length) process.exit(1);

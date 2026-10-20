@@ -15,8 +15,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check token-stats.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check tokens-ui-for-codex-panel.js && npm run lint",
-    "lint": "eslint tokens-ui-for-codex-panel.js",
+    "check": "node --check token-stats.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check tokens-ui-for-codex-panel.js && npm run lint && npm run format:check",
+    "lint": "eslint .",
+    "format:check": "prettier --check \"*.js\" \"*.mjs\" \"scripts/*.mjs\" \"test/*.mjs\"",
+    "format": "prettier --write \"*.js\" \"*.mjs\" \"scripts/*.mjs\" \"test/*.mjs\"",
     "test": "node --test --test-force-exit test/token-stats.test.mjs test/history-archive.test.mjs",
     "test:live": "node --test --test-force-exit test/live-ui.playwright.test.mjs",
     "perf": "node scripts/perf-baseline.mjs",

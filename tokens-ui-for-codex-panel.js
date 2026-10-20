@@ -110,10 +110,10 @@
   }
 
   function numberOrNull(value) {
-   if (value == null) return null;
-   const n = Number(value);
-   return Number.isFinite(n) ? n : null;
- }
+    if (value == null) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
 
   function cacheSplit(input, cached) {
     const total = numberOrNull(input);
@@ -139,34 +139,69 @@
     if (data.protocolName !== PROTOCOL_NAME) return { ok: false, error: "统计协议名称不匹配" };
     if (data.schemaVersion !== PROTOCOL_SCHEMA_VERSION) return { ok: false, error: "统计协议版本不匹配" };
     if (data.authRequired !== true) return { ok: false, error: "统计协议要求签名负载" };
-    if (!Array.isArray(data.capabilities) || !data.capabilities.includes("health-snapshot")) return { ok: false, error: "统计协议能力不匹配" };
-    for (const key of ["requestCount", "currentTurnRequestCount", "turnTotal", "turnInput", "turnOutput", "currentTurnIndex", "turnTotalCount", "requestDetailTotal", "modelSwitchCount", "cumulativeResetCount"]) {
+    if (!Array.isArray(data.capabilities) || !data.capabilities.includes("health-snapshot"))
+      return { ok: false, error: "统计协议能力不匹配" };
+    for (const key of [
+      "requestCount",
+      "currentTurnRequestCount",
+      "turnTotal",
+      "turnInput",
+      "turnOutput",
+      "currentTurnIndex",
+      "turnTotalCount",
+      "requestDetailTotal",
+      "modelSwitchCount",
+      "cumulativeResetCount",
+    ]) {
       if (!isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
     }
-  for (const key of ["compactSpeedSampleCount", "compactSpeedWindow"]) {
+    for (const key of ["compactSpeedSampleCount", "compactSpeedWindow"]) {
       if (data[key] != null && !isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
     }
-  for (const key of ["sessionTotal", "contextUsed", "modelContextWindow", "sessionInput", "sessionCached", "sessionOutput", "turnCached", "turnTps", "turnWallTps", "sessionTps", "lastRequestTps", "genEstimateTps", "compactTps", "effectiveTps", "turnEffectiveTps"]) {
+    for (const key of [
+      "sessionTotal",
+      "contextUsed",
+      "modelContextWindow",
+      "sessionInput",
+      "sessionCached",
+      "sessionOutput",
+      "turnCached",
+      "turnTps",
+      "turnWallTps",
+      "sessionTps",
+      "lastRequestTps",
+      "genEstimateTps",
+      "compactTps",
+      "effectiveTps",
+      "turnEffectiveTps",
+    ]) {
       if (!isNullableNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
     }
-  for (const key of ["effectiveSampleCount", "effectiveWindow"]) {
-    if (data[key] != null && !isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
-  }
-  if (data.speedTimingConfidence != null && !["high", "medium", "low"].includes(data.speedTimingConfidence)) {
-    return { ok: false, error: "speedTimingConfidence 字段无效" };
-  }
-  if (data.compactSpeedConfidence != null && !["high", "medium", "low"].includes(data.compactSpeedConfidence)) {
-    return { ok: false, error: "compactSpeedConfidence 字段无效" };
-  }
-  if (data.snapshot != null && typeof data.snapshot !== "boolean") return { ok: false, error: "snapshot 字段无效" };
-  // 这两个上限原本写成「等于监控侧上限」，形成隐藏耦合：
-  // 一旦监控侧放宽上限而面板未同步，面板会拒收整个负载 → 统计条什么数字都不显示，极难排查。
-  // 因此这里只拦「荒谬值」（防御异常/恶意负载），正常超限由监控侧负责截断。
-  // 监控侧对应常量：MAX_TURN_SUMMARIES / MAX_REQUEST_DETAILS（改动时无需同步本行）。
-  if (!Array.isArray(data.turns) || data.turns.length > 500) return { ok: false, error: "轮次摘要超出限制" };
-  if (!Array.isArray(data.requestDetails) || data.requestDetails.length > 500) return { ok: false, error: "请求明细超出限制" };
+    for (const key of ["effectiveSampleCount", "effectiveWindow"]) {
+      if (data[key] != null && !isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
+    }
+    if (data.speedTimingConfidence != null && !["high", "medium", "low"].includes(data.speedTimingConfidence)) {
+      return { ok: false, error: "speedTimingConfidence 字段无效" };
+    }
+    if (data.compactSpeedConfidence != null && !["high", "medium", "low"].includes(data.compactSpeedConfidence)) {
+      return { ok: false, error: "compactSpeedConfidence 字段无效" };
+    }
+    if (data.snapshot != null && typeof data.snapshot !== "boolean") return { ok: false, error: "snapshot 字段无效" };
+    // 这两个上限原本写成「等于监控侧上限」，形成隐藏耦合：
+    // 一旦监控侧放宽上限而面板未同步，面板会拒收整个负载 → 统计条什么数字都不显示，极难排查。
+    // 因此这里只拦「荒谬值」（防御异常/恶意负载），正常超限由监控侧负责截断。
+    // 监控侧对应常量：MAX_TURN_SUMMARIES / MAX_REQUEST_DETAILS（改动时无需同步本行）。
+    if (!Array.isArray(data.turns) || data.turns.length > 500) return { ok: false, error: "轮次摘要超出限制" };
+    if (!Array.isArray(data.requestDetails) || data.requestDetails.length > 500)
+      return { ok: false, error: "请求明细超出限制" };
     for (const turn of data.turns) {
-      if (!turn || !Number.isInteger(turn.index) || turn.index < 1 || typeof turn.startLabel !== "string" || !isNonNegativeNumber(turn.requests)) {
+      if (
+        !turn ||
+        !Number.isInteger(turn.index) ||
+        turn.index < 1 ||
+        typeof turn.startLabel !== "string" ||
+        !isNonNegativeNumber(turn.requests)
+      ) {
         return { ok: false, error: "轮次摘要字段无效" };
       }
       for (const key of ["input", "output", "total"]) {
@@ -709,8 +744,13 @@
     root.__tuiMetrics = { session, turn, requests, tps, hitRate, cached, output };
 
     // 悬浮冻结（方案甲）：指针停留期间不改写任何显示；移出后立即补一次渲染，避免留下旧值。
-    root.addEventListener("pointerenter", () => { state.hoverFrozen = true; });
-    root.addEventListener("pointerleave", () => { state.hoverFrozen = false; render(true); });
+    root.addEventListener("pointerenter", () => {
+      state.hoverFrozen = true;
+    });
+    root.addEventListener("pointerleave", () => {
+      state.hoverFrozen = false;
+      render(true);
+    });
     root.addEventListener("click", (event) => {
       if (event.button != null && event.button !== 0) return;
       event.preventDefault();
@@ -909,8 +949,12 @@
     ]);
     const sessionCells = [...sessionGrid.querySelectorAll(".tui-dialog-card-value")];
     parts.session = {
-      total: sessionCells[0], requests: sessionCells[1], pair: sessionCells[2],
-      tps: sessionCells[3], uncached: sessionCells[4], output: sessionCells[5],
+      total: sessionCells[0],
+      requests: sessionCells[1],
+      pair: sessionCells[2],
+      tps: sessionCells[3],
+      uncached: sessionCells[4],
+      output: sessionCells[5],
     };
     parts.session.tps.title = speedSampleTitle(data);
     parts.sections.push(dialogSection("会话累计", sessionGrid));
@@ -926,15 +970,23 @@
     ]);
     const turnCells = [...turnGrid.querySelectorAll(".tui-dialog-card-value")];
     parts.turn = {
-      total: turnCells[0], requests: turnCells[1], pair: turnCells[2],
-      tps: turnCells[3], uncached: turnCells[4], output: turnCells[5],
+      total: turnCells[0],
+      requests: turnCells[1],
+      pair: turnCells[2],
+      tps: turnCells[3],
+      uncached: turnCells[4],
+      output: turnCells[5],
     };
     parts.turn.tps.title = speedSampleTitle(data);
     parts.sections.push(dialogSection("当前提问统计", turnGrid));
 
     // 上下文使用
     const contextValue = textNode("span", "tui-dialog-context-value", tokenText(m.contextUsed));
-    const contextLimit = textNode("span", "tui-dialog-muted", m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`);
+    const contextLimit = textNode(
+      "span",
+      "tui-dialog-muted",
+      m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`,
+    );
     const contextTop = textNode("div", "tui-dialog-context-top");
     contextTop.append(contextValue, contextLimit);
     const contextFill = textNode("div", "tui-dialog-context-fill");
@@ -959,8 +1011,12 @@
     ]);
     const healthCells = [...healthGrid.querySelectorAll(".tui-dialog-card-value")];
     parts.health = {
-      status: healthCells[0], monitor: healthCells[1], page: healthCells[2], data: healthCells[3],
-      modelSwitches: healthCells[4], resets: healthCells[5],
+      status: healthCells[0],
+      monitor: healthCells[1],
+      page: healthCells[2],
+      data: healthCells[3],
+      modelSwitches: healthCells[4],
+      resets: healthCells[5],
     };
     const healthBox = textNode("div", "tui-dialog-health");
     const securityBox = textNode("div", "tui-dialog-security");
@@ -987,7 +1043,14 @@
     const requestList = textNode("div", "tui-dialog-list");
     const requestMore = dialogMoreButton("requests");
     requestSection.append(requestList, requestMore);
-    parts.requestList = { section: requestSection, list: requestList, notice: null, rows: [], fingerprint: "", more: requestMore };
+    parts.requestList = {
+      section: requestSection,
+      list: requestList,
+      notice: null,
+      rows: [],
+      fingerprint: "",
+      more: requestMore,
+    };
     parts.sections.push(requestSection);
 
     // 各轮摘要（标题与列表内容由 updateDetailsParts 填充）
@@ -996,7 +1059,15 @@
     const turnList = textNode("div", "tui-dialog-list");
     const turnMore = dialogMoreButton("turns");
     turnSection.append(turnTitle, turnList, turnMore);
-    parts.turnList = { section: turnSection, title: turnTitle, list: turnList, notice: null, rows: [], fingerprint: "", more: turnMore };
+    parts.turnList = {
+      section: turnSection,
+      title: turnTitle,
+      list: turnList,
+      notice: null,
+      rows: [],
+      fingerprint: "",
+      more: turnMore,
+    };
     parts.sections.push(turnSection);
 
     return parts;
@@ -1009,12 +1080,18 @@
     const wrap = textNode("div", "tui-dialog-start");
     const button = textNode("button", "tui-dialog-action", "启动监控");
     button.type = "button";
-    button.style.cssText = "display:block;width:100%;margin-top:8px;padding:8px 10px;font:inherit;font-size:12px;text-align:center;cursor:pointer;color:inherit;background:var(--tui-surface-2,rgba(127,127,127,.10));border:1px solid var(--tui-border,rgba(127,127,127,.28));border-radius:8px;";
-    const hint = textNode("div", "tui-dialog-start-hint", "点击复制启动命令 → Win+R 粘贴回车 → 按 Y 启动（自动关闭终端）");
+    button.style.cssText =
+      "display:block;width:100%;margin-top:8px;padding:8px 10px;font:inherit;font-size:12px;text-align:center;cursor:pointer;color:inherit;background:var(--tui-surface-2,rgba(127,127,127,.10));border:1px solid var(--tui-border,rgba(127,127,127,.28));border-radius:8px;";
+    const hint = textNode(
+      "div",
+      "tui-dialog-start-hint",
+      "点击复制启动命令 → Win+R 粘贴回车 → 按 Y 启动（自动关闭终端）",
+    );
     hint.style.cssText = "margin-top:6px;font-size:11px;line-height:1.5;text-align:center;opacity:.7;";
     // Win+R 不是 cmd.exe，不能使用 cmd 内建命令 start。
     // explorer.exe 是系统可执行文件，能稳定打开安装器创建的开始菜单快捷方式。
-    const command = 'explorer.exe "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Tokens UI For Codex - 启动监控.lnk"';
+    const command =
+      'explorer.exe "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Tokens UI For Codex - 启动监控.lnk"';
     const copyCommand = async () => {
       try {
         await navigator.clipboard.writeText(command);
@@ -1054,7 +1131,8 @@
     const button = textNode("button", "tui-dialog-more", "加载更多");
     button.type = "button";
     button.hidden = true;
-    button.style.cssText = "display:block;width:100%;margin-top:8px;padding:7px 10px;font:inherit;font-size:12px;text-align:center;cursor:pointer;color:inherit;background:var(--tui-surface-2,rgba(127,127,127,.10));border:1px solid var(--tui-border,rgba(127,127,127,.28));border-radius:8px;";
+    button.style.cssText =
+      "display:block;width:100%;margin-top:8px;padding:7px 10px;font:inherit;font-size:12px;text-align:center;cursor:pointer;color:inherit;background:var(--tui-surface-2,rgba(127,127,127,.10));border:1px solid var(--tui-border,rgba(127,127,127,.28));border-radius:8px;";
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1082,9 +1160,7 @@
     button.textContent = atLimit
       ? "已加载最新 " + fmtInt(loaded) + " " + unit + "（已达上限）"
       : "加载更多（已加载最新 " + fmtInt(loaded) + " / 共 " + fmtInt(total) + " " + unit + "）";
-    button.title = atLimit
-      ? "界面最多显示最近 500 " + unit + "；完整结构化记录保存在本地历史文件"
-      : "";
+    button.title = atLimit ? "界面最多显示最近 500 " + unit + "；完整结构化记录保存在本地历史文件" : "";
     button.hidden = false;
   }
 
@@ -1095,7 +1171,10 @@
     setCellText(parts.session.total, tokenText(data.sessionTotal));
     setCellText(parts.session.requests, fmtInt(data.requestCount));
     updatePairCell(parts.session.pair, m.sessionInput, m.sessionCached);
-    setCellText(parts.session.tps, data.effectiveTps == null ? "-- Tokens/s" : data.effectiveTps.toFixed(1) + " Tokens/s");
+    setCellText(
+      parts.session.tps,
+      data.effectiveTps == null ? "-- Tokens/s" : data.effectiveTps.toFixed(1) + " Tokens/s",
+    );
     parts.session.tps.title = speedSampleTitle(data);
     setCellText(parts.session.uncached, tokenText(m.sessionUncached));
     setCellText(parts.session.output, tokenText(data.sessionOutput));
@@ -1103,13 +1182,19 @@
     setCellText(parts.turn.total, tokenText(m.turnTotal));
     setCellText(parts.turn.requests, fmtInt(m.currentRequestCount));
     updatePairCell(parts.turn.pair, m.turnInput, m.turnCached);
-    setCellText(parts.turn.tps, data.turnEffectiveTps == null ? "-- Tokens/s" : data.turnEffectiveTps.toFixed(1) + " Tokens/s");
+    setCellText(
+      parts.turn.tps,
+      data.turnEffectiveTps == null ? "-- Tokens/s" : data.turnEffectiveTps.toFixed(1) + " Tokens/s",
+    );
     parts.turn.tps.title = speedSampleTitle(data);
     setCellText(parts.turn.uncached, tokenText(m.turnUncached));
     setCellText(parts.turn.output, tokenText(m.turnOutput));
 
     setCellText(parts.context.value, tokenText(m.contextUsed));
-    setCellText(parts.context.limit, m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`);
+    setCellText(
+      parts.context.limit,
+      m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`,
+    );
     const contextPercent = percent(m.contextUsed, m.modelContextWindow);
     const contextWidth = contextPercent == null ? "0%" : `${contextPercent}%`;
     if (parts.context.fill.style.width !== contextWidth) parts.context.fill.style.width = contextWidth;
@@ -1126,17 +1211,24 @@
     const injection = health.injectionAlert;
     if (parts.security) {
       const notices = [];
-      if (unknownClients.length) notices.push("检测到 " + unknownClients.length + " 个未知 CDP 客户端（可能也在使用 9229）");
+      if (unknownClients.length)
+        notices.push("检测到 " + unknownClients.length + " 个未知 CDP 客户端（可能也在使用 9229）");
       if (injection && injection.count) notices.push("页面已拒绝 " + injection.count + " 条无效负载");
       if (notices.length) {
         parts.security.box.hidden = false;
         setCellText(parts.security.text, notices.join(" · "));
-        const clientKey = unknownClients.map((item) => item.name + ":" + item.pid).join(",") + "|" + (injection ? injection.count : 0);
+        const clientKey =
+          unknownClients.map((item) => item.name + ":" + item.pid).join(",") + "|" + (injection ? injection.count : 0);
         if (parts.security.key !== clientKey) {
           parts.security.key = clientKey;
           parts.security.list.replaceChildren(
-            ...unknownClients.map((item) => textNode("div", "tui-dialog-security-row",
-              item.name + "  PID " + item.pid + "  ×" + (item.connections || 1))),
+            ...unknownClients.map((item) =>
+              textNode(
+                "div",
+                "tui-dialog-security-row",
+                item.name + "  PID " + item.pid + "  ×" + (item.connections || 1),
+              ),
+            ),
             ...(injection && injection.count
               ? [textNode("div", "tui-dialog-security-row", "被拒绝负载: " + injection.count + " 条")]
               : []),
@@ -1173,10 +1265,18 @@
     // 倒序展示：最新的一轮在最上面，列表底部是更早的轮次（配合「加载更多」向下翻旧数据）。
     const turns = Array.isArray(data.turns) ? data.turns.slice().reverse() : [];
     const turnTotalCount = data.turnTotalCount != null ? data.turnTotalCount : turns.length;
-    setCellText(parts.turnList.title, data.turnsTruncated
-      ? "各轮摘要（" + fmtInt(turnTotalCount) + " 轮）"
-      : `各轮摘要（${fmtInt(turns.length)} 轮）`);
-    updateMoreButton(parts.requestList.more, !!data.requestDetailsTruncated, requests.length, data.requestDetailTotal == null ? requests.length : data.requestDetailTotal, "条", state.requestsLimit);
+    setCellText(
+      parts.turnList.title,
+      data.turnsTruncated ? "各轮摘要（" + fmtInt(turnTotalCount) + " 轮）" : `各轮摘要（${fmtInt(turns.length)} 轮）`,
+    );
+    updateMoreButton(
+      parts.requestList.more,
+      !!data.requestDetailsTruncated,
+      requests.length,
+      data.requestDetailTotal == null ? requests.length : data.requestDetailTotal,
+      "条",
+      state.requestsLimit,
+    );
     updateMoreButton(parts.turnList.more, !!data.turnsTruncated, turns.length, turnTotalCount, "轮", state.turnsLimit);
 
     const turnRebuilt = applyListUpdate(parts.turnList, {
@@ -1207,12 +1307,7 @@
   function serviceBadgeText() {
     const badge = document.querySelector(".codex-service-tier-badge");
     if (!badge) return "";
-    return String(
-      badge.getAttribute("aria-label") ||
-      badge.getAttribute("title") ||
-      badge.textContent ||
-      "",
-    ).trim();
+    return String(badge.getAttribute("aria-label") || badge.getAttribute("title") || badge.textContent || "").trim();
   }
 
   function healthTone(data) {
@@ -1220,8 +1315,13 @@
     const status = data.health && data.health.status;
     if (status === "healthy" && data.health.pageAttached && data.health.dataFresh) return "green";
     if (["failed", "protocol-mismatch", "target-selection-required"].includes(status)) return "red";
-    if (state.monitorStale || status === "stale-data" || status === "recovering" ||
-      (typeof status === "string" && status.startsWith("waiting-"))) return "yellow";
+    if (
+      state.monitorStale ||
+      status === "stale-data" ||
+      status === "recovering" ||
+      (typeof status === "string" && status.startsWith("waiting-"))
+    )
+      return "yellow";
     return "yellow";
   }
 
@@ -1248,22 +1348,26 @@
     const compactWindow = Number.isFinite(data && data.compactSpeedWindow) ? data.compactSpeedWindow : 5;
     const compactConfidence = data && data.compactSpeedConfidence ? data.compactSpeedConfidence : "low";
     const compactLabel = compactConfidence === "high" ? "高" : compactConfidence === "medium" ? "中" : "低";
-    const compact = Number.isFinite(data && data.compactTps) ? `≈${Math.round(data.compactTps)} Tokens/s` : "-- Tokens/s";
+    const compact = Number.isFinite(data && data.compactTps)
+      ? `≈${Math.round(data.compactTps)} Tokens/s`
+      : "-- Tokens/s";
     const wall = Number.isFinite(data && data.turnWallTps) ? `${data.turnWallTps.toFixed(1)} Tokens/s` : "-- Tokens/s";
-    return `有效速度 · 最近 ${count}/${window} 个有效轮次 · 时间置信度 ${confidenceLabel}；` +
+    return (
+      `有效速度 · 最近 ${count}/${window} 个有效轮次 · 时间置信度 ${confidenceLabel}；` +
       `紧凑条稳健估算 ${compact}（${compactCount}/${compactWindow} 样本，置信度 ${compactLabel}）；` +
-      `本轮墙钟平均 ${wall}`;
+      `本轮墙钟平均 ${wall}`
+    );
   }
 
- function detailMetrics(data) {
-   const turn = currentTurnOf(data);
+  function detailMetrics(data) {
+    const turn = currentTurnOf(data);
     const sessionSplit = cacheSplit(data && data.sessionInput, data && data.sessionCached);
     const turnSplit = cacheSplit(
       data && data.turnInput != null ? data.turnInput : turn && turn.input,
       data && data.turnCached != null ? data.turnCached : turn && turn.cached,
     );
-   return {
-     turn,
+    return {
+      turn,
       sessionInput: sessionSplit.input,
       sessionCached: sessionSplit.cached,
       sessionUncached: sessionSplit.uncached,
@@ -1272,13 +1376,14 @@
       turnUncached: turnSplit.uncached,
       turnOutput: data && data.turnOutput != null ? data.turnOutput : turn && turn.output,
       turnTotal: data && data.turnTotal != null ? data.turnTotal : turn && turn.total,
-      currentRequestCount: data && data.currentTurnRequestCount != null
-        ? data.currentTurnRequestCount
-        : data && data.requestDetailTotal != null
-          ? data.requestDetailTotal
-        : turn && turn.requests != null
-          ? turn.requests
-          : 0,
+      currentRequestCount:
+        data && data.currentTurnRequestCount != null
+          ? data.currentTurnRequestCount
+          : data && data.requestDetailTotal != null
+            ? data.requestDetailTotal
+            : turn && turn.requests != null
+              ? turn.requests
+              : 0,
       contextUsed: data && data.contextUsed != null ? data.contextUsed : 0,
       modelContextWindow: data && data.modelContextWindow != null ? data.modelContextWindow : null,
     };
@@ -1298,9 +1403,15 @@
     if (!data) {
       // 无数据：丢弃骨架并显示提示；数据恢复后重建（此路径开销可忽略）。
       dialog.__tuiParts = null;
-      body.replaceChildren(textNode("div", "tui-dialog-notice", state.protocolError
-        ? "统计协议与监控程序不匹配，请重新加载 Codex++ 用户脚本和监控进程。"
-        : "监控数据尚未到达。统计条会在监控进程连接后自动更新。"));
+      body.replaceChildren(
+        textNode(
+          "div",
+          "tui-dialog-notice",
+          state.protocolError
+            ? "统计协议与监控程序不匹配，请重新加载 Codex++ 用户脚本和监控进程。"
+            : "监控数据尚未到达。统计条会在监控进程连接后自动更新。",
+        ),
+      );
       return true;
     }
 
@@ -1340,11 +1451,11 @@
     header.append(heading, close);
     const body = textNode("div", "tui-dialog-body");
     dialog.append(header, body);
-   dialog.__tuiBody = body;
-   dialog.__tuiSubtitle = subtitle;
-   dialog.__tuiStatusDot = healthDot;
+    dialog.__tuiBody = body;
+    dialog.__tuiSubtitle = subtitle;
+    dialog.__tuiStatusDot = healthDot;
     dialog.__tuiClose = close;
-   return dialog;
+    return dialog;
   }
 
   function positionDialog() {
@@ -1402,17 +1513,21 @@
       state.previousFocus = document.activeElement;
       state.dialog = buildDialog();
       document.body.appendChild(state.dialog);
-    applyTheme();
+      applyTheme();
     }
     state.dialog.setAttribute("data-open", "true");
     state.dialog.style.visibility = "hidden";
     state.root && state.root.setAttribute("aria-expanded", "true");
     renderDetails();
     positionDialog();
-   state.dialog.style.visibility = "visible";
+    state.dialog.style.visibility = "visible";
     tuneGlass(state.dialog);
     if (state.dialog.__tuiClose && typeof state.dialog.__tuiClose.focus === "function") {
-      try { state.dialog.__tuiClose.focus({ preventScroll: true }); } catch { state.dialog.__tuiClose.focus(); }
+      try {
+        state.dialog.__tuiClose.focus({ preventScroll: true });
+      } catch {
+        state.dialog.__tuiClose.focus();
+      }
     }
     document.addEventListener("pointerdown", onDocumentPointerDown, true);
     // mousedown 兜底：个别环境不派发 PointerEvent 时仍能点击外部关闭。
@@ -1436,16 +1551,18 @@
     document.removeEventListener("mousedown", onDocumentPointerDown, true);
     window.removeEventListener("resize", positionDialog);
     window.removeEventListener("scroll", positionDialog, true);
-   const dialog = state.dialog;
-    const focusTarget = state.previousFocus && state.previousFocus.isConnected
-      ? state.previousFocus
-      : state.root;
-   state.dialog = null;
+    const dialog = state.dialog;
+    const focusTarget = state.previousFocus && state.previousFocus.isConnected ? state.previousFocus : state.root;
+    state.dialog = null;
     if (dialog.parentElement) dialog.remove();
     if (state.root) {
       state.root.setAttribute("aria-expanded", "false");
       if (restoreFocus && focusTarget && typeof focusTarget.focus === "function") {
-        try { focusTarget.focus({ preventScroll: true }); } catch { focusTarget.focus(); }
+        try {
+          focusTarget.focus({ preventScroll: true });
+        } catch {
+          focusTarget.focus();
+        }
       }
     }
     state.previousFocus = null;
@@ -1461,11 +1578,15 @@
     if (hex) {
       let h = hex[1];
       if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
-      r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+      r = parseInt(h.slice(0, 2), 16);
+      g = parseInt(h.slice(2, 4), 16);
+      b = parseInt(h.slice(4, 6), 16);
     } else {
       const rgb = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i.exec(colorText);
       if (!rgb) return null;
-      r = Number(rgb[1]); g = Number(rgb[2]); b = Number(rgb[3]);
+      r = Number(rgb[1]);
+      g = Number(rgb[2]);
+      b = Number(rgb[3]);
     }
     if (![r, g, b].every(Number.isFinite)) return null;
     return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
@@ -1480,7 +1601,11 @@
     if (scheme.includes("light") && !scheme.includes("dark")) return "light";
     const lum = luminanceOf(getComputedStyle(root).getPropertyValue("--color-text"));
     if (lum != null) return lum > 0.5 ? "dark" : "light";
-    try { return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; } catch (e) { return "light"; }
+    try {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    } catch (e) {
+      return "light";
+    }
   }
 
   function setThemeAttr(el, theme) {
@@ -1499,9 +1624,11 @@
   }
 
   function findContextRing() {
-    const candidates = [...document.querySelectorAll(
-      '[aria-label*="上下文用量"], [aria-label*="上下文窗口"], [aria-label*="Context usage" i], [aria-label*="Context window" i]'
-    )].filter((node) => {
+    const candidates = [
+      ...document.querySelectorAll(
+        '[aria-label*="上下文用量"], [aria-label*="上下文窗口"], [aria-label*="Context usage" i], [aria-label*="Context window" i]',
+      ),
+    ].filter((node) => {
       const rect = node.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 && node.querySelector("svg");
     });
@@ -1565,7 +1692,9 @@
     // 不能回退到单条尖峰；只有旧监控完全没有 compactTps 字段时才兼容回退。
     const hasCompactField = hasData && Object.prototype.hasOwnProperty.call(d, "compactTps");
     const estimatedSpeed = hasCompactField
-      ? (Number.isFinite(d.compactTps) ? d.compactTps : null)
+      ? Number.isFinite(d.compactTps)
+        ? d.compactTps
+        : null
       : hasData && Number.isFinite(d.genEstimateTps)
         ? d.genEstimateTps
         : hasData && Number.isFinite(d.lastRequestTps)
@@ -1575,30 +1704,40 @@
 
     // 悬浮冻结：以下所有写入在指针悬停时整体跳过（移出后由 pointerleave 补渲染）。
     if (!state.hoverFrozen) {
-    setMetric(metrics.session, hasData ? fmtShort(d.sessionTotal) : "--");
-    setMetric(metrics.turn, hasData ? fmtShort(turnTotal) : "--");
-    setMetric(metrics.requests, hasData ? fmtInt(d.requestCount) : "--");
-    setMetric(metrics.tps, tpsText);
-    setMetric(metrics.cached, hasData ? fmtShort(turnCached) : "--");
-    setMetric(
-      metrics.hitRate,
-      hasData && d.turnCacheHitRate != null ? (d.turnCacheHitRate * 100).toFixed(1) + "%" : "--",
-    );
-    setMetric(metrics.output, hasData ? fmtShort(turnOutput) : "--");
+      setMetric(metrics.session, hasData ? fmtShort(d.sessionTotal) : "--");
+      setMetric(metrics.turn, hasData ? fmtShort(turnTotal) : "--");
+      setMetric(metrics.requests, hasData ? fmtInt(d.requestCount) : "--");
+      setMetric(metrics.tps, tpsText);
+      setMetric(metrics.cached, hasData ? fmtShort(turnCached) : "--");
+      setMetric(
+        metrics.hitRate,
+        hasData && d.turnCacheHitRate != null ? (d.turnCacheHitRate * 100).toFixed(1) + "%" : "--",
+      );
+      setMetric(metrics.output, hasData ? fmtShort(turnOutput) : "--");
 
-    const sessionSplit = cacheSplit(d && d.sessionInput, d && d.sessionCached);
-    const sessionInput = sessionSplit.input;
-    const sessionCached = sessionSplit.cached;
-    const sessionUncached = sessionSplit.uncached;
-    const label = hasData
-      ? `生成估算速度 ${tpsText}，会话 ${fmtInt(d.sessionTotal)}，当前提问 ${fmtInt(turnTotal)}，请求 ${fmtInt(d.requestCount)}；当前提问命中 ${fmtInt(turnCached)}，未命中 ${fmtInt(turnUncached)}，输出 ${fmtInt(turnOutput)}；会话输入 ${fmtInt(sessionInput)}，命中 ${fmtInt(sessionCached)}，未命中 ${fmtInt(sessionUncached)}，输出 ${fmtInt(d.sessionOutput)}`
-      : state.protocolError ? "Token 统计协议不匹配" : "Token 统计等待监控数据";
-    const staleNote = state.monitorStale ? "；监控可能已停止，打开详情可手动启动" : "";
-    const accessibleLabel = `${label}${staleNote}；左键查看详细统计`;
-    if (state.root.getAttribute("aria-label") !== accessibleLabel) state.root.setAttribute("aria-label", accessibleLabel);
-    state.root.title = accessibleLabel;
-    state.root.classList.toggle("tui-native-stale", !hasData || state.monitorStale || !!(d && d.health && d.health.status !== "healthy"));
-    state.root.classList.toggle("tui-native-error", !!state.protocolError || !!(d && d.health && ["failed", "protocol-mismatch", "target-selection-required"].includes(d.health.status)));
+      const sessionSplit = cacheSplit(d && d.sessionInput, d && d.sessionCached);
+      const sessionInput = sessionSplit.input;
+      const sessionCached = sessionSplit.cached;
+      const sessionUncached = sessionSplit.uncached;
+      const label = hasData
+        ? `生成估算速度 ${tpsText}，会话 ${fmtInt(d.sessionTotal)}，当前提问 ${fmtInt(turnTotal)}，请求 ${fmtInt(d.requestCount)}；当前提问命中 ${fmtInt(turnCached)}，未命中 ${fmtInt(turnUncached)}，输出 ${fmtInt(turnOutput)}；会话输入 ${fmtInt(sessionInput)}，命中 ${fmtInt(sessionCached)}，未命中 ${fmtInt(sessionUncached)}，输出 ${fmtInt(d.sessionOutput)}`
+        : state.protocolError
+          ? "Token 统计协议不匹配"
+          : "Token 统计等待监控数据";
+      const staleNote = state.monitorStale ? "；监控可能已停止，打开详情可手动启动" : "";
+      const accessibleLabel = `${label}${staleNote}；左键查看详细统计`;
+      if (state.root.getAttribute("aria-label") !== accessibleLabel)
+        state.root.setAttribute("aria-label", accessibleLabel);
+      state.root.title = accessibleLabel;
+      state.root.classList.toggle(
+        "tui-native-stale",
+        !hasData || state.monitorStale || !!(d && d.health && d.health.status !== "healthy"),
+      );
+      state.root.classList.toggle(
+        "tui-native-error",
+        !!state.protocolError ||
+          !!(d && d.health && ["failed", "protocol-mismatch", "target-selection-required"].includes(d.health.status)),
+      );
     }
     if (state.dialog) {
       // 每次都走增量更新（不再用 __tuiRenderedDataKey 门控，原因见 DATA_EVENT 处注释）。
@@ -1640,7 +1779,8 @@
         window.__tuiForCodexStatus = reason;
         window.__tuiForCodexStatusAt = new Date().toISOString();
         console.warn(
-          "[Tokens UI For Codex] 统计条未挂载: " + reason +
+          "[Tokens UI For Codex] 统计条未挂载: " +
+            reason +
             " —— 多为 Codex 页面结构调整所致（例如上下文圆圈的 aria-label 或输入区容器变了）。" +
             "Codex 本体不受影响；可在 Codex 中让 Agent 读取本状态并更新选择器。",
         );
@@ -1676,7 +1816,8 @@
     // appendChild 对已存在的节点是「移动」（MDN），会产生 childList 变更 →
     // 触发重挂载 → 每帧循环（P3）。
     const before = point.before && point.before.parentElement === point.container ? point.before : null;
-    const alreadyPlaced = state.root.parentElement === point.container &&
+    const alreadyPlaced =
+      state.root.parentElement === point.container &&
       (before ? state.root.nextSibling === before : state.root === point.container.lastElementChild);
     if (!alreadyPlaced) {
       try {
@@ -1688,7 +1829,9 @@
           "[Tokens UI For Codex] 统计条插入失败，已降级为追加到容器末尾: " +
             (error && error.message ? error.message : error),
         );
-        try { point.container.appendChild(state.root); } catch {}
+        try {
+          point.container.appendChild(state.root);
+        } catch {}
       }
     }
     observeContainer(point.container);
@@ -1732,7 +1875,8 @@
           if (touched.length > 0 && touched.every((node) => node === state.root)) return false;
         }
         if (state.dialog && (record.target === state.dialog || state.dialog.contains(record.target))) return false;
-        if (state.container && (record.target === state.container || state.container.contains(record.target))) return true;
+        if (state.container && (record.target === state.container || state.container.contains(record.target)))
+          return true;
         if (record.type === "attributes" && record.attributeName === "aria-label") {
           const label = record.target && record.target.getAttribute ? record.target.getAttribute("aria-label") : "";
           return typeof label === "string" && /上下文用量|上下文窗口|context usage|context window/i.test(label);
@@ -1748,7 +1892,12 @@
             return (
               (typeof label === "string" && /上下文用量|上下文窗口|context usage|context window/i.test(label)) ||
               (node.childElementCount > 0 &&
-                !!(node.querySelector && node.querySelector('[aria-label*="上下文用量"], [aria-label*="上下文窗口"], [aria-label*="Context usage" i], [aria-label*="Context window" i]')))
+                !!(
+                  node.querySelector &&
+                  node.querySelector(
+                    '[aria-label*="上下文用量"], [aria-label*="上下文窗口"], [aria-label*="Context usage" i], [aria-label*="Context window" i]',
+                  )
+                ))
             );
           });
         }
@@ -1799,8 +1948,14 @@
   function canonicalJson(value) {
     if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
     if (value && typeof value === "object") {
-      return "{" + Object.keys(value).sort()
-        .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+      return (
+        "{" +
+        Object.keys(value)
+          .sort()
+          .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key]))
+          .join(",") +
+        "}"
+      );
     }
     return JSON.stringify(value);
   }
@@ -1808,7 +1963,13 @@
   async function hmacHex(key, text) {
     let imported = hmacKeyCache.get(key);
     if (!imported) {
-      imported = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      imported = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(key),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
       hmacKeyCache.set(key, imported);
     }
     const signature = await crypto.subtle.sign("HMAC", imported, new TextEncoder().encode(text));
@@ -1834,7 +1995,8 @@
     }
     const ts = Number(auth.ts);
     if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > 30000) return { ok: false, reason: "stale" };
-    if (!Number.isInteger(auth.seq) || auth.seq < 1 || auth.seq <= lastAuthSeq) return { ok: false, reason: "sequence" };
+    if (!Number.isInteger(auth.seq) || auth.seq < 1 || auth.seq <= lastAuthSeq)
+      return { ok: false, reason: "sequence" };
     if (!auth.nonce || seenNonces.has(auth.nonce)) return { ok: false, reason: "replay" };
     const body = { ...data };
     delete body.auth;

@@ -30,11 +30,7 @@ import {
   normalizeHealth,
   validatePayload,
 } from "./protocol.mjs";
-import {
-  robustSpeedSummary,
-  unionDurationMs,
-  SPEED_SAMPLE_WINDOW,
-} from "./speed-stats.mjs";
+import { robustSpeedSummary, unionDurationMs, SPEED_SAMPLE_WINDOW } from "./speed-stats.mjs";
 import { UsageHistoryArchive } from "./history-archive.mjs";
 
 const SESSIONS_DIR = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
@@ -46,7 +42,6 @@ const MAX_TURN_SUMMARIES = 500;
 // 推送窗口：弹层关闭时只推最近 5 轮（极简），打开时 10 轮 + 10 条请求明细，「加载更多」每次 +50 / +20。
 const TURN_WINDOW_CLOSED = 5;
 const TURN_WINDOW_OPEN = 10;
-const TURN_WINDOW_STEP = 50;
 const ACTIVE_ID_CACHE_MS = 15000;
 const CLIENT_AUDIT_INTERVAL_MS = 15000;
 const CLIENT_AUDIT_LOG_COOLDOWN_MS = 300000;
@@ -128,7 +123,7 @@ function clearMonitorLock() {
 
 function readProcessCommandLineByPid(pid) {
   return new Promise((resolve) => {
-    const script = "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=" + pid + "\"; if ($p) { $p.CommandLine }";
+    const script = '$p = Get-CimInstance Win32_Process -Filter "ProcessId=' + pid + '"; if ($p) { $p.CommandLine }';
     execFile(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", script],
@@ -290,7 +285,9 @@ function filePrefixFingerprint(file, length = FILE_FINGERPRINT_BYTES) {
   } catch {
     return null;
   } finally {
-    try { fs.closeSync(fd); } catch {}
+    try {
+      fs.closeSync(fd);
+    } catch {}
   }
 }
 
@@ -298,7 +295,8 @@ function modelValueFromEvent(event) {
   const payload = event && event.payload;
   if (!payload || typeof payload !== "object") return null;
   for (const key of ["model", "model_slug", "model_name"]) {
-    if (typeof payload[key] === "string" && payload[key].trim() && payload[key].length <= 128) return payload[key].trim();
+    if (typeof payload[key] === "string" && payload[key].trim() && payload[key].length <= 128)
+      return payload[key].trim();
   }
   return null;
 }
@@ -316,7 +314,9 @@ const MAX_GEN_GAP_MS = 5 * 60 * 1000;
 const EFFECTIVE_SPEED_WINDOW = 25;
 
 function normalizedItemType(value) {
-  return String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return String(value || "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
 }
 
 function isGenerationItemType(value) {
@@ -326,7 +326,9 @@ function isGenerationItemType(value) {
 
 function isToolItemType(value) {
   const type = normalizedItemType(value);
-  return ["commandexecution", "filechange", "mcptoolcall", "websearch", "imagegeneration", "toolexecution"].includes(type);
+  return ["commandexecution", "filechange", "mcptoolcall", "websearch", "imagegeneration", "toolexecution"].includes(
+    type,
+  );
 }
 
 function trackGenWindow(state, event, timestamp) {
@@ -530,18 +532,40 @@ function processParserEvent(state, event) {
     ts: timestamp,
     ordinal: Number.isFinite(event.ordinal) ? event.ordinal : null,
     genMs: takeGenWindow(state),
-    total: info.total_token_usage && Number.isFinite(info.total_token_usage.total_tokens) ? info.total_token_usage.total_tokens : null,
+    total:
+      info.total_token_usage && Number.isFinite(info.total_token_usage.total_tokens)
+        ? info.total_token_usage.total_tokens
+        : null,
     input: Number.isFinite(last.input_tokens) ? last.input_tokens : null,
     output: Number.isFinite(last.output_tokens) ? last.output_tokens : null,
     cached: Number.isFinite(last.cached_input_tokens) ? last.cached_input_tokens : null,
     lastTotal: Number.isFinite(last.total_tokens) ? last.total_tokens : null,
     totalInfo: {
-      input: info.total_token_usage && Number.isFinite(info.total_token_usage.input_tokens) ? info.total_token_usage.input_tokens : null,
-      cached: info.total_token_usage && Number.isFinite(info.total_token_usage.cached_input_tokens) ? info.total_token_usage.cached_input_tokens : null,
-      output: info.total_token_usage && Number.isFinite(info.total_token_usage.output_tokens) ? info.total_token_usage.output_tokens : null,
+      input:
+        info.total_token_usage && Number.isFinite(info.total_token_usage.input_tokens)
+          ? info.total_token_usage.input_tokens
+          : null,
+      cached:
+        info.total_token_usage && Number.isFinite(info.total_token_usage.cached_input_tokens)
+          ? info.total_token_usage.cached_input_tokens
+          : null,
+      output:
+        info.total_token_usage && Number.isFinite(info.total_token_usage.output_tokens)
+          ? info.total_token_usage.output_tokens
+          : null,
     },
   };
-  const countKey = JSON.stringify([count.ts, count.total, count.input, count.output, count.cached, count.lastTotal, count.totalInfo.input, count.totalInfo.cached, count.totalInfo.output]);
+  const countKey = JSON.stringify([
+    count.ts,
+    count.total,
+    count.input,
+    count.output,
+    count.cached,
+    count.lastTotal,
+    count.totalInfo.input,
+    count.totalInfo.cached,
+    count.totalInfo.output,
+  ]);
   if (countKey !== state.previousCountKey) {
     state.previousCountKey = countKey;
     state.counts.push(count);
@@ -610,7 +634,8 @@ class IncrementalRolloutParser {
       const currentPrefix = filePrefixFingerprint(this.file, this.filePrefixLength);
       prefixChanged = currentPrefix == null || currentPrefix !== this.filePrefixFingerprint;
     }
-    const fileRecreated = this.offset > stat.size ||
+    const fileRecreated =
+      this.offset > stat.size ||
       (this.lastBirthtimeMs && stat.birthtimeMs && this.lastBirthtimeMs !== stat.birthtimeMs) ||
       (this.lastIno != null && stat.ino != null && this.lastIno !== stat.ino) ||
       prefixChanged;
@@ -641,7 +666,9 @@ class IncrementalRolloutParser {
           const line = this.pending.slice(0, newline).replace(/\r$/, "");
           this.pending = this.pending.slice(newline + 1);
           if (line.trim()) {
-            try { processParserEvent(this, JSON.parse(line)); } catch {}
+            try {
+              processParserEvent(this, JSON.parse(line));
+            } catch {}
           }
         }
       }
@@ -660,19 +687,26 @@ class IncrementalRolloutParser {
     } catch {
       return null;
     } finally {
-      try { fs.closeSync(fd); } catch {}
+      try {
+        fs.closeSync(fd);
+      } catch {}
     }
     this.filePrefixLength = Math.min(stat.size, FILE_FINGERPRINT_BYTES);
-    this.filePrefixFingerprint = this.filePrefixLength > 0
-      ? filePrefixFingerprint(this.file, this.filePrefixLength) || ""
-      : "";
+    this.filePrefixFingerprint =
+      this.filePrefixLength > 0 ? filePrefixFingerprint(this.file, this.filePrefixLength) || "" : "";
     return this.toParsed();
   }
 
   toParsed() {
     if (!this.dirty && this.snapshotCache) return this.snapshotCache;
-    if (!this.counts.length && !this.usageRecords.length && !this.userMessages.length && !this.turnContexts.length
-      && !this.taskCompletions.length && !this.itemTimings.length) {
+    if (
+      !this.counts.length &&
+      !this.usageRecords.length &&
+      !this.userMessages.length &&
+      !this.turnContexts.length &&
+      !this.taskCompletions.length &&
+      !this.itemTimings.length
+    ) {
       this.snapshotCache = null;
       this.dirty = false;
       return null;
@@ -756,8 +790,7 @@ function printStats(stats, { detail = false } = {}) {
     sessionLine += "  输入 " + compactNumber(stats.sessionInput);
     if (stats.sessionCached != null) {
       const uncached = Math.max(0, stats.sessionInput - stats.sessionCached);
-      sessionLine +=
-        "（缓存命中 " + compactNumber(stats.sessionCached) + "，未命中 " + compactNumber(uncached) + "）";
+      sessionLine += "（缓存命中 " + compactNumber(stats.sessionCached) + "，未命中 " + compactNumber(uncached) + "）";
     }
     sessionLine += " + 输出 " + compactNumber(stats.sessionOutput);
   }
@@ -769,17 +802,33 @@ function printStats(stats, { detail = false } = {}) {
   stats.turns.forEach((turn, turnIndex) => {
     const requests = turn.requestCount != null ? turn.requestCount : turn.requests.length;
     lines.push(
-      "  T" + (turnIndex + 1) + "  " + (turn.startLabel || "??:??") + "  " + compactNumber(turn.total) +
-        " tokens (输入 " + compactNumber(turn.input) + " + 输出 " + compactNumber(turn.output) + "), " +
-        requests + " 次请求",
+      "  T" +
+        (turnIndex + 1) +
+        "  " +
+        (turn.startLabel || "??:??") +
+        "  " +
+        compactNumber(turn.total) +
+        " tokens (输入 " +
+        compactNumber(turn.input) +
+        " + 输出 " +
+        compactNumber(turn.output) +
+        "), " +
+        requests +
+        " 次请求",
     );
     if (!detail) return;
     turn.requests.forEach((request, requestIndex) => {
       lines.push(
-        "      #" + (requestIndex + 1) + " " + (request.ts || "").slice(11, 19) +
-          "  in " + compactNumber(request.input) +
-          "  out " + compactNumber(request.output) +
-          "  total " + compactNumber(request.lastTotal),
+        "      #" +
+          (requestIndex + 1) +
+          " " +
+          (request.ts || "").slice(11, 19) +
+          "  in " +
+          compactNumber(request.input) +
+          "  out " +
+          compactNumber(request.output) +
+          "  total " +
+          compactNumber(request.lastTotal),
       );
     });
   });
@@ -792,7 +841,6 @@ function printStats(stats, { detail = false } = {}) {
 const MAX_REQUEST_DETAILS = 500;
 const REQUEST_WINDOW_CLOSED = 0;
 const REQUEST_WINDOW_OPEN = 10;
-const REQUEST_WINDOW_STEP = 20;
 
 function requestPayloadFor(request, index) {
   const input = request.input != null ? request.input : null;
@@ -860,7 +908,7 @@ function buildStats(parsed, options = {}) {
 }
 
 function createUnifiedRecordKey(record) {
-  return record.responseId || (String(record.ts) + "|" + String(record.total) + "|" + String(record.turnId || ""));
+  return record.responseId || String(record.ts) + "|" + String(record.total) + "|" + String(record.turnId || "");
 }
 
 // 跨格式身份 = 内容恒等：key = 线程累计 | 本轮量（与参考脚本 lag-methods.cjs / classify.cjs 一致），
@@ -1058,9 +1106,7 @@ function collectUnifiedRecords(parsed) {
   const legacyInTimeOrder = [...legacyRecords].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
   for (const record of legacyInTimeOrder) {
     const key = contentKeyOf(record);
-    const candidates = key == null
-      ? []
-      : (modernByKey.get(key) || []).filter((body) => !claimedModern.has(body));
+    const candidates = key == null ? [] : (modernByKey.get(key) || []).filter((body) => !claimedModern.has(body));
     if (candidates.length) {
       const hit = nearestBody(candidates, Date.parse(record.ts));
       claimedModern.add(hit.item);
@@ -1145,18 +1191,18 @@ function calculateTurnSpeedSample(turn, task, items) {
   const ttftMs = task && Number.isFinite(task.ttftMs) && task.ttftMs >= 0 ? task.ttftMs : null;
   const genEstimateTps = output > 0 && genMs > 0 ? output / (genMs / 1000) : null;
   const effectiveTps = output > 0 && effectiveMs > 0 ? output / (effectiveMs / 1000) : null;
-  const timingCoverage = durationMs > 0
-    ? Math.max(0, Math.min(1, ((ttftMs || 0) + genMs + toolMs) / durationMs))
-    : null;
-  const timingSource = task && generationMs > 0
-    ? "task+item"
-    : task && legacyGenerationMs > 0
-      ? "task+legacy"
-      : generationMs > 0
-        ? "item"
-        : legacyGenerationMs > 0
-          ? "legacy"
-          : "none";
+  const timingCoverage =
+    durationMs > 0 ? Math.max(0, Math.min(1, ((ttftMs || 0) + genMs + toolMs) / durationMs)) : null;
+  const timingSource =
+    task && generationMs > 0
+      ? "task+item"
+      : task && legacyGenerationMs > 0
+        ? "task+legacy"
+        : generationMs > 0
+          ? "item"
+          : legacyGenerationMs > 0
+            ? "legacy"
+            : "none";
   let timingQuality = "low";
   if (effectiveTps != null && task && genMs > 0) {
     timingQuality = generationMs > 0 && timingCoverage != null && timingCoverage >= 0.8 ? "high" : "medium";
@@ -1301,7 +1347,7 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
       turn.legacyGenMs += turnGenMs;
       if (Number.isFinite(record.output) && record.output > 0) turn.genOutputTotal += record.output;
     }
-    const turnKey = record.turnId || ("boundary:" + String(turnIndex));
+    const turnKey = record.turnId || "boundary:" + String(turnIndex);
     if (!turnCounters.has(turnKey)) turnCounters.set(turnKey, createCumulativeCounters());
 
     const normalizedThreadUsage = normalizeCumulativeUsage(record.threadUsage || {}, threadCounters);
@@ -1319,18 +1365,16 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
       for (const key of ["input", "output", "cached", "total"]) {
         const normalized = normalizedThreadUsage[key];
         const current = requestValues[key];
-        turn.threadBase[key] = Number.isFinite(normalized) && Number.isFinite(current)
-          ? Math.max(0, normalized - current)
-          : null;
+        turn.threadBase[key] =
+          Number.isFinite(normalized) && Number.isFinite(current) ? Math.max(0, normalized - current) : null;
       }
     }
     const derivedTurnUsage = {};
     for (const key of ["input", "output", "cached", "total"]) {
       const normalized = normalizedThreadUsage[key];
       const base = turn.threadBase[key];
-      derivedTurnUsage[key] = Number.isFinite(normalized) && Number.isFinite(base)
-        ? Math.max(0, normalized - base)
-        : null;
+      derivedTurnUsage[key] =
+        Number.isFinite(normalized) && Number.isFinite(base) ? Math.max(0, normalized - base) : null;
     }
     latestThreadUsage = mergeUsage(latestThreadUsage, normalizedThreadUsage);
     if (Number.isFinite(record.requestTotal)) latestContextUsed = record.requestTotal;
@@ -1384,12 +1428,16 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     turn.genEstimateTps = sample.genEstimateTps;
     const startMs = turn.start ? Date.parse(turn.start) : null;
     const lastMs = turn.lastTs ? Date.parse(turn.lastTs) : null;
-    const observedWallMs = Number.isFinite(startMs) && Number.isFinite(lastMs) && lastMs > startMs
-      ? lastMs - startMs
-      : null;
-    turn.wallMs = task && task.durationMs
-      ? task.durationMs
-      : (observedWallMs != null ? observedWallMs : (sample.generationSpanMs > 0 ? sample.generationSpanMs : null));
+    const observedWallMs =
+      Number.isFinite(startMs) && Number.isFinite(lastMs) && lastMs > startMs ? lastMs - startMs : null;
+    turn.wallMs =
+      task && task.durationMs
+        ? task.durationMs
+        : observedWallMs != null
+          ? observedWallMs
+          : sample.generationSpanMs > 0
+            ? sample.generationSpanMs
+            : null;
     turn.wallTps = turn.output > 0 && turn.wallMs > 0 ? turn.output / (turn.wallMs / 1000) : null;
     turn.effectiveMs = sample.effectiveMs;
     turn.effectiveTps = sample.effectiveTps;
@@ -1418,24 +1466,29 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
   // 本轮加权平均速度：与 lastRequestTps 同口径，但把范围收在「当前这一轮」内。
   // 必须在这里算：payloadFor 拿到的是对外映射后的 turns（不含内部累加器）。
   const lastTurnForTps = turns.length ? turns[turns.length - 1] : null;
-  const turnTps = lastTurnForTps && lastTurnForTps.genMsTotal > 0 && lastTurnForTps.genOutputTotal > 0
-    ? lastTurnForTps.genOutputTotal / (lastTurnForTps.genMsTotal / 1000)
-    : null;
-  const speedSamples = turns.filter((turn) => turn.effectiveTps != null && turn.output > 0 && turn.timingQuality !== "low");
+  const turnTps =
+    lastTurnForTps && lastTurnForTps.genMsTotal > 0 && lastTurnForTps.genOutputTotal > 0
+      ? lastTurnForTps.genOutputTotal / (lastTurnForTps.genMsTotal / 1000)
+      : null;
+  const speedSamples = turns.filter(
+    (turn) => turn.effectiveTps != null && turn.output > 0 && turn.timingQuality !== "low",
+  );
   const effectiveWindowSamples = speedSamples.slice(-EFFECTIVE_SPEED_WINDOW);
   const effectiveOutputTotal = effectiveWindowSamples.reduce((sum, turn) => sum + turn.output, 0);
   const effectiveMsTotal = effectiveWindowSamples.reduce((sum, turn) => sum + turn.effectiveMs, 0);
-  const effectiveTps = effectiveOutputTotal > 0 && effectiveMsTotal > 0
-    ? effectiveOutputTotal / (effectiveMsTotal / 1000)
-    : null;
+  const effectiveTps =
+    effectiveOutputTotal > 0 && effectiveMsTotal > 0 ? effectiveOutputTotal / (effectiveMsTotal / 1000) : null;
   const latestGenSample = [...turns].reverse().find((turn) => turn.genEstimateTps != null);
   const lastTurn = turns.length ? turns[turns.length - 1] : null;
   const currentModel = [...records].reverse().find((record) => record.model)?.model || null;
   const speedSeries = records
-    .filter((record) =>
-      Number.isFinite(record.genMs) && record.genMs >= 500 &&
-      Number.isFinite(record.output) && record.output >= 16 &&
-      (!currentModel || !record.model || record.model === currentModel),
+    .filter(
+      (record) =>
+        Number.isFinite(record.genMs) &&
+        record.genMs >= 500 &&
+        Number.isFinite(record.output) &&
+        record.output >= 16 &&
+        (!currentModel || !record.model || record.model === currentModel),
     )
     .map((record) => ({
       output: record.output,
@@ -1444,10 +1497,12 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
       timingSource: "record",
     }));
   const compactSpeed = robustSpeedSummary(speedSeries);
-  const latestEffectiveSample = effectiveWindowSamples.length ? effectiveWindowSamples[effectiveWindowSamples.length - 1] : null;
+  const latestEffectiveSample = effectiveWindowSamples.length
+    ? effectiveWindowSamples[effectiveWindowSamples.length - 1]
+    : null;
   const speedTimingConfidence = latestEffectiveSample ? latestEffectiveSample.timingQuality : "low";
-  const cumulativeResetCount = threadCounters.resetEvents +
-    [...turnCounters.values()].reduce((sum, counters) => sum + counters.resetEvents, 0);
+  const cumulativeResetCount =
+    threadCounters.resetEvents + [...turnCounters.values()].reduce((sum, counters) => sum + counters.resetEvents, 0);
 
   return {
     threadId: parsed.threadId,
@@ -1513,14 +1568,22 @@ function turnPayloadFor(turn, index) {
   };
 }
 
-function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: true }), requestedWindow = null, sessionChanged = false, snapshot = false) {
+function payloadFor(
+  stats,
+  health = makeHealth({ status: "healthy", dataFresh: true }),
+  requestedWindow = null,
+  sessionChanged = false,
+  snapshot = false,
+) {
   // 窗口 = 本次推送包含多少条轮次摘要 / 请求明细。缺省按「弹层打开」的档位，保证非 CDP 路径（CLI）行为不变。
-  const turnWindow = requestedWindow && Number.isFinite(requestedWindow.turns)
-    ? Math.max(0, Math.min(MAX_TURN_SUMMARIES, Math.floor(requestedWindow.turns)))
-    : TURN_WINDOW_OPEN;
-  const requestWindow = requestedWindow && Number.isFinite(requestedWindow.requests)
-    ? Math.max(0, Math.min(MAX_REQUEST_DETAILS, Math.floor(requestedWindow.requests)))
-    : REQUEST_WINDOW_OPEN;
+  const turnWindow =
+    requestedWindow && Number.isFinite(requestedWindow.turns)
+      ? Math.max(0, Math.min(MAX_TURN_SUMMARIES, Math.floor(requestedWindow.turns)))
+      : TURN_WINDOW_OPEN;
+  const requestWindow =
+    requestedWindow && Number.isFinite(requestedWindow.requests)
+      ? Math.max(0, Math.min(MAX_REQUEST_DETAILS, Math.floor(requestedWindow.requests)))
+      : REQUEST_WINDOW_OPEN;
   const currentTurn = stats.turns.length ? stats.turns[stats.turns.length - 1] : null;
   const currentRequests = currentTurn ? currentTurn.requests : [];
   const currentRequestTotal = currentTurn
@@ -1559,7 +1622,9 @@ function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: t
     turnCacheHitRate: (() => {
       const input = currentTurn ? currentTurn.input : null;
       const cached = currentTurn ? currentTurn.cached : null;
-      return Number.isFinite(input) && input > 0 && Number.isFinite(cached) ? Math.min(1, Math.max(0, cached / input)) : null;
+      return Number.isFinite(input) && input > 0 && Number.isFinite(cached)
+        ? Math.min(1, Math.max(0, cached / input))
+        : null;
     })(),
     lastRequestTps: Number.isFinite(stats.lastRequestTps) ? stats.lastRequestTps : null,
     // 本轮加权平均速度（推导见 buildStats 内的 turnTps 注释）
@@ -1577,9 +1642,7 @@ function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: t
     effectiveWindow: Number.isFinite(stats.effectiveWindow) ? stats.effectiveWindow : EFFECTIVE_SPEED_WINDOW,
     speedTimingConfidence: typeof stats.speedTimingConfidence === "string" ? stats.speedTimingConfidence : "low",
     currentTurnIndex: currentTurn ? stats.turns.length : 0,
-    turns: stats.turns.slice(turnStart).map((turn, index) =>
-      turnPayloadFor(turn, turnStart + index),
-    ),
+    turns: stats.turns.slice(turnStart).map((turn, index) => turnPayloadFor(turn, turnStart + index)),
     turnsTruncated: turnStart > 0,
     turnTotalCount: stats.turns.length,
     // 下发窗口上限，让面板判断「已到上限」时不必再抄一份常量（避免隐藏耦合）
@@ -1588,9 +1651,9 @@ function payloadFor(stats, health = makeHealth({ status: "healthy", dataFresh: t
     // 一次性信号：本份负载对应的会话与上一份不同（供面板重置翻页位置）
     sessionChanged: sessionChanged === true,
     snapshot: snapshot === true,
-    requestDetails: currentRequests.slice(requestSliceStart).map((request, index) =>
-      requestPayloadFor(request, requestIndexStart + index),
-    ),
+    requestDetails: currentRequests
+      .slice(requestSliceStart)
+      .map((request, index) => requestPayloadFor(request, requestIndexStart + index)),
     requestDetailsTruncated: requestSliceStart > 0 || currentRequestTotal > currentRequests.length,
     requestDetailTotal: currentRequestTotal,
     currentTurnRequestCount: currentRequestTotal,
@@ -1622,13 +1685,16 @@ class CdpTargetError extends Error {
 }
 
 function shouldPropagateCdpTargetError(error) {
-  return !!(error && [
-    "CDP_TARGET_SELECTION_REQUIRED",
-    "CDP_TARGET_NOT_FOUND",
-    "CDP_PAGE_NOT_FOUND",
-    "CDP_UNREACHABLE",
-    "CDP_PROTOCOL_MISMATCH",
-  ].includes(error.code));
+  return !!(
+    error &&
+    [
+      "CDP_TARGET_SELECTION_REQUIRED",
+      "CDP_TARGET_NOT_FOUND",
+      "CDP_PAGE_NOT_FOUND",
+      "CDP_UNREACHABLE",
+      "CDP_PROTOCOL_MISMATCH",
+    ].includes(error.code)
+  );
 }
 
 function isSafeCdpTarget(target) {
@@ -1654,7 +1720,9 @@ function probeCdpTarget(target) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { ws.close(); } catch {}
+      try {
+        ws.close();
+      } catch {}
       resolve({ ...target, ...result });
     };
     try {
@@ -1664,14 +1732,17 @@ function probeCdpTarget(target) {
       return;
     }
     ws.onopen = () => {
-      ws.send(JSON.stringify({
-        id: 1,
-        method: "Runtime.evaluate",
-        params: {
-          expression: "JSON.stringify({focused:document.hasFocus(),visible:document.visibilityState === 'visible',hasPanel:!!window.__tuiForCodexNativeUiInstalled})",
-          returnByValue: true,
-        },
-      }));
+      ws.send(
+        JSON.stringify({
+          id: 1,
+          method: "Runtime.evaluate",
+          params: {
+            expression:
+              "JSON.stringify({focused:document.hasFocus(),visible:document.visibilityState === 'visible',hasPanel:!!window.__tuiForCodexNativeUiInstalled})",
+            returnByValue: true,
+          },
+        }),
+      );
     };
     ws.onmessage = (event) => {
       try {
@@ -1680,7 +1751,11 @@ function probeCdpTarget(target) {
         clearTimeout(timer);
         const value = message.result && message.result.result ? message.result.result.value : null;
         const result = value ? JSON.parse(value) : {};
-        finish({ focused: result.focused === true, visible: result.visible === true, hasPanel: result.hasPanel === true });
+        finish({
+          focused: result.focused === true,
+          visible: result.visible === true,
+          hasPanel: result.hasPanel === true,
+        });
       } catch {
         clearTimeout(timer);
         finish({ focused: false, visible: false, probeFailed: true });
@@ -1713,7 +1788,8 @@ async function findCdpPages(port) {
     clearTimeout(timer);
   }
   const eligible = Array.isArray(targets) ? targets.filter(isSafeCdpTarget) : [];
-  if (!eligible.length) throw new CdpTargetError("CDP_PAGE_NOT_FOUND", "Codex page target not found on CDP port " + port);
+  if (!eligible.length)
+    throw new CdpTargetError("CDP_PAGE_NOT_FOUND", "Codex page target not found on CDP port " + port);
   return eligible;
 }
 
@@ -1844,7 +1920,9 @@ async function resolveCdpPort(args, { force = false } = {}) {
       const good = checks.filter((item) => item.ok).map((item) => item.port);
       if (good.length === 1) chosen = good[0];
       else {
-        monitorLog("CDP 端口自动发现：候选 " + ports.join(",") + "，可连页面 " + (good.join(",") || "无") + "，使用 " + chosen);
+        monitorLog(
+          "CDP 端口自动发现：候选 " + ports.join(",") + "，可连页面 " + (good.join(",") || "无") + "，使用 " + chosen,
+        );
       }
     }
     if (chosen !== args.port || args.portSource !== "process") {
@@ -1935,11 +2013,18 @@ function closeCdpConnection(reason = "CDP connection closed") {
   cdpConnection = null;
   if (!connection) return;
   rejectCdpPending(connection, new Error(reason));
-  try { connection.ws.close(); } catch {}
+  try {
+    connection.ws.close();
+  } catch {}
 }
 
 async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
-  if (cdpConnection && cdpConnection.port === port && cdpConnection.targetSelector === targetSelector && cdpConnection.ws.readyState === 1) {
+  if (
+    cdpConnection &&
+    cdpConnection.port === port &&
+    cdpConnection.targetSelector === targetSelector &&
+    cdpConnection.ws.readyState === 1
+  ) {
     const automaticTarget = targetSelector === "auto" || targetSelector === "focused";
     const multiWindow = cdpConnection.targetCount > 1;
     const due = Date.now() - (cdpConnection.lastTargetCheckAt || 0) >= TARGET_FOCUS_CHECK_MS;
@@ -1983,8 +2068,16 @@ async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTO
     cdpConnection = connection;
     ws.onmessage = (ev) => {
       let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.method === "Page.frameNavigated" || msg.method === "Page.frameStartedLoading" || msg.method === "Page.loadEventFired") {
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      if (
+        msg.method === "Page.frameNavigated" ||
+        msg.method === "Page.frameStartedLoading" ||
+        msg.method === "Page.loadEventFired"
+      ) {
         connection.pageChanged = true;
         // 页面导航会清掉注入的 key，下一次推送前需要重新注入
         connection.authKeySet = false;
@@ -2006,13 +2099,18 @@ async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTO
     };
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("CDP connect timeout on port " + port)), 8000);
-      ws.onopen = () => { clearTimeout(timer); resolve(); };
+      ws.onopen = () => {
+        clearTimeout(timer);
+        resolve();
+      };
       ws.onerror = (e) => {
         clearTimeout(timer);
         reject(new Error("WebSocket error: " + (e && e.message ? e.message : "unknown")));
       };
     });
-    try { ws.send(JSON.stringify({ id: 0, method: "Page.enable" })); } catch {}
+    try {
+      ws.send(JSON.stringify({ id: 0, method: "Page.enable" }));
+    } catch {}
     return connection;
   })().finally(() => {
     cdpConnectPromise = null;
@@ -2027,7 +2125,13 @@ async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTO
 }
 
 function assertSafeCdpExpression(expression) {
-  if (typeof expression !== "string" || (!expression.startsWith("(function ()") && !expression.startsWith("JSON.stringify(") && !expression.startsWith("!!document.querySelector(") && !expression.startsWith("window.__tuiForCodex ="))) {
+  if (
+    typeof expression !== "string" ||
+    (!expression.startsWith("(function ()") &&
+      !expression.startsWith("JSON.stringify(") &&
+      !expression.startsWith("!!document.querySelector(") &&
+      !expression.startsWith("window.__tuiForCodex ="))
+  ) {
     const error = new Error("Blocked non-whitelisted CDP expression");
     error.code = "CDP_EXPRESSION_BLOCKED";
     throw error;
@@ -2046,7 +2150,13 @@ async function cdpEval(port, expression, targetSelector = currentTargetSelector)
     }, 8000);
     connection.pending.set(id, { resolve, reject, timer });
     try {
-      connection.ws.send(JSON.stringify({ id, method: "Runtime.evaluate", params: { expression, returnByValue: true, awaitPromise: true } }));
+      connection.ws.send(
+        JSON.stringify({
+          id,
+          method: "Runtime.evaluate",
+          params: { expression, returnByValue: true, awaitPromise: true },
+        }),
+      );
     } catch (error) {
       clearTimeout(timer);
       connection.pending.delete(id);
@@ -2065,14 +2175,20 @@ const NEW_THREAD = "__new_blank__";
 let activeThreadProbe = { port: 0, id: null, checkedAt: 0, connectionUrl: "" };
 
 async function activeThreadId(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
- const probeNow = Date.now();
- const connectionUrl = cdpConnection && cdpConnection.port === port ? cdpConnection.url : "";
-  if (activeThreadProbe.port === port && activeThreadProbe.targetSelector === targetSelector && activeThreadProbe.connectionUrl === connectionUrl && probeNow - activeThreadProbe.checkedAt < THREAD_PROBE_INTERVAL_MS && !(cdpConnection && cdpConnection.pageChanged)) {
-   return activeThreadProbe.id;
- }
- try {
-   const id = await cdpEval(
-     port,
+  const probeNow = Date.now();
+  const connectionUrl = cdpConnection && cdpConnection.port === port ? cdpConnection.url : "";
+  if (
+    activeThreadProbe.port === port &&
+    activeThreadProbe.targetSelector === targetSelector &&
+    activeThreadProbe.connectionUrl === connectionUrl &&
+    probeNow - activeThreadProbe.checkedAt < THREAD_PROBE_INTERVAL_MS &&
+    !(cdpConnection && cdpConnection.pageChanged)
+  ) {
+    return activeThreadProbe.id;
+  }
+  try {
+    const id = await cdpEval(
+      port,
       `(function () {
         var BLANK_CONVERSATION = "${NEW_THREAD}";
         var UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -2267,7 +2383,7 @@ async function activeThreadId(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
             var direct = threadIdFromElement(anchor);
             if (direct) { window.__tuiForCodexActiveIdCache = { id: direct, at: now }; return rememberActiveThread(direct); }
             for (var reactKey in anchor) {
-              if (!/^__react(?:Props|Fiber|Container)\$/.test(reactKey)) continue;
+              if (!/^__react(?:Props|Fiber|Container)$/.test(reactKey)) continue;
               try {
                 var scanned = scan(anchor[reactKey], SCAN_MAX_DEPTH);
                 if (scanned) { window.__tuiForCodexActiveIdCache = { id: scanned, at: now }; return rememberActiveThread(scanned); }
@@ -2284,19 +2400,19 @@ async function activeThreadId(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
         return null;
      })()`,
       targetSelector,
-   );
-   activeThreadProbe = {
-     port,
-     id: id || null,
-     checkedAt: Date.now(),
-     connectionUrl: cdpConnection && cdpConnection.port === port ? cdpConnection.url : connectionUrl,
+    );
+    activeThreadProbe = {
+      port,
+      id: id || null,
+      checkedAt: Date.now(),
+      connectionUrl: cdpConnection && cdpConnection.port === port ? cdpConnection.url : connectionUrl,
       targetSelector,
-   };
-   if (id) return id;
+    };
+    if (id) return id;
   } catch (error) {
     if (shouldPropagateCdpTargetError(error)) throw error;
   }
-   activeThreadProbe = { port, id: null, checkedAt: Date.now(), connectionUrl, targetSelector };
+  activeThreadProbe = { port, id: null, checkedAt: Date.now(), connectionUrl, targetSelector };
   return null;
 }
 
@@ -2307,8 +2423,14 @@ let sessionAuthSeq = 0;
 function canonicalJson(value) {
   if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
   if (value && typeof value === "object") {
-    return "{" + Object.keys(value).sort()
-      .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+    return (
+      "{" +
+      Object.keys(value)
+        .sort()
+        .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key]))
+        .join(",") +
+      "}"
+    );
   }
   return JSON.stringify(value);
 }
@@ -2319,20 +2441,22 @@ function signPayload(payload) {
   sessionAuthSeq += 1;
   const body = { ...payload };
   delete body.auth;
-  const mac = crypto.createHmac("sha256", SESSION_AUTH_KEY)
-    .update(canonicalJson(body) + "|" + ts + "|" + nonce).digest("hex");
+  const mac = crypto
+    .createHmac("sha256", SESSION_AUTH_KEY)
+    .update(canonicalJson(body) + "|" + ts + "|" + nonce)
+    .digest("hex");
   return { ...body, auth: { v: 1, ts, nonce, seq: sessionAuthSeq, mac } };
 }
 
 async function ensurePageAuthKey(port, targetSelector) {
   if (cdpConnection && cdpConnection.authKeySet) return;
-  const expr = '(function () { window.__tuiForCodexAuthKey = ' +
-    JSON.stringify(SESSION_AUTH_KEY) + '; return true; })()';
+  const expr =
+    "(function () { window.__tuiForCodexAuthKey = " + JSON.stringify(SESSION_AUTH_KEY) + "; return true; })()";
   await cdpEval(port, expr, targetSelector);
   if (cdpConnection) cdpConnection.authKeySet = true;
 }
 
-async function cdpPush(port, payload, serialized = JSON.stringify(payload), targetSelector = DEFAULT_TARGET_SELECTOR) {
+async function cdpPush(port, payload, targetSelector = DEFAULT_TARGET_SELECTOR) {
   await ensurePageAuthKey(port, targetSelector);
   const signedPayload = signPayload(payload);
   const signedValidation = validatePayload(signedPayload, { allowLegacy: false, requireAuth: true });
@@ -2490,7 +2614,11 @@ function emptyStats(threadId, file) {
 }
 
 function sessionSnapshotHash(threadId) {
-  return crypto.createHash("sha256").update(String(threadId || "")).digest("hex").slice(0, 32);
+  return crypto
+    .createHash("sha256")
+    .update(String(threadId || ""))
+    .digest("hex")
+    .slice(0, 32);
 }
 
 function writeLastSummary(session, stats, threadId) {
@@ -2580,16 +2708,18 @@ function snapshotStatsFrom(summary) {
     modelSwitchCount: summary.modelSwitchCount,
     cumulativeResetCount: summary.cumulativeResetCount,
   });
-  stats.turns = [{
-    start: "",
-    startLabel: "上次数据",
-    requests: [],
-    requestCount: Number.isFinite(summary.currentTurnRequestCount) ? summary.currentTurnRequestCount : 0,
-    input: Number.isFinite(summary.turnInput) ? summary.turnInput : 0,
-    cached: Number.isFinite(summary.turnCached) ? summary.turnCached : 0,
-    output: Number.isFinite(summary.turnOutput) ? summary.turnOutput : 0,
-    total: Number.isFinite(summary.turnTotal) ? summary.turnTotal : 0,
-  }];
+  stats.turns = [
+    {
+      start: "",
+      startLabel: "上次数据",
+      requests: [],
+      requestCount: Number.isFinite(summary.currentTurnRequestCount) ? summary.currentTurnRequestCount : 0,
+      input: Number.isFinite(summary.turnInput) ? summary.turnInput : 0,
+      cached: Number.isFinite(summary.turnCached) ? summary.turnCached : 0,
+      output: Number.isFinite(summary.turnOutput) ? summary.turnOutput : 0,
+      total: Number.isFinite(summary.turnTotal) ? summary.turnTotal : 0,
+    },
+  ];
   stats.currentTurnIndex = 1;
   stats.turnTotalCount = 1;
   return stats;
@@ -2612,7 +2742,7 @@ async function publishCachedSnapshot(args, session, threadId, connectionState) {
   });
   const payload = payloadFor(snapshotStatsFrom(summary), health, null, false, true);
   payload.updatedAt = summary.updatedAt;
-  await cdpPush(args.port, payload, JSON.stringify(payload), args.target);
+  await cdpPush(args.port, payload, args.target);
   session.snapshotPushed = true;
   return true;
 }
@@ -2630,14 +2760,13 @@ function environmentSnapshot() {
     // 状态目录可能处于 Windows/MSIX 的不同虚拟视图；文件不在当前视图时，
     // 用同目录安装器生成的 launch-silent.vbs 作为“自启入口已安装”的兼容判据。
   }
-  if (autostartInstalled == null && fs.existsSync(path.join(SCRIPT_DIR, "launch-silent.vbs"))) autostartInstalled = true;
+  if (autostartInstalled == null && fs.existsSync(path.join(SCRIPT_DIR, "launch-silent.vbs")))
+    autostartInstalled = true;
   return {
     platform: "windows",
     platformSupported,
     nodeSupported,
-    installationState: !platformSupported || !nodeSupported
-      ? "invalid"
-      : codexPlusPlusInstalled ? "ready" : "missing",
+    installationState: !platformSupported || !nodeSupported ? "invalid" : codexPlusPlusInstalled ? "ready" : "missing",
     codexPlusPlusInstalled,
     autostartInstalled,
   };
@@ -2645,18 +2774,23 @@ function environmentSnapshot() {
 
 function monitorHealthFor(args, overrides = {}) {
   const environment = environmentSnapshot();
-  const targetMode = args && args.target && args.target !== "auto" && args.target !== "focused" ? "manual" : (args && args.target) || "auto";
-  return normalizeHealth(makeHealth({
-    platform: "windows",
-    platformSupported: environment.platformSupported,
-    nodeSupported: environment.nodeSupported,
-    installationState: environment.installationState,
-    autostartInstalled: environment.autostartInstalled,
-    targetMode,
-    cdpPort: args && Number.isInteger(args.port) ? args.port : null,
-    cdpPortSource: (args && args.portSource) || "default",
-    ...overrides,
-  }));
+  const targetMode =
+    args && args.target && args.target !== "auto" && args.target !== "focused"
+      ? "manual"
+      : (args && args.target) || "auto";
+  return normalizeHealth(
+    makeHealth({
+      platform: "windows",
+      platformSupported: environment.platformSupported,
+      nodeSupported: environment.nodeSupported,
+      installationState: environment.installationState,
+      autostartInstalled: environment.autostartInstalled,
+      targetMode,
+      cdpPort: args && Number.isInteger(args.port) ? args.port : null,
+      cdpPortSource: (args && args.portSource) || "default",
+      ...overrides,
+    }),
+  );
 }
 
 function healthKeyOf(health) {
@@ -2721,12 +2855,15 @@ function monitorLog(message) {
 
 function pruneMonitorLogs() {
   try {
-    const entries = fs.readdirSync(LOG_DIR)
+    const entries = fs
+      .readdirSync(LOG_DIR)
       .filter((name) => name.startsWith("watch-") || name.startsWith("monitor-"))
       .map((name) => ({ name, full: path.join(LOG_DIR, name) }))
       .sort((a, b) => (a.name < b.name ? 1 : -1));
     for (const entry of entries.slice(MAX_LOG_FILES)) {
-      try { fs.rmSync(entry.full, { force: true }); } catch {}
+      try {
+        fs.rmSync(entry.full, { force: true });
+      } catch {}
     }
   } catch {}
 }
@@ -2737,7 +2874,7 @@ function healthForError(error, args, previousHealth) {
   let recoveryState = "retrying";
   let cdpReachable = previousHealth && previousHealth.cdpReachable === true;
   let pageAttached = previousHealth && previousHealth.pageAttached === true;
-  let targetSelection = previousHealth && previousHealth.targetSelection || "unknown";
+  let targetSelection = (previousHealth && previousHealth.targetSelection) || "unknown";
   let targetCount = previousHealth && Number.isInteger(previousHealth.targetCount) ? previousHealth.targetCount : 0;
   if (code === "CDP_UNREACHABLE") {
     status = "waiting-for-cdp";
@@ -2772,7 +2909,7 @@ function healthForError(error, args, previousHealth) {
     targetSelection,
     targetCount,
     dataFresh: false,
-    lastSuccessAt: previousHealth && previousHealth.lastSuccessAt || null,
+    lastSuccessAt: (previousHealth && previousHealth.lastSuccessAt) || null,
     lastErrorCode: code,
     lastErrorAt: new Date().toISOString(),
   });
@@ -2906,7 +3043,11 @@ function findNewestUnclaimedFile(excludeThreadId, claimedSet) {
 // 页面里是否有真实会话内容（空白新对话没有 conversation surface）。
 async function hasConversationContent(port, targetSelector = currentTargetSelector) {
   try {
-    const v = await cdpEval(port, `!!document.querySelector('main [data-thread-find-target="conversation"]')`, targetSelector);
+    const v = await cdpEval(
+      port,
+      `!!document.querySelector('main [data-thread-find-target="conversation"]')`,
+      targetSelector,
+    );
     return v === true || v === "true";
   } catch (error) {
     if (shouldPropagateCdpTargetError(error)) throw error;
@@ -2920,13 +3061,17 @@ async function readWindowWant(port, targetSelector) {
   try {
     // 注意：cdpEval 有表达式白名单（必须以 JSON.stringify( / (function () 等开头），
     // 因此这里用 JSON.stringify 包一层再在本地解析；否则会被拦下、被 catch 吞成 null。
-    const raw = await cdpEval(port, 'JSON.stringify({ w: document.documentElement.getAttribute("data-tui-window") || "", s: document.documentElement.getAttribute("data-tui-security") || "" })', targetSelector);
+    const raw = await cdpEval(
+      port,
+      'JSON.stringify({ w: document.documentElement.getAttribute("data-tui-window") || "", s: document.documentElement.getAttribute("data-tui-security") || "" })',
+      targetSelector,
+    );
     const value = JSON.parse(raw == null || raw === "" ? '{"w":"","s":""}' : raw);
-    const parts = String(value && value.w || "").split(":");
+    const parts = String((value && value.w) || "").split(":");
     const turns = Number.parseInt(parts[0], 10);
     const requests = Number.parseInt(parts[1], 10);
     if (!Number.isFinite(turns) || !Number.isFinite(requests)) return null;
-    return { turns, requests, security: String(value && value.s || "") };
+    return { turns, requests, security: String((value && value.s) || "") };
   } catch {
     return null;
   }
@@ -2938,7 +3083,11 @@ function parseArgs(argv) {
   const defaultPort = envPortValid ? envPort : 9229;
   const envTarget = String(process.env.TUI_CDP_TARGET || "").trim();
   const args = {
-    thread: null, all: false, detail: false, watch: false, cdp: false,
+    thread: null,
+    all: false,
+    detail: false,
+    watch: false,
+    cdp: false,
     port: defaultPort,
     // portAuto：启动/重连时从 ChatGPT.exe 命令行自动发现实际端口（--port auto）。
     portAuto: false,
@@ -2959,7 +3108,9 @@ function parseArgs(argv) {
     else if (a === "--instance-status") args.instanceStatus = true;
     else if (a === "--target" && argv[i + 1]) args.target = String(argv[i + 1]).trim() || DEFAULT_TARGET_SELECTOR;
     else if (a === "--port") {
-      const raw = String(argv[i + 1] || "").trim().toLowerCase();
+      const raw = String(argv[i + 1] || "")
+        .trim()
+        .toLowerCase();
       if (raw === "auto") {
         args.portAuto = true;
         args.portSource = "auto";
@@ -3003,7 +3154,11 @@ function reportRuntimeWarnings(environment) {
     console.warn("[提示] 当前 Node.js " + process.versions.node + " 低于 CDP 模式要求；请安装 Node.js 22 或更高版本。");
   }
   if (!environment.codexPlusPlusInstalled) {
-    console.warn("[提示] 未检测到 Codex++ 用户脚本目录：" + CODEX_PLUS_PLUS_USER_SCRIPTS + "；请先安装 Codex++，否则页面统计条无法注入。");
+    console.warn(
+      "[提示] 未检测到 Codex++ 用户脚本目录：" +
+        CODEX_PLUS_PLUS_USER_SCRIPTS +
+        "；请先安装 Codex++，否则页面统计条无法注入。",
+    );
   }
 }
 
@@ -3053,8 +3208,8 @@ function createWatchSession(args) {
     lastMerged: null,
     observedFile: "",
     observedFileMtime: 0,
-    fileStallWarned: false,    // 一级（预警）是否已记录
-    fileStallNotified: false,  // 二级（降级）是否已记录（避免日志刷屏）
+    fileStallWarned: false, // 一级（预警）是否已记录
+    fileStallNotified: false, // 二级（降级）是否已记录（避免日志刷屏）
     lastClientAuditAt: 0,
     clientAudit: null,
     lastClientAuditKey: "",
@@ -3066,8 +3221,8 @@ function createWatchSession(args) {
     snapshotThreadHash: "",
     snapshotAttempted: false,
     snapshotPushed: false,
-    lastLocateLogKey: "",      // 定位失败日志去重键
-    lastSuspectKey: "",        // 疑似「命名变化」文件预警的去重键
+    lastLocateLogKey: "", // 定位失败日志去重键
+    lastSuspectKey: "", // 疑似「命名变化」文件预警的去重键
   };
 }
 
@@ -3125,8 +3280,16 @@ function readWatchStats(session, thread) {
     const missKey = "miss:" + thread;
     if (session.lastLocateLogKey !== missKey) {
       session.lastLocateLogKey = missKey;
-      const samples = allFiles.slice(-3).map((candidate) => path.basename(candidate)).join(" / ");
-      monitorLog("定位失败: 未找到会话 " + String(thread).slice(0, 8) + "… 的任何文件；目录中最近的文件样本: " + (samples || "（无）"));
+      const samples = allFiles
+        .slice(-3)
+        .map((candidate) => path.basename(candidate))
+        .join(" / ");
+      monitorLog(
+        "定位失败: 未找到会话 " +
+          String(thread).slice(0, 8) +
+          "… 的任何文件；目录中最近的文件样本: " +
+          (samples || "（无）"),
+      );
     }
     return { file: null, parsed: null, stats: emptyStats(thread, null) };
   }
@@ -3137,13 +3300,22 @@ function readWatchStats(session, thread) {
   const suspectKey = suspects.length ? suspects.join("|") : "";
   if (suspectKey && session.lastSuspectKey !== suspectKey) {
     session.lastSuspectKey = suspectKey;
-    monitorLog("定位预警: 发现 " + suspects.length + " 个疑似本会话但未被识别的文件（宿主命名可能已变化）: " + suspects.slice(0, 3).map((candidate) => path.basename(candidate)).join(" / "));
+    monitorLog(
+      "定位预警: 发现 " +
+        suspects.length +
+        " 个疑似本会话但未被识别的文件（宿主命名可能已变化）: " +
+        suspects
+          .slice(0, 3)
+          .map((candidate) => path.basename(candidate))
+          .join(" / "),
+    );
   }
 
   // 分片新增时创建解析器、分片消失时清理
   const activeFiles = new Set(files);
   for (const segment of files) {
-    if (!session.segmentParsers.has(segment)) session.segmentParsers.set(segment, new IncrementalRolloutParser(segment));
+    if (!session.segmentParsers.has(segment))
+      session.segmentParsers.set(segment, new IncrementalRolloutParser(segment));
   }
   for (const known of [...session.segmentParsers.keys()]) {
     if (!activeFiles.has(known)) session.segmentParsers.delete(known);
@@ -3160,9 +3332,10 @@ function readWatchStats(session, thread) {
   } catch {}
 
   // 所有分片的解析快照引用都未变 → 复用上一轮统计，避免每秒重复聚合
-  const unchanged = session.lastSegmentParts
-    && session.lastSegmentParts.length === parts.length
-    && session.lastSegmentParts.every((prev, index) => prev.file === files[index] && prev.part === parts[index]);
+  const unchanged =
+    session.lastSegmentParts &&
+    session.lastSegmentParts.length === parts.length &&
+    session.lastSegmentParts.every((prev, index) => prev.file === files[index] && prev.part === parts[index]);
   if (unchanged && session.lastStats) {
     return { file: latestFile, parsed: session.lastMerged, stats: session.lastStats };
   }
@@ -3195,21 +3368,33 @@ function nextWatchHealth(args, session, parsed, rawThread, connectionState) {
   //   二级（>15 分钟）：健康度降级为 stale-data —— 面板直接可见。
   // 典型场景（2026-09-19 实测）：宿主对超大会话做分片，监控读到已停更的旧分片，
   // 数字停滞数小时而健康度仍显示 healthy。
-  const stallMs = dataFresh && Number.isFinite(session.observedFileMtime) && session.observedFileMtime > 0
-    ? nowMs - session.observedFileMtime
-    : 0;
+  const stallMs =
+    dataFresh && Number.isFinite(session.observedFileMtime) && session.observedFileMtime > 0
+      ? nowMs - session.observedFileMtime
+      : 0;
   const stallWarn = stallMs > FILE_STALL_WARN_MS;
   const stallDegrade = stallMs > FILE_STALL_AFTER_MS;
   if (stallWarn && !session.fileStallWarned) {
     session.fileStallWarned = true;
-    monitorLog("数据停滞预警: 会话文件已 " + Math.max(1, Math.round(stallMs / 60000)) +
-      " 分钟无新增（" + (session.observedFile || "?") + "）；超过 " + Math.round(FILE_STALL_AFTER_MS / 60000) +
-      " 分钟将降级面板状态");
+    monitorLog(
+      "数据停滞预警: 会话文件已 " +
+        Math.max(1, Math.round(stallMs / 60000)) +
+        " 分钟无新增（" +
+        (session.observedFile || "?") +
+        "）；超过 " +
+        Math.round(FILE_STALL_AFTER_MS / 60000) +
+        " 分钟将降级面板状态",
+    );
   }
   if (stallDegrade && !session.fileStallNotified) {
     session.fileStallNotified = true;
-    monitorLog("数据停滞: 会话文件已 " + Math.max(1, Math.round(stallMs / 60000)) +
-      " 分钟无新增（" + (session.observedFile || "?") + "），健康度降级为 stale-data");
+    monitorLog(
+      "数据停滞: 会话文件已 " +
+        Math.max(1, Math.round(stallMs / 60000)) +
+        " 分钟无新增（" +
+        (session.observedFile || "?") +
+        "），健康度降级为 stale-data",
+    );
   }
   if (!stallWarn && (session.fileStallWarned || session.fileStallNotified)) {
     session.fileStallWarned = false;
@@ -3219,7 +3404,9 @@ function nextWatchHealth(args, session, parsed, rawThread, connectionState) {
   const recovered = dataFresh && session.health.status !== "healthy" && session.health.status !== "starting";
   return monitorHealthFor(args, {
     status: dataFresh
-      ? (stallDegrade ? "stale-data" : "healthy")
+      ? stallDegrade
+        ? "stale-data"
+        : "healthy"
       : stale
         ? "stale-data"
         : rawThread == null
@@ -3230,9 +3417,7 @@ function nextWatchHealth(args, session, parsed, rawThread, connectionState) {
     cdpClients: session.clientAudit || null,
     injectionAlert: session.injectionAlert || null,
     dataFresh,
-    lastSuccessAt: dataFresh
-      ? new Date().toISOString()
-      : session.health.lastSuccessAt || null,
+    lastSuccessAt: dataFresh ? new Date().toISOString() : session.health.lastSuccessAt || null,
     lastErrorCode: null,
     lastErrorAt: null,
   });
@@ -3271,8 +3456,13 @@ function logStatsAnomalies(session, stats) {
     if (echo.overThreshold > 0 && echoKey !== session.lastEchoLogKey) {
       session.lastEchoLogKey = echoKey;
       monitorLog(
-        "错峰回声: " + echo.overThreshold + " 条超过 " + Math.round(echo.thresholdMs / 1000) +
-          "s（会话回声共 " + echo.total + " 条，仍按一次请求计），top3 时间戳: " +
+        "错峰回声: " +
+          echo.overThreshold +
+          " 条超过 " +
+          Math.round(echo.thresholdMs / 1000) +
+          "s（会话回声共 " +
+          echo.total +
+          " 条，仍按一次请求计），top3 时间戳: " +
           echo.topLag.map((item) => item.ts).join(" / "),
       );
     }
@@ -3297,9 +3487,8 @@ async function publishWatchRound(args, session, context) {
   if (resolvedThreadId) session.pushedThreadId = resolvedThreadId;
 
   const currentTurn = stats.turns.length ? stats.turns[stats.turns.length - 1] : null;
-  const lastRequest = currentTurn && currentTurn.requests.length
-    ? currentTurn.requests[currentTurn.requests.length - 1]
-    : null;
+  const lastRequest =
+    currentTurn && currentTurn.requests.length ? currentTurn.requests[currentTurn.requests.length - 1] : null;
   writeLastSummary(session, stats, resolvedThreadId);
   if (resolvedThreadId && resolvedThreadId !== NEW_THREAD && stats.archiveRecords) {
     try {
@@ -3329,11 +3518,14 @@ async function publishWatchRound(args, session, context) {
   const connectionUrl = (connection && connection.url) || "";
   const connectionChanged = args.cdp && connectionUrl !== session.lastCdpConnectionUrl;
   // 生成中（task_started 尚未 task_complete）心跳 1 秒，其余 5 秒；窗口变化仍会立即推送。
-  const activeInterval = context.parsed && context.parsed.taskRunning ? ACTIVE_HEARTBEAT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS;
+  const activeInterval =
+    context.parsed && context.parsed.taskRunning ? ACTIVE_HEARTBEAT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS;
   // 展开态（窗口大于默认档）不参与心跳：用户正在看一份静态长列表，
   // 每秒重发它没有任何信息增量，却会把「最坏情况负载」放大到数百 KB/s。
   // 展开态只在数据/健康/窗口变化时推送（下面的 changed/healthChanged/windowChanged 仍然生效）。
-  const expandedWindow = !!context.wantWindow && (context.wantWindow.turns > TURN_WINDOW_CLOSED || context.wantWindow.requests > REQUEST_WINDOW_CLOSED);
+  const expandedWindow =
+    !!context.wantWindow &&
+    (context.wantWindow.turns > TURN_WINDOW_CLOSED || context.wantWindow.requests > REQUEST_WINDOW_CLOSED);
   const heartbeat = args.cdp && !expandedWindow && Date.now() - session.lastPushAt > activeInterval;
   const healthChanged = healthKeyOf(session.health) !== session.lastHealthKey;
   const windowKey = context.wantWindow ? context.wantWindow.turns + ":" + context.wantWindow.requests : "";
@@ -3350,7 +3542,7 @@ async function publishWatchRound(args, session, context) {
       session.lastPayload = payloadFor(stats, session.health, context.wantWindow, sessionChanged);
       session.lastPayloadJson = JSON.stringify(session.lastPayload);
     }
-    await cdpPush(args.port, session.lastPayload, session.lastPayloadJson, args.target);
+    await cdpPush(args.port, session.lastPayload, args.target);
     session.lastPushAt = Date.now();
     session.lastCdpConnectionUrl = connectionUrl;
     if (connection) connection.pageChanged = false;
@@ -3368,7 +3560,11 @@ async function publishWatchRound(args, session, context) {
 
 async function handleWatchError(args, session, error) {
   // 端口可能因 Codex 重启/Codex++ 改设置而变化：在写健康状态前重新发现（30 秒冷却）。
-  if (args.portAuto && error && ["CDP_UNREACHABLE", "CDP_PAGE_NOT_FOUND", "CDP_TARGET_NOT_FOUND"].includes(error.code)) {
+  if (
+    args.portAuto &&
+    error &&
+    ["CDP_UNREACHABLE", "CDP_PAGE_NOT_FOUND", "CDP_TARGET_NOT_FOUND"].includes(error.code)
+  ) {
     await resolveCdpPort(args);
   }
   session.health = healthForError(error, args, session.health);
@@ -3394,7 +3590,7 @@ async function handleWatchError(args, session, error) {
   try {
     const errorPayload = payloadFor(emptyStats(null, null), session.health);
     const errorPayloadJson = JSON.stringify(errorPayload);
-    await cdpPush(args.port, errorPayload, errorPayloadJson, args.target);
+    await cdpPush(args.port, errorPayload, args.target);
     session.lastPushAt = Date.now();
     session.lastPayload = errorPayload;
     session.lastPayloadJson = errorPayloadJson;
@@ -3409,11 +3605,17 @@ async function runWatchRound(args, session) {
     try {
       session.clientAudit = await auditCdpClients(args.port);
       const unknownKey = session.clientAudit.unknown.map((item) => item.name + ":" + item.pid).join(",");
-      if (unknownKey && (unknownKey !== session.lastClientAuditKey || Date.now() - session.lastClientAuditLogAt > CLIENT_AUDIT_LOG_COOLDOWN_MS)) {
+      if (
+        unknownKey &&
+        (unknownKey !== session.lastClientAuditKey ||
+          Date.now() - session.lastClientAuditLogAt > CLIENT_AUDIT_LOG_COOLDOWN_MS)
+      ) {
         session.lastClientAuditKey = unknownKey;
         session.lastClientAuditLogAt = Date.now();
-        monitorLog("CDP 客户端告警: 未知进程 " +
-          session.clientAudit.unknown.map((item) => item.name + "(PID " + item.pid + ")").join(", "));
+        monitorLog(
+          "CDP 客户端告警: 未知进程 " +
+            session.clientAudit.unknown.map((item) => item.name + "(PID " + item.pid + ")").join(", "),
+        );
       }
       if (!unknownKey) session.lastClientAuditKey = "";
     } catch (error) {
@@ -3461,7 +3663,16 @@ async function runWatchRound(args, session) {
     }
   }
   const { file, parsed, stats } = readWatchStats(session, thread);
-  await publishWatchRound(args, session, { thread, file, parsed, stats, rawThread, connection, connectionState, wantWindow });
+  await publishWatchRound(args, session, {
+    thread,
+    file,
+    parsed,
+    stats,
+    rawThread,
+    connection,
+    connectionState,
+    wantWindow,
+  });
 }
 
 async function runWatchLoop(args) {
@@ -3478,9 +3689,12 @@ async function runWatchLoop(args) {
   );
   const startupEnvironment = environmentSnapshot();
   monitorLog(
-    "运行环境: nodeSupported=" + startupEnvironment.nodeSupported +
-      "，codexPlusPlusInstalled=" + startupEnvironment.codexPlusPlusInstalled +
-      "，autostartInstalled=" + String(startupEnvironment.autostartInstalled),
+    "运行环境: nodeSupported=" +
+      startupEnvironment.nodeSupported +
+      "，codexPlusPlusInstalled=" +
+      startupEnvironment.codexPlusPlusInstalled +
+      "，autostartInstalled=" +
+      String(startupEnvironment.autostartInstalled),
   );
 
   // 防御：控制台窗口被关闭时 Windows 会广播 CTRL_CLOSE，Node 把它映射成 SIGHUP。

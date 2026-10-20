@@ -13,7 +13,9 @@ process.env.APPDATA = path.join(testRoot, "roaming");
 process.env.TUI_TOKENS_AS_MODULE = "1";
 fs.mkdirSync(process.env.CODEX_HOME, { recursive: true });
 after(() => {
-  try { fs.rmSync(testRoot, { recursive: true, force: true }); } catch {}
+  try {
+    fs.rmSync(testRoot, { recursive: true, force: true });
+  } catch {}
 });
 
 const stats = await import("../token-stats.mjs");
@@ -38,18 +40,16 @@ test("CDP 端口自动发现：区分 Codex 未运行与运行但缺少调试参
   assert.deepEqual(notRunning.commandLines, []);
   assert.equal(stats.portDiscoveryRetryMs(notRunning), 5000);
 
-  const noPort = stats.parseCodexProcessSnapshot([
-    "TUI_CODEX_PROCESS_COUNT=1",
-    'TUI_CODEX_COMMAND="ChatGPT.exe" --type=renderer',
-  ].join("\n"));
+  const noPort = stats.parseCodexProcessSnapshot(
+    ["TUI_CODEX_PROCESS_COUNT=1", 'TUI_CODEX_COMMAND="ChatGPT.exe" --type=renderer'].join("\n"),
+  );
   assert.equal(noPort.processCount, 1);
   assert.deepEqual(stats.parseCdpPortsFromCommandLines(noPort.commandLines.join("\n")), []);
   assert.equal(stats.portDiscoveryRetryMs(noPort), 30000);
 
-  const withPort = stats.parseCodexProcessSnapshot([
-    "TUI_CODEX_PROCESS_COUNT=1",
-    'TUI_CODEX_COMMAND="ChatGPT.exe" --remote-debugging-port=9333',
-  ].join("\n"));
+  const withPort = stats.parseCodexProcessSnapshot(
+    ["TUI_CODEX_PROCESS_COUNT=1", 'TUI_CODEX_COMMAND="ChatGPT.exe" --remote-debugging-port=9333'].join("\n"),
+  );
   assert.deepEqual(stats.parseCdpPortsFromCommandLines(withPort.commandLines.join("\n")), [9333]);
   assert.equal(stats.portDiscoveryRetryMs(withPort), 30000);
 });
@@ -62,7 +62,13 @@ test("CDP 客户端审计：只统计客户端侧到目标端口的 ESTABLISHED 
     "  TCP    127.0.0.1:12345        127.0.0.1:9333         ESTABLISHED     999",
   ].join("\r\n");
   const counts = stats.parseEstablishedCdpClients(text, 9229);
-  assert.deepEqual([...counts.entries()].sort((a, b) => a[0] - b[0]), [[30716, 1], [30840, 1]]);
+  assert.deepEqual(
+    [...counts.entries()].sort((a, b) => a[0] - b[0]),
+    [
+      [30716, 1],
+      [30840, 1],
+    ],
+  );
 });
 
 test("实例状态：陈旧 PID 锁会清理，PID 复用不会被误判为监控", async () => {
@@ -105,20 +111,24 @@ function user(timestamp) {
   return event(timestamp, "event_msg", { type: "user_message" });
 }
 
-function usage(timestamp, id, {
-  input = 10,
-  output = 3,
-  cached = 2,
-  total = input + output,
-  turnId = "turn-1",
-  turnTotal = total,
-  threadTotal = total,
-  // 线程级累计与单请求量是两套数字；默认沿用请求值，需要时显式传累计值。
-  threadInput = input,
-  threadOutput = output,
-  threadCached = cached,
-  model,
-} = {}) {
+function usage(
+  timestamp,
+  id,
+  {
+    input = 10,
+    output = 3,
+    cached = 2,
+    total = input + output,
+    turnId = "turn-1",
+    turnTotal = total,
+    threadTotal = total,
+    // 线程级累计与单请求量是两套数字；默认沿用请求值，需要时显式传累计值。
+    threadInput = input,
+    threadOutput = output,
+    threadCached = cached,
+    model,
+  } = {},
+) {
   return event(timestamp, "token_usage_record", {
     response_id: id,
     turn_id: turnId,
@@ -171,7 +181,10 @@ test("incremental parser handles partial lines, appends, duplicates and truncati
   assert.equal(parsed.usageRecords.length, 2, "duplicate response_id must not count twice");
   assert.equal(parser.offset > offsetAfterAppend, true);
 
-  writeLines([user("2026-09-16T12:01:01.000Z"), usage("2026-09-16T12:01:02.000Z", "new", { total: 20, turnTotal: 20, threadTotal: 20 })]);
+  writeLines([
+    user("2026-09-16T12:01:01.000Z"),
+    usage("2026-09-16T12:01:02.000Z", "new", { total: 20, turnTotal: 20, threadTotal: 20 }),
+  ]);
   parsed = parser.readNew();
   assert.equal(parsed.usageRecords.length, 1, "truncation/rewrite must rebuild parser state");
   assert.equal(parsed.usageRecords[0].responseId, "new");
@@ -179,8 +192,22 @@ test("incremental parser handles partial lines, appends, duplicates and truncati
 
 test("same-size replacement is detected by prefix fingerprint", () => {
   const parser = new stats.IncrementalRolloutParser(file);
-  const a = usage("2026-09-16T12:02:01.000Z", "aa", { input: 10, output: 3, cached: 2, total: 13, turnTotal: 13, threadTotal: 13 });
-  const b = usage("2026-09-16T12:02:01.000Z", "bb", { input: 10, output: 3, cached: 2, total: 23, turnTotal: 23, threadTotal: 23 });
+  const a = usage("2026-09-16T12:02:01.000Z", "aa", {
+    input: 10,
+    output: 3,
+    cached: 2,
+    total: 13,
+    turnTotal: 13,
+    threadTotal: 13,
+  });
+  const b = usage("2026-09-16T12:02:01.000Z", "bb", {
+    input: 10,
+    output: 3,
+    cached: 2,
+    total: 23,
+    turnTotal: 23,
+    threadTotal: 23,
+  });
   assert.equal(Buffer.byteLength(a), Buffer.byteLength(b));
   fs.writeFileSync(file, a + "\n", "utf8");
   let parsed = parser.readNew();
@@ -239,8 +266,24 @@ test("legacy token_count fallback also normalizes cumulative resets", () => {
     modelContextWindow: 1000,
     userMessages: [{ ts: "2026-09-16T12:06:01.000Z" }],
     counts: [
-      { ts: "2026-09-16T12:06:02.000Z", total: 100, input: 10, output: 3, cached: 2, lastTotal: 13, totalInfo: { total: 100, input: 10, cached: 2, output: 3 } },
-      { ts: "2026-09-16T12:06:03.000Z", total: 10, input: 4, output: 2, cached: 1, lastTotal: 6, totalInfo: { total: 10, input: 4, cached: 1, output: 2 } },
+      {
+        ts: "2026-09-16T12:06:02.000Z",
+        total: 100,
+        input: 10,
+        output: 3,
+        cached: 2,
+        lastTotal: 13,
+        totalInfo: { total: 100, input: 10, cached: 2, output: 3 },
+      },
+      {
+        ts: "2026-09-16T12:06:03.000Z",
+        total: 10,
+        input: 4,
+        output: 2,
+        cached: 1,
+        lastTotal: 6,
+        totalInfo: { total: 10, input: 4, cached: 1, output: 2 },
+      },
     ],
     usageRecords: [],
   };
@@ -295,7 +338,11 @@ test("payload protocol validates and negotiates signed schema v3", () => {
   assert.equal(payload.schemaVersion, 3);
   assert.equal(payload.authRequired, true);
   assert.equal(protocol.validatePayload(payload, { allowLegacy: false }).ok, true);
-  assert.equal(protocol.validatePayload(payload, { allowLegacy: false, requireAuth: true }).ok, false, "未签名模板不能作为最终负载");
+  assert.equal(
+    protocol.validatePayload(payload, { allowLegacy: false, requireAuth: true }).ok,
+    false,
+    "未签名模板不能作为最终负载",
+  );
   assert.equal(protocol.negotiateSchemaVersion([1, 2, 3]), 3);
   assert.equal(protocol.negotiateSchemaVersion([1]), null);
   assert.equal(protocol.validatePayload({ ...payload, protocolName: "wrong" }).ok, false);
@@ -304,7 +351,11 @@ test("payload protocol validates and negotiates signed schema v3", () => {
     auth: { v: 1, ts: Date.now(), nonce: "0123456789abcdef", seq: 1, mac: "a".repeat(64) },
   };
   assert.equal(protocol.validatePayload(signed, { allowLegacy: false, requireAuth: true }).ok, true);
-  assert.equal(protocol.validatePayload({ ...signed, auth: { ...signed.auth, seq: 0 } }, { allowLegacy: false, requireAuth: true }).ok, false);
+  assert.equal(
+    protocol.validatePayload({ ...signed, auth: { ...signed.auth, seq: 0 } }, { allowLegacy: false, requireAuth: true })
+      .ok,
+    false,
+  );
 });
 
 test("checked JSON schema documents the same protocol contract", () => {
@@ -371,7 +422,12 @@ test("automatic target selection prefers the focused Codex window and manual sel
       queueMicrotask(() => {
         if (!this.onmessage) return;
         const focused = this.url.endsWith("target-a");
-        this.onmessage({ data: JSON.stringify({ id: message.id, result: { result: { value: JSON.stringify({ focused, visible: true, hasPanel: true }) } } }) });
+        this.onmessage({
+          data: JSON.stringify({
+            id: message.id,
+            result: { result: { value: JSON.stringify({ focused, visible: true, hasPanel: true }) } },
+          }),
+        });
       });
     }
 
@@ -400,7 +456,13 @@ test("automatic target selection prefers the focused Codex window and manual sel
       send(raw) {
         const message = JSON.parse(raw);
         queueMicrotask(() => {
-          if (this.onmessage) this.onmessage({ data: JSON.stringify({ id: message.id, result: { result: { value: JSON.stringify({ focused: false, visible: true }) } } }) });
+          if (this.onmessage)
+            this.onmessage({
+              data: JSON.stringify({
+                id: message.id,
+                result: { result: { value: JSON.stringify({ focused: false, visible: true }) } },
+              }),
+            });
         });
       }
 
@@ -420,7 +482,19 @@ test("automatic target selection prefers the focused Codex window and manual sel
 
 // ---- F1 规格 fixture（见 docs/F1-merge-spec.md）----
 
-function tokenCount(timestamp, { window = 1000000, input = 40, output = 10, cached = 0, total, cumulativeInput, cumulativeCached, cumulativeOutput } = {}) {
+function tokenCount(
+  timestamp,
+  {
+    window = 1000000,
+    input = 40,
+    output = 10,
+    cached = 0,
+    total,
+    cumulativeInput,
+    cumulativeCached,
+    cumulativeOutput,
+  } = {},
+) {
   const cumulativeTotal = total != null ? total : input + output;
   return event(timestamp, "event_msg", {
     type: "token_count",
@@ -443,16 +517,32 @@ function tokenCount(timestamp, { window = 1000000, input = 40, output = 10, cach
 }
 
 function fixtureStats(lines, { incremental = false } = {}) {
-  if (incremental) return stats.buildStats(new stats.IncrementalRolloutParser(file).readAll(), { retainRequests: false });
+  if (incremental)
+    return stats.buildStats(new stats.IncrementalRolloutParser(file).readAll(), { retainRequests: false });
   writeLines(lines);
   return stats.buildStats(new stats.IncrementalRolloutParser(file).readAll(), { retainRequests: false });
 }
 
 test("F1-1 legacy-only：仅 token_count 也能完整统计", () => {
   const result = fixtureStats([
-    tokenCount("2026-09-17T11:01:01.000Z", { total: 100, cumulativeInput: 90, cumulativeOutput: 10, cumulativeCached: 0 }),
-    tokenCount("2026-09-17T11:01:02.000Z", { total: 300, cumulativeInput: 270, cumulativeOutput: 30, cumulativeCached: 100 }),
-    tokenCount("2026-09-17T11:01:03.000Z", { total: 600, cumulativeInput: 540, cumulativeOutput: 60, cumulativeCached: 200 }),
+    tokenCount("2026-09-17T11:01:01.000Z", {
+      total: 100,
+      cumulativeInput: 90,
+      cumulativeOutput: 10,
+      cumulativeCached: 0,
+    }),
+    tokenCount("2026-09-17T11:01:02.000Z", {
+      total: 300,
+      cumulativeInput: 270,
+      cumulativeOutput: 30,
+      cumulativeCached: 100,
+    }),
+    tokenCount("2026-09-17T11:01:03.000Z", {
+      total: 600,
+      cumulativeInput: 540,
+      cumulativeOutput: 60,
+      cumulativeCached: 200,
+    }),
   ]);
   assert.equal(result.requestCount, 3);
   assert.equal(result.sessionTotal, 600);
@@ -464,9 +554,30 @@ test("F1-1 legacy-only：仅 token_count 也能完整统计", () => {
 
 test("F1-2 new-only：token_usage_record 统计与旧格式一致", () => {
   writeLines([
-    usage("2026-09-17T11:02:01.000Z", "n1", { input: 90, output: 30, cached: 0, total: 120, threadTotal: 120, turnTotal: 120 }),
-    usage("2026-09-17T11:02:02.000Z", "n2", { input: 270, output: 30, cached: 100, total: 300, threadTotal: 300, turnTotal: 300 }),
-    usage("2026-09-17T11:02:03.000Z", "n3", { input: 540, output: 60, cached: 200, total: 600, threadTotal: 600, turnTotal: 600 }),
+    usage("2026-09-17T11:02:01.000Z", "n1", {
+      input: 90,
+      output: 30,
+      cached: 0,
+      total: 120,
+      threadTotal: 120,
+      turnTotal: 120,
+    }),
+    usage("2026-09-17T11:02:02.000Z", "n2", {
+      input: 270,
+      output: 30,
+      cached: 100,
+      total: 300,
+      threadTotal: 300,
+      turnTotal: 300,
+    }),
+    usage("2026-09-17T11:02:03.000Z", "n3", {
+      input: 540,
+      output: 60,
+      cached: 200,
+      total: 600,
+      threadTotal: 600,
+      turnTotal: 600,
+    }),
   ]);
   const result = stats.buildStats(new stats.IncrementalRolloutParser(file).readAll(), { retainRequests: false });
   assert.equal(result.requestCount, 3);
@@ -476,8 +587,20 @@ test("F1-2 new-only：token_usage_record 统计与旧格式一致", () => {
 
 test("F1-3 旧→新（升版）：旧格式累计不被丢弃", () => {
   const result = fixtureStats([
-    tokenCount("2026-09-17T11:03:01.000Z", { total: 1000000, cumulativeInput: 990000, cumulativeOutput: 10000, cumulativeCached: 0 }),
-    usage("2026-09-17T11:03:02.000Z", "m1", { input: 40, output: 10, cached: 0, total: 50, threadTotal: 50, turnTotal: 50 }),
+    tokenCount("2026-09-17T11:03:01.000Z", {
+      total: 1000000,
+      cumulativeInput: 990000,
+      cumulativeOutput: 10000,
+      cumulativeCached: 0,
+    }),
+    usage("2026-09-17T11:03:02.000Z", "m1", {
+      input: 40,
+      output: 10,
+      cached: 0,
+      total: 50,
+      threadTotal: 50,
+      turnTotal: 50,
+    }),
   ]);
   assert.equal(result.requestCount, 2);
   assert.equal(result.sessionTotal, 1000050, "旧格式 1,000,000 必须保留并与新格式相加");
@@ -485,8 +608,20 @@ test("F1-3 旧→新（升版）：旧格式累计不被丢弃", () => {
 
 test("F1-4 新→旧（回退）：不双计，取归一化终值", () => {
   const result = fixtureStats([
-    usage("2026-09-17T11:04:01.000Z", "m2", { input: 540, output: 60, cached: 0, total: 600, threadTotal: 600, turnTotal: 600 }),
-    tokenCount("2026-09-17T11:04:02.000Z", { total: 1000000, cumulativeInput: 990000, cumulativeOutput: 10000, cumulativeCached: 0 }),
+    usage("2026-09-17T11:04:01.000Z", "m2", {
+      input: 540,
+      output: 60,
+      cached: 0,
+      total: 600,
+      threadTotal: 600,
+      turnTotal: 600,
+    }),
+    tokenCount("2026-09-17T11:04:02.000Z", {
+      total: 1000000,
+      cumulativeInput: 990000,
+      cumulativeOutput: 10000,
+      cumulativeCached: 0,
+    }),
   ]);
   assert.equal(result.sessionTotal, 1000000);
   assert.equal(result.requestCount, 2);
@@ -494,9 +629,28 @@ test("F1-4 新→旧（回退）：不双计，取归一化终值", () => {
 
 test("F1-5 混合 + 压缩重置：累计下降按 reset 语义处理", () => {
   const result = fixtureStats([
-    usage("2026-09-17T11:05:01.000Z", "c1", { input: 540, output: 60, cached: 0, total: 600, threadTotal: 600, turnTotal: 600 }),
-    usage("2026-09-17T11:05:02.000Z", "c2", { input: 50, output: 10, cached: 0, total: 60, threadTotal: 60, turnTotal: 60 }),
-    tokenCount("2026-09-17T11:05:03.000Z", { total: 260, cumulativeInput: 200, cumulativeOutput: 60, cumulativeCached: 0 }),
+    usage("2026-09-17T11:05:01.000Z", "c1", {
+      input: 540,
+      output: 60,
+      cached: 0,
+      total: 600,
+      threadTotal: 600,
+      turnTotal: 600,
+    }),
+    usage("2026-09-17T11:05:02.000Z", "c2", {
+      input: 50,
+      output: 10,
+      cached: 0,
+      total: 60,
+      threadTotal: 60,
+      turnTotal: 60,
+    }),
+    tokenCount("2026-09-17T11:05:03.000Z", {
+      total: 260,
+      cumulativeInput: 200,
+      cumulativeOutput: 60,
+      cumulativeCached: 0,
+    }),
   ]);
   assert.equal(result.sessionTotal, 860, "600 + (60 重置后基线上再增长到 260)");
   // 线程累计（600→60）与轮次累计（600→60）各记一次重置，故为 2。
@@ -505,11 +659,27 @@ test("F1-5 混合 + 压缩重置：累计下降按 reset 语义处理", () => {
 
 test("F1-6 混合 + 尾部截断：按新基线重新统计", () => {
   const parser = new stats.IncrementalRolloutParser(file);
-  writeLines([tokenCount("2026-09-17T11:06:01.000Z", { total: 600, cumulativeInput: 540, cumulativeOutput: 60, cumulativeCached: 0 })]);
+  writeLines([
+    tokenCount("2026-09-17T11:06:01.000Z", {
+      total: 600,
+      cumulativeInput: 540,
+      cumulativeOutput: 60,
+      cumulativeCached: 0,
+    }),
+  ]);
   let parsed = parser.readNew();
   assert.equal(stats.buildStats(parsed, { retainRequests: false }).sessionTotal, 600);
 
-  writeLines([usage("2026-09-17T11:06:02.000Z", "t1", { input: 40, output: 10, cached: 0, total: 50, threadTotal: 50, turnTotal: 50 })]);
+  writeLines([
+    usage("2026-09-17T11:06:02.000Z", "t1", {
+      input: 40,
+      output: 10,
+      cached: 0,
+      total: 50,
+      threadTotal: 50,
+      turnTotal: 50,
+    }),
+  ]);
   parsed = parser.readNew();
   const result = stats.buildStats(parsed, { retainRequests: false });
   assert.equal(result.sessionTotal, 50, "文件被截断重建后只统计新内容");
@@ -517,8 +687,20 @@ test("F1-6 混合 + 尾部截断：按新基线重新统计", () => {
 });
 
 test("F1-7 乱序：结果与事件顺序无关", () => {
-  const legacy = tokenCount("2026-09-17T11:07:01.000Z", { total: 600, cumulativeInput: 540, cumulativeOutput: 60, cumulativeCached: 0 });
-  const modern = usage("2026-09-17T11:07:02.000Z", "o1", { input: 40, output: 10, cached: 0, total: 50, threadTotal: 650, turnTotal: 50 });
+  const legacy = tokenCount("2026-09-17T11:07:01.000Z", {
+    total: 600,
+    cumulativeInput: 540,
+    cumulativeOutput: 60,
+    cumulativeCached: 0,
+  });
+  const modern = usage("2026-09-17T11:07:02.000Z", "o1", {
+    input: 40,
+    output: 10,
+    cached: 0,
+    total: 50,
+    threadTotal: 650,
+    turnTotal: 50,
+  });
   const forward = fixtureStats([legacy, modern]);
   const backward = fixtureStats([modern, legacy]);
   assert.equal(forward.sessionTotal, backward.sessionTotal);
@@ -528,18 +710,36 @@ test("F1-7 乱序：结果与事件顺序无关", () => {
 
 test("F1-8 重复事件：同 id 与同内容重复都只算一次，上升即接续不相加", () => {
   const first = usage("2026-09-17T11:08:01.000Z", "r1", {
-    input: 100, output: 20, cached: 0, total: 120,
-    threadInput: 100, threadOutput: 20, threadCached: 0, threadTotal: 120,
+    input: 100,
+    output: 20,
+    cached: 0,
+    total: 120,
+    threadInput: 100,
+    threadOutput: 20,
+    threadCached: 0,
+    threadTotal: 120,
     turnTotal: 120,
   });
   const legacy = tokenCount("2026-09-17T11:08:02.000Z", {
-    input: 100, output: 20, cached: 0, total: 120,
-    cumulativeInput: 100, cumulativeOutput: 20, cumulativeCached: 0,
+    input: 100,
+    output: 20,
+    cached: 0,
+    total: 120,
+    cumulativeInput: 100,
+    cumulativeOutput: 20,
+    cumulativeCached: 0,
   });
   const second = usage("2026-09-17T11:08:03.000Z", "r2", {
-    input: 40, output: 10, cached: 0, total: 50,
-    threadInput: 150, threadOutput: 20, threadCached: 0, threadTotal: 170,
-    turnTotal: 50, turnId: "turn-2",
+    input: 40,
+    output: 10,
+    cached: 0,
+    total: 50,
+    threadInput: 150,
+    threadOutput: 20,
+    threadCached: 0,
+    threadTotal: 170,
+    turnTotal: 50,
+    turnId: "turn-2",
   });
   const result = fixtureStats([first, first, legacy, legacy, second]);
   assert.equal(result.requestCount, 2, "r1（含 legacy 回声）算一次、r2 算一次；重复事件不重复计数");
@@ -564,7 +764,14 @@ test("F1-9A 同时间戳、500 的 key 全新：两次独立请求按累加式�
 test("F1-9B 同时间戳、500 的 key 已出现：内容回声不重复计数", () => {
   const stamp = "2026-09-17T11:09:11.000Z";
   const result = fixtureStats([
-    usage("2026-09-17T11:09:10.000Z", "seen-500", { input: 450, output: 50, cached: 0, total: 500, threadTotal: 500, turnTotal: 500 }),
+    usage("2026-09-17T11:09:10.000Z", "seen-500", {
+      input: 450,
+      output: 50,
+      cached: 0,
+      total: 500,
+      threadTotal: 500,
+      turnTotal: 500,
+    }),
     tokenCount(stamp, { total: 1000, cumulativeInput: 900, cumulativeOutput: 100, cumulativeCached: 0 }),
     usage(stamp, "echo-500", { input: 450, output: 50, cached: 0, total: 500, threadTotal: 500, turnTotal: 500 }),
   ]);
@@ -638,10 +845,22 @@ test("F1-12 双写 + 尾部截断：重建后仍只按请求计一次", () => {
 test("F1-13 错峰回声：同内容晚到仍只算一次请求，且只进回声统计", () => {
   const base = Date.parse("2026-09-17T13:13:00.000Z");
   const result = fixtureStats([
-    usage(new Date(base).toISOString(), "echo-1", { input: 100, output: 20, cached: 0, total: 120, threadTotal: 120, turnTotal: 120 }),
+    usage(new Date(base).toISOString(), "echo-1", {
+      input: 100,
+      output: 20,
+      cached: 0,
+      total: 120,
+      threadTotal: 120,
+      turnTotal: 120,
+    }),
     tokenCount(new Date(base + 12000).toISOString(), {
-      input: 100, output: 20, cached: 0, total: 120,
-      cumulativeInput: 100, cumulativeOutput: 20, cumulativeCached: 0,
+      input: 100,
+      output: 20,
+      cached: 0,
+      total: 120,
+      cumulativeInput: 100,
+      cumulativeOutput: 20,
+      cumulativeCached: 0,
     }),
   ]);
   assert.equal(result.requestCount, 1, "12 秒后的同内容 legacy 事件是同一次请求的回声，不新增请求");
@@ -656,15 +875,16 @@ test("F1-14 legacy 落后一拍的 replay：同 key 回声不触发下降累加"
   const base = Date.parse("2026-09-17T14:14:00.000Z");
   const at = (offset) => new Date(base + offset).toISOString();
   // 每条 legacy 的 last_token_usage 与对应本体同值（本轮 600），才能按内容 key 一对一认领。
-  const legacyAt = (offset, thread) => tokenCount(at(offset), {
-    input: 540,
-    output: 60,
-    cached: 0,
-    total: thread,
-    cumulativeInput: thread - 60,
-    cumulativeOutput: 60,
-    cumulativeCached: 0,
-  });
+  const legacyAt = (offset, thread) =>
+    tokenCount(at(offset), {
+      input: 540,
+      output: 60,
+      cached: 0,
+      total: thread,
+      cumulativeInput: thread - 60,
+      cumulativeOutput: 60,
+      cumulativeCached: 0,
+    });
   const result = fixtureStats([
     usage(at(0), "rp-1", { input: 540, output: 60, cached: 0, total: 600, threadTotal: 600, turnTotal: 600 }),
     usage(at(1000), "rp-2", { input: 540, output: 60, cached: 0, total: 600, threadTotal: 1200, turnTotal: 1200 }),
@@ -685,7 +905,12 @@ test("F1-15 双写段 → 单格式段衔接：段间按内容接续，不重复
   const result = fixtureStats([
     ...dualWritePair(base, "mix-1", { input: 540, output: 60, cached: 0, cumulative: 600 }),
     ...dualWritePair(base + 4000, "mix-2", { input: 540, output: 60, cached: 0, cumulative: 1200 }),
-    tokenCount(new Date(base + 8000).toISOString(), { total: 1800, cumulativeInput: 1620, cumulativeOutput: 180, cumulativeCached: 0 }),
+    tokenCount(new Date(base + 8000).toISOString(), {
+      total: 1800,
+      cumulativeInput: 1620,
+      cumulativeOutput: 180,
+      cumulativeCached: 0,
+    }),
   ]);
   assert.equal(result.requestCount, 3, "两次双写各算一次 + 单格式段一次");
   assert.equal(result.sessionTotal, 1800);
@@ -695,10 +920,27 @@ test("F1-16 双写中途升降版：双写段 → 仅 legacy 段 → 双写段 �
   const base = Date.parse("2026-09-17T16:16:00.000Z");
   const result = fixtureStats([
     ...dualWritePair(base, "seg-1", { input: 540, output: 60, cached: 0, cumulative: 600 }),
-    tokenCount(new Date(base + 4000).toISOString(), { total: 1200, cumulativeInput: 1080, cumulativeOutput: 120, cumulativeCached: 0 }),
-    tokenCount(new Date(base + 8000).toISOString(), { total: 1800, cumulativeInput: 1620, cumulativeOutput: 180, cumulativeCached: 0 }),
+    tokenCount(new Date(base + 4000).toISOString(), {
+      total: 1200,
+      cumulativeInput: 1080,
+      cumulativeOutput: 120,
+      cumulativeCached: 0,
+    }),
+    tokenCount(new Date(base + 8000).toISOString(), {
+      total: 1800,
+      cumulativeInput: 1620,
+      cumulativeOutput: 180,
+      cumulativeCached: 0,
+    }),
     ...dualWritePair(base + 12000, "seg-4", { input: 540, output: 60, cached: 0, cumulative: 2400 }),
-    usage(new Date(base + 16000).toISOString(), "seg-5", { input: 540, output: 60, cached: 0, total: 600, threadTotal: 3000, turnTotal: 3000 }),
+    usage(new Date(base + 16000).toISOString(), "seg-5", {
+      input: 540,
+      output: 60,
+      cached: 0,
+      total: 600,
+      threadTotal: 3000,
+      turnTotal: 3000,
+    }),
   ]);
   assert.equal(result.requestCount, 5, "双写去重后按段统计：1 + 2 + 1 + 1");
   assert.equal(result.sessionTotal, 3000);
@@ -706,8 +948,20 @@ test("F1-16 双写中途升降版：双写段 → 仅 legacy 段 → 双写段 �
 
 test("F1-17 降版重启：新格式 600 → legacy 50（下降 + 新 key）按累加式合并", () => {
   const result = fixtureStats([
-    usage("2026-09-17T17:17:01.000Z", "down-1", { input: 540, output: 60, cached: 0, total: 600, threadTotal: 600, turnTotal: 600 }),
-    tokenCount("2026-09-17T17:17:02.000Z", { total: 50, cumulativeInput: 40, cumulativeOutput: 10, cumulativeCached: 0 }),
+    usage("2026-09-17T17:17:01.000Z", "down-1", {
+      input: 540,
+      output: 60,
+      cached: 0,
+      total: 600,
+      threadTotal: 600,
+      turnTotal: 600,
+    }),
+    tokenCount("2026-09-17T17:17:02.000Z", {
+      total: 50,
+      cumulativeInput: 40,
+      cumulativeOutput: 10,
+      cumulativeCached: 0,
+    }),
   ]);
   assert.equal(result.requestCount, 2);
   assert.equal(result.sessionTotal, 650, "600 之后出现更低的 50 → 累加式 600 + 50");
@@ -720,10 +974,22 @@ test("F1-18 超阈值回声：>60s 只进 overThreshold 与 top-3，不影响请
   const base = Date.parse("2026-09-17T18:18:00.000Z");
   const lateTs = new Date(base + 90000).toISOString();
   const result = fixtureStats([
-    usage(new Date(base).toISOString(), "late-1", { input: 100, output: 20, cached: 0, total: 120, threadTotal: 120, turnTotal: 120 }),
+    usage(new Date(base).toISOString(), "late-1", {
+      input: 100,
+      output: 20,
+      cached: 0,
+      total: 120,
+      threadTotal: 120,
+      turnTotal: 120,
+    }),
     tokenCount(lateTs, {
-      input: 100, output: 20, cached: 0, total: 120,
-      cumulativeInput: 100, cumulativeOutput: 20, cumulativeCached: 0,
+      input: 100,
+      output: 20,
+      cached: 0,
+      total: 120,
+      cumulativeInput: 100,
+      cumulativeOutput: 20,
+      cumulativeCached: 0,
     }),
   ]);
   assert.equal(result.requestCount, 1, "超阈值回声仍只算一次请求");
@@ -738,7 +1004,12 @@ test("F1-19 双写段内 legacy-only：内容 key 全新的 legacy 记录补录�
   const base = Date.parse("2026-09-17T19:19:00.000Z");
   const result = fixtureStats([
     ...dualWritePair(base, "segl-1", { input: 540, output: 60, cached: 0, cumulative: 600 }),
-    tokenCount(new Date(base + 2000).toISOString(), { total: 900, cumulativeInput: 800, cumulativeOutput: 100, cumulativeCached: 0 }),
+    tokenCount(new Date(base + 2000).toISOString(), {
+      total: 900,
+      cumulativeInput: 800,
+      cumulativeOutput: 100,
+      cumulativeCached: 0,
+    }),
     ...dualWritePair(base + 4000, "segl-2", { input: 540, output: 60, cached: 0, cumulative: 1200 }),
   ]);
   assert.equal(result.requestCount, 3, "两次双写各算一次 + 段内 legacy-only 补录一次");
@@ -747,8 +1018,22 @@ test("F1-19 双写段内 legacy-only：内容 key 全新的 legacy 记录补录�
 
 test("F1-20 真冲突：同 response_id 但数值不同 → formatConflictCount 记 1", () => {
   const result = fixtureStats([
-    usage("2026-09-17T20:20:01.000Z", "dup-id", { input: 100, output: 20, cached: 0, total: 120, threadTotal: 120, turnTotal: 120 }),
-    usage("2026-09-17T20:20:02.000Z", "dup-id", { input: 100, output: 20, cached: 0, total: 120, threadTotal: 200, turnTotal: 120 }),
+    usage("2026-09-17T20:20:01.000Z", "dup-id", {
+      input: 100,
+      output: 20,
+      cached: 0,
+      total: 120,
+      threadTotal: 120,
+      turnTotal: 120,
+    }),
+    usage("2026-09-17T20:20:02.000Z", "dup-id", {
+      input: 100,
+      output: 20,
+      cached: 0,
+      total: 120,
+      threadTotal: 200,
+      turnTotal: 120,
+    }),
   ]);
   assert.equal(result.formatConflictCount, 1, "同 response_id 但累计数值不同 → 真冲突（本机真实会话实测为 0）");
   assert.equal(result.requestCount, 1, "同一 response_id 只算一次请求");
@@ -760,19 +1045,57 @@ test("F1-20 真冲突：同 response_id 但数值不同 → formatConflictCount 
 test("F1-21 一对一认领：echo 计入、replay 单列、unique 才补录为请求", () => {
   const result = fixtureStats([
     usage("2026-09-17T21:21:01.000Z", "claim-1", {
-      input: 60, output: 40, cached: 0, total: 100,
-      threadInput: 60, threadOutput: 40, threadCached: 0, threadTotal: 100, turnTotal: 100,
+      input: 60,
+      output: 40,
+      cached: 0,
+      total: 100,
+      threadInput: 60,
+      threadOutput: 40,
+      threadCached: 0,
+      threadTotal: 100,
+      turnTotal: 100,
     }),
     usage("2026-09-17T21:21:02.000Z", "claim-2", {
-      input: 120, output: 80, cached: 0, total: 200,
-      threadInput: 150, threadOutput: 50, threadCached: 0, threadTotal: 200, turnTotal: 200,
+      input: 120,
+      output: 80,
+      cached: 0,
+      total: 200,
+      threadInput: 150,
+      threadOutput: 50,
+      threadCached: 0,
+      threadTotal: 200,
+      turnTotal: 200,
       turnId: "turn-2",
     }),
     // 同内容 key（100|100）两次：第一次认领本体 → echo；第二次本体已被认领 → replay。
-    tokenCount("2026-09-17T21:21:03.000Z", { input: 60, output: 40, cached: 0, total: 100, cumulativeInput: 60, cumulativeOutput: 40, cumulativeCached: 0 }),
-    tokenCount("2026-09-17T21:21:04.000Z", { input: 60, output: 40, cached: 0, total: 100, cumulativeInput: 60, cumulativeOutput: 40, cumulativeCached: 0 }),
+    tokenCount("2026-09-17T21:21:03.000Z", {
+      input: 60,
+      output: 40,
+      cached: 0,
+      total: 100,
+      cumulativeInput: 60,
+      cumulativeOutput: 40,
+      cumulativeCached: 0,
+    }),
+    tokenCount("2026-09-17T21:21:04.000Z", {
+      input: 60,
+      output: 40,
+      cached: 0,
+      total: 100,
+      cumulativeInput: 60,
+      cumulativeOutput: 40,
+      cumulativeCached: 0,
+    }),
     // 新格式里没有 300|300 → unique，作为独立请求补录。
-    tokenCount("2026-09-17T21:21:05.000Z", { input: 200, output: 100, cached: 0, total: 300, cumulativeInput: 200, cumulativeOutput: 100, cumulativeCached: 0 }),
+    tokenCount("2026-09-17T21:21:05.000Z", {
+      input: 200,
+      output: 100,
+      cached: 0,
+      total: 300,
+      cumulativeInput: 200,
+      cumulativeOutput: 100,
+      cumulativeCached: 0,
+    }),
   ]);
   assert.equal(result.echoStats.total, 1, "首见 legacy 认领一具本体 → echo");
   assert.equal(result.legacyStats.claimedModern, result.echoStats.total, "不变量：echo 计数 = 被认领的本体数");
@@ -791,11 +1114,34 @@ test("F1-21 一对一认领：echo 计入、replay 单列、unique 才补录为�
 test("F1-22 unique 自身重复：同内容 key 无本体时只补录一次", () => {
   const result = fixtureStats([
     usage("2026-09-17T22:22:01.000Z", "solo-1", {
-      input: 60, output: 40, cached: 0, total: 100,
-      threadInput: 60, threadOutput: 40, threadCached: 0, threadTotal: 100, turnTotal: 100,
+      input: 60,
+      output: 40,
+      cached: 0,
+      total: 100,
+      threadInput: 60,
+      threadOutput: 40,
+      threadCached: 0,
+      threadTotal: 100,
+      turnTotal: 100,
     }),
-    tokenCount("2026-09-17T22:22:02.000Z", { input: 200, output: 100, cached: 0, total: 300, cumulativeInput: 200, cumulativeOutput: 100, cumulativeCached: 0 }),
-    tokenCount("2026-09-17T22:22:03.000Z", { input: 200, output: 100, cached: 0, total: 300, cumulativeInput: 200, cumulativeOutput: 100, cumulativeCached: 0 }),
+    tokenCount("2026-09-17T22:22:02.000Z", {
+      input: 200,
+      output: 100,
+      cached: 0,
+      total: 300,
+      cumulativeInput: 200,
+      cumulativeOutput: 100,
+      cumulativeCached: 0,
+    }),
+    tokenCount("2026-09-17T22:22:03.000Z", {
+      input: 200,
+      output: 100,
+      cached: 0,
+      total: 300,
+      cumulativeInput: 200,
+      cumulativeOutput: 100,
+      cumulativeCached: 0,
+    }),
   ]);
   assert.equal(result.uniqueStats.count, 1, "无本体的同内容重复只补录一次");
   assert.equal(result.uniqueStats.selfDuplicate, 1, "第二次记自身重复，不新增请求");
@@ -814,13 +1160,25 @@ test("F1-23 mixed format：现代记录后的 legacy 必须按 thread delta 更�
     user("2026-09-17T22:30:00.000Z"),
     turnContext("2026-09-17T22:30:01.000Z", "T-MIX", 1),
     usage("2026-09-17T22:30:02.000Z", "mix-turn-1", {
-      turnId: "T-MIX", input: 100, output: 20, cached: 40,
-      total: 120, turnTotal: 120, threadTotal: 120,
-      threadInput: 100, threadOutput: 20, threadCached: 40,
+      turnId: "T-MIX",
+      input: 100,
+      output: 20,
+      cached: 40,
+      total: 120,
+      turnTotal: 120,
+      threadTotal: 120,
+      threadInput: 100,
+      threadOutput: 20,
+      threadCached: 40,
     }),
     tokenCount("2026-09-17T22:30:03.000Z", {
-      input: 60, output: 40, cached: 20,
-      total: 220, cumulativeInput: 160, cumulativeOutput: 60, cumulativeCached: 80,
+      input: 60,
+      output: 40,
+      cached: 20,
+      total: 220,
+      cumulativeInput: 160,
+      cumulativeOutput: 60,
+      cumulativeCached: 80,
     }),
   ]);
   assert.equal(result.requestCount, 2);
@@ -835,12 +1193,22 @@ test("F1-23 mixed format：现代记录后的 legacy 必须按 thread delta 更�
 test("F1-24 legacy 自身去重保留 cached 构成差异并记为真冲突", () => {
   const result = fixtureStats([
     tokenCount("2026-09-17T22:31:00.000Z", {
-      input: 90, output: 30, cached: 10,
-      total: 120, cumulativeInput: 90, cumulativeOutput: 30, cumulativeCached: 10,
+      input: 90,
+      output: 30,
+      cached: 10,
+      total: 120,
+      cumulativeInput: 90,
+      cumulativeOutput: 30,
+      cumulativeCached: 10,
     }),
     tokenCount("2026-09-17T22:31:00.000Z", {
-      input: 90, output: 30, cached: 70,
-      total: 120, cumulativeInput: 90, cumulativeOutput: 30, cumulativeCached: 70,
+      input: 90,
+      output: 30,
+      cached: 70,
+      total: 120,
+      cumulativeInput: 90,
+      cumulativeOutput: 30,
+      cumulativeCached: 70,
     }),
   ]);
   assert.equal(result.legacyStats.raw, 2, "cached 不同不能被窄指纹静默合并");
@@ -894,14 +1262,26 @@ test("分片：locateThreadFiles 归组同一会话并按时间升序", () => {
 
 test("分片：mergeSegments 拼接记录、取最新上下文窗口、汇总冲突计数", () => {
   const first = {
-    file: "a.jsonl", threadId, date: "2026-09-13T21-32-09",
-    counts: [{}, {}], usageRecords: [{}], userMessages: [{}, {}],
-    modelContextWindow: 100000, modelChanges: [{}], formatConflicts: 1,
+    file: "a.jsonl",
+    threadId,
+    date: "2026-09-13T21-32-09",
+    counts: [{}, {}],
+    usageRecords: [{}],
+    userMessages: [{}, {}],
+    modelContextWindow: 100000,
+    modelChanges: [{}],
+    formatConflicts: 1,
   };
   const second = {
-    file: "b.jsonl", threadId, date: "2026-09-19T13-34-11",
-    counts: [{}], usageRecords: [{}], userMessages: [{}],
-    modelContextWindow: 200000, modelChanges: [{}], formatConflicts: 2,
+    file: "b.jsonl",
+    threadId,
+    date: "2026-09-19T13-34-11",
+    counts: [{}],
+    usageRecords: [{}],
+    userMessages: [{}],
+    modelContextWindow: 200000,
+    modelChanges: [{}],
+    formatConflicts: 2,
   };
   const merged = stats.mergeSegments([first, second]);
   assert.equal(merged.file, "b.jsonl", "file 取最新分片");
@@ -922,26 +1302,42 @@ test("单次 --thread 命令与 watch 一样合流全部分片", () => {
   fs.mkdirSync(sessions, { recursive: true });
   const cliThread = "11111111-2222-4333-8444-555555555555";
   const first = path.join(sessions, "rollout-2026-10-17T10-00-00-" + cliThread + ".jsonl");
-  const second = path.join(sessions, "rollout-2026-10-17T10-01-00-" + cliThread + "_66666666-7777-4888-8999-aaaaaaaaaaaa.jsonl");
-  fs.writeFileSync(first, [
-    user("2026-10-17T10:00:01.000Z"),
-    usage("2026-10-17T10:00:02.000Z", "cli-r1", { total: 20, turnTotal: 20, threadTotal: 20 }),
-  ].join("\n") + "\n", "utf8");
-  fs.writeFileSync(second, [
-    usage("2026-10-17T10:01:02.000Z", "cli-r2", {
-      turnId: "turn-1", total: 25, turnTotal: 45, threadTotal: 45,
-      threadInput: 35, threadOutput: 10, threadCached: 2,
-    }),
-  ].join("\n") + "\n", "utf8");
+  const second = path.join(
+    sessions,
+    "rollout-2026-10-17T10-01-00-" + cliThread + "_66666666-7777-4888-8999-aaaaaaaaaaaa.jsonl",
+  );
+  fs.writeFileSync(
+    first,
+    [
+      user("2026-10-17T10:00:01.000Z"),
+      usage("2026-10-17T10:00:02.000Z", "cli-r1", { total: 20, turnTotal: 20, threadTotal: 20 }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  fs.writeFileSync(
+    second,
+    [
+      usage("2026-10-17T10:01:02.000Z", "cli-r2", {
+        turnId: "turn-1",
+        total: 25,
+        turnTotal: 45,
+        threadTotal: 45,
+        threadInput: 35,
+        threadOutput: 10,
+        threadCached: 2,
+      }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
 
   try {
     const childEnv = { ...process.env, CODEX_HOME: cliHome };
     delete childEnv.TUI_TOKENS_AS_MODULE;
-    const output = execFileSync(process.execPath, [
-      fileURLToPath(new URL("../token-stats.mjs", import.meta.url)),
-      "--thread",
-      cliThread,
-    ], { encoding: "utf8", env: childEnv, timeout: 15000 });
+    const output = execFileSync(
+      process.execPath,
+      [fileURLToPath(new URL("../token-stats.mjs", import.meta.url)), "--thread", cliThread],
+      { encoding: "utf8", env: childEnv, timeout: 15000 },
+    );
     assert.match(output, /请求次数:\s*2/);
     assert.match(output, /会话累计消耗:\s*45 tokens/);
   } finally {
@@ -1034,12 +1430,25 @@ test("B-2 双写：同一轮的现代与 legacy 记录落在同一个轮对象�
   writeLines([
     turnContext("2026-09-17T12:11:00.000Z", "T-A", 10),
     usage("2026-09-17T12:11:01.000Z", "dw-b2", {
-      turnId: "T-A", input: 100, output: 20, cached: 80, total: 120,
-      turnTotal: 120, threadTotal: 120, threadInput: 100, threadOutput: 20, threadCached: 80,
+      turnId: "T-A",
+      input: 100,
+      output: 20,
+      cached: 80,
+      total: 120,
+      turnTotal: 120,
+      threadTotal: 120,
+      threadInput: 100,
+      threadOutput: 20,
+      threadCached: 80,
     }),
     tokenCount("2026-09-17T12:11:01.300Z", {
-      input: 100, output: 20, cached: 80, total: 120,
-      cumulativeInput: 100, cumulativeCached: 80, cumulativeOutput: 20,
+      input: 100,
+      output: 20,
+      cached: 80,
+      total: 120,
+      cumulativeInput: 100,
+      cumulativeCached: 80,
+      cumulativeOutput: 20,
     }),
   ]);
   const result = readStats();
@@ -1059,7 +1468,10 @@ test("B-3 legacy 记录按时间窗落到所属轮（原实现会新建填充轮
     turnContext("2026-09-17T12:22:00.000Z", "T-B", 20),
     usage("2026-09-17T12:22:01.000Z", "r2", { turnId: "T-B", total: 200, turnTotal: 200, threadTotal: 300 }),
     tokenCount("2026-09-17T12:22:30.000Z", {
-      total: 320, cumulativeInput: 300, cumulativeOutput: 20, cumulativeCached: 120,
+      total: 320,
+      cumulativeInput: 300,
+      cumulativeOutput: 20,
+      cumulativeCached: 120,
     }),
   ]);
   const result = readStats();
@@ -1071,9 +1483,19 @@ test("B-3 legacy 记录按时间窗落到所属轮（原实现会新建填充轮
 test("B-4 无 turn_context：退回 user_message 分界（旧日志行为不变）", () => {
   writeLines([
     user("2026-09-17T12:31:00.000Z"),
-    tokenCount("2026-09-17T12:31:01.000Z", { total: 100, cumulativeInput: 90, cumulativeOutput: 10, cumulativeCached: 0 }),
+    tokenCount("2026-09-17T12:31:01.000Z", {
+      total: 100,
+      cumulativeInput: 90,
+      cumulativeOutput: 10,
+      cumulativeCached: 0,
+    }),
     user("2026-09-17T12:32:00.000Z"),
-    tokenCount("2026-09-17T12:32:01.000Z", { total: 300, cumulativeInput: 270, cumulativeOutput: 30, cumulativeCached: 100 }),
+    tokenCount("2026-09-17T12:32:01.000Z", {
+      total: 300,
+      cumulativeInput: 270,
+      cumulativeOutput: 30,
+      cumulativeCached: 100,
+    }),
   ]);
   const result = readStats();
   assert.equal(result.turns.length, 2, "两条用户消息 = 两轮");
@@ -1096,22 +1518,42 @@ test("B-5 完全没有轮次线索：退化为单轮", () => {
 test("B-6 分片合并：turn_context 跨分片归并后轮数与顺序正确", () => {
   const base = (turnId, ts, ordinal) => ({ ts, ordinal, turnId });
   const partA = {
-    file, threadId, date: "2026-09-17T12-00-00",
-    counts: [], usageRecords: [], userMessages: [],
+    file,
+    threadId,
+    date: "2026-09-17T12-00-00",
+    counts: [],
+    usageRecords: [],
+    userMessages: [],
     turnContexts: [base("T-A", "2026-09-17T12:51:00.000Z", 10)],
-    modelContextWindow: 1000000, modelChanges: [], formatConflicts: 0,
+    modelContextWindow: 1000000,
+    modelChanges: [],
+    formatConflicts: 0,
   };
   const partB = {
-    file, threadId, date: "2026-09-17T13-00-00",
-    counts: [], usageRecords: [
-      { ts: "2026-09-17T12:52:01.000Z", ordinal: 12, turnId: "T-B", responseId: "r2", model: null,
-        input: 10, output: 3, cached: 2, total: 200,
+    file,
+    threadId,
+    date: "2026-09-17T13-00-00",
+    counts: [],
+    usageRecords: [
+      {
+        ts: "2026-09-17T12:52:01.000Z",
+        ordinal: 12,
+        turnId: "T-B",
+        responseId: "r2",
+        model: null,
+        input: 10,
+        output: 3,
+        cached: 2,
+        total: 200,
         turnUsage: { input: 10, output: 3, cached: 2, total: 200 },
-        threadUsage: { input: 10, output: 3, cached: 2, total: 200 } },
+        threadUsage: { input: 10, output: 3, cached: 2, total: 200 },
+      },
     ],
     userMessages: [],
     turnContexts: [base("T-B", "2026-09-17T12:52:00.000Z", 11)],
-    modelContextWindow: 1000000, modelChanges: [], formatConflicts: 0,
+    modelContextWindow: 1000000,
+    modelChanges: [],
+    formatConflicts: 0,
   };
   const merged = stats.mergeSegments([partA, partB]);
   assert.equal(merged.turnContexts.length, 2, "两段 turn_context 合并");
@@ -1128,19 +1570,38 @@ test("B-7 回归锁：混排后 currentTurn 指向真实当前轮（原 bug 会�
     user("2026-09-17T13:00:03.000Z"),
     turnContext("2026-09-17T13:01:00.000Z", "T-A", 10),
     usage("2026-09-17T13:01:01.000Z", "r1", {
-      turnId: "T-A", input: 90, output: 10, cached: 20,
-      total: 100, turnTotal: 100, threadTotal: 100,
-      threadInput: 90, threadOutput: 10, threadCached: 20,
+      turnId: "T-A",
+      input: 90,
+      output: 10,
+      cached: 20,
+      total: 100,
+      turnTotal: 100,
+      threadTotal: 100,
+      threadInput: 90,
+      threadOutput: 10,
+      threadCached: 20,
     }),
     turnContext("2026-09-17T13:02:00.000Z", "T-B", 20),
     usage("2026-09-17T13:02:01.000Z", "r2", {
-      turnId: "T-B", input: 190, output: 10, cached: 100,
-      total: 200, turnTotal: 200, threadTotal: 300,
-      threadInput: 280, threadOutput: 20, threadCached: 120,
+      turnId: "T-B",
+      input: 190,
+      output: 10,
+      cached: 100,
+      total: 200,
+      turnTotal: 200,
+      threadTotal: 300,
+      threadInput: 280,
+      threadOutput: 20,
+      threadCached: 120,
     }),
     tokenCount("2026-09-17T13:02:30.000Z", {
-      input: 10, output: 10, cached: 0,
-      total: 320, cumulativeInput: 290, cumulativeOutput: 30, cumulativeCached: 120,
+      input: 10,
+      output: 10,
+      cached: 0,
+      total: 320,
+      cumulativeInput: 290,
+      cumulativeOutput: 30,
+      cumulativeCached: 120,
     }),
   ]);
   const result = readStats();
@@ -1167,14 +1628,30 @@ test("B-8 本轮平均速度：Σ本轮输出 ÷ Σ本轮生成耗时（与 last
     counts: [],
     usageRecords: [
       {
-        ts: "2026-09-17T14:00:01.000Z", ordinal: 2, genMs: 1000, turnId: "T-A", responseId: "r1", model: null,
-        input: 100, output: 100, cached: 0, total: 100,
+        ts: "2026-09-17T14:00:01.000Z",
+        ordinal: 2,
+        genMs: 1000,
+        turnId: "T-A",
+        responseId: "r1",
+        model: null,
+        input: 100,
+        output: 100,
+        cached: 0,
+        total: 100,
         turnUsage: { input: 100, output: 100, cached: 0, total: 100 },
         threadUsage: { input: 100, output: 100, cached: 0, total: 100 },
       },
       {
-        ts: "2026-09-17T14:00:02.000Z", ordinal: 3, genMs: 3000, turnId: "T-A", responseId: "r2", model: null,
-        input: 200, output: 200, cached: 0, total: 200,
+        ts: "2026-09-17T14:00:02.000Z",
+        ordinal: 3,
+        genMs: 3000,
+        turnId: "T-A",
+        responseId: "r2",
+        model: null,
+        input: 200,
+        output: 200,
+        cached: 0,
+        total: 200,
         turnUsage: { input: 200, output: 200, cached: 0, total: 200 },
         threadUsage: { input: 200, output: 200, cached: 0, total: 200 },
       },
@@ -1189,10 +1666,20 @@ test("B-8 本轮平均速度：Σ本轮输出 ÷ Σ本轮生成耗时（与 last
 
 test("TPS-1 生成区间并集重叠只计算一次，工具间隔不进入并集", () => {
   assert.equal(
-    speedStats.unionDurationMs([[1000, 5000], [3000, 7000], [8000, 9000]]),
+    speedStats.unionDurationMs([
+      [1000, 5000],
+      [3000, 7000],
+      [8000, 9000],
+    ]),
     7000,
   );
-  assert.equal(speedStats.unionDurationMs([[1000, 2000], [2000, 3000]]), 2000);
+  assert.equal(
+    speedStats.unionDurationMs([
+      [1000, 2000],
+      [2000, 3000],
+    ]),
+    2000,
+  );
   assert.equal(speedStats.unionDurationMs([]), 0);
 });
 
@@ -1204,7 +1691,13 @@ test("TPS-2 稳健估算抑制单条尖峰，并覆盖常见速度区间", () =>
     timingSource: "record",
     index,
   });
-  for (const [base, expected] of [[12, 12], [60, 60], [220, 220], [900, 900], [1300, 1300]]) {
+  for (const [base, expected] of [
+    [12, 12],
+    [60, 60],
+    [220, 220],
+    [900, 900],
+    [1300, 1300],
+  ]) {
     const values = [base - 2, base - 1, base, base + 1, base + 2].map(sample);
     const result = speedStats.robustSpeedSummary(values);
     assert.ok(Math.abs(result.tps - expected) <= 1, `${base} 区间结果异常: ${result.tps}`);
@@ -1212,7 +1705,11 @@ test("TPS-2 稳健估算抑制单条尖峰，并覆盖常见速度区间", () =>
   }
 
   const outlier = speedStats.robustSpeedSummary([
-    sample(100, 0), sample(120, 1), sample(130, 2), sample(110, 3), sample(2351, 4),
+    sample(100, 0),
+    sample(120, 1),
+    sample(130, 2),
+    sample(110, 3),
+    sample(2351, 4),
   ]);
   assert.ok(outlier.tps >= 100 && outlier.tps <= 130, "单条 2351 T/s 尖峰不应主导中位数");
   assert.ok(outlier.outlierCount >= 1, "离群样本应被标记");
@@ -1227,15 +1724,25 @@ test("TPS-3 连续 3 个窄分布高速样本允许进入新速度区间", () =>
     index,
   });
   const result = speedStats.robustSpeedSummary([
-    sample(100, 0), sample(105, 1), sample(95, 2), sample(100, 3),
-    sample(900, 4), sample(930, 5), sample(920, 6),
+    sample(100, 0),
+    sample(105, 1),
+    sample(95, 2),
+    sample(100, 3),
+    sample(900, 4),
+    sample(930, 5),
+    sample(920, 6),
   ]);
   assert.ok(result.tps >= 900 && result.tps <= 930, "连续高速区间应被接受");
 });
 
 test("TPS-4 buildStats 使用稳健 compactTps，并保留墙钟速度字段", () => {
   const samples = [
-    [1000, 100], [1000, 120], [1000, 130], [1000, 110], [1390, 3269], [1000, 150],
+    [1000, 100],
+    [1000, 120],
+    [1000, 130],
+    [1000, 110],
+    [1390, 3269],
+    [1000, 150],
   ];
   let cumulative = 0;
   let cumulativeOutput = 0;
@@ -1266,14 +1773,16 @@ test("TPS-4 buildStats 使用稳健 compactTps，并保留墙钟速度字段", (
     turnContexts: [{ ts: "2026-09-17T15:00:00.000Z", ordinal: 1, turnId: "T-ROBUST" }],
     counts: [],
     usageRecords,
-    taskCompletions: [{
-      turnId: "T-ROBUST",
-      ts: "2026-09-17T15:01:00.000Z",
-      durationMs: 60000,
-      ttftMs: 1000,
-      startedAt: null,
-      completedAt: null,
-    }],
+    taskCompletions: [
+      {
+        turnId: "T-ROBUST",
+        ts: "2026-09-17T15:01:00.000Z",
+        durationMs: 60000,
+        ttftMs: 1000,
+        startedAt: null,
+        completedAt: null,
+      },
+    ],
     modelChanges: [],
     formatConflicts: 0,
   };
@@ -1295,12 +1804,22 @@ test("TPS-5 少于 3 个有效样本时 compactTps 为 null，不显示单条尖
     userMessages: [],
     turnContexts: [{ ts: "2026-09-17T15:10:00.000Z", ordinal: 1, turnId: "T-ONE" }],
     counts: [],
-    usageRecords: [{
-      ts: "2026-09-17T15:10:01.000Z", ordinal: 2, genMs: 1390, turnId: "T-ONE",
-      responseId: "one", model: "model-a", input: 1000, output: 3269, cached: 0, total: 4269,
-      turnUsage: { input: 1000, output: 3269, cached: 0, total: 4269 },
-      threadUsage: { input: 1000, output: 3269, cached: 0, total: 4269 },
-    }],
+    usageRecords: [
+      {
+        ts: "2026-09-17T15:10:01.000Z",
+        ordinal: 2,
+        genMs: 1390,
+        turnId: "T-ONE",
+        responseId: "one",
+        model: "model-a",
+        input: 1000,
+        output: 3269,
+        cached: 0,
+        total: 4269,
+        turnUsage: { input: 1000, output: 3269, cached: 0, total: 4269 },
+        threadUsage: { input: 1000, output: 3269, cached: 0, total: 4269 },
+      },
+    ],
     modelChanges: [],
     formatConflicts: 0,
   };

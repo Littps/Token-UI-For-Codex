@@ -9,7 +9,7 @@ export const SPEED_MIN_SAMPLES = 3;
 
 export function unionDurationMs(intervals) {
   const valid = (intervals || [])
-    .map((item) => Array.isArray(item) ? item : [item && item.start, item && item.end])
+    .map((item) => (Array.isArray(item) ? item : [item && item.start, item && item.end]))
     .map(([start, end]) => [Number(start), Number(end)])
     .filter(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && end > start)
     .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -63,17 +63,18 @@ function normalizeSample(sample, options) {
 }
 
 // 单个异常样本不主导显示；最近连续同向的高速/低速样本允许建立新置信区间。
-export function robustSpeedSummary(samples, {
-  window = SPEED_SAMPLE_WINDOW,
-  analysisWindow = SPEED_ANALYSIS_WINDOW,
-  minOutput = SPEED_MIN_OUTPUT,
-  minGenerationMs = SPEED_MIN_GENERATION_MS,
-  minSamples = SPEED_MIN_SAMPLES,
-} = {}) {
+export function robustSpeedSummary(
+  samples,
+  {
+    window = SPEED_SAMPLE_WINDOW,
+    analysisWindow = SPEED_ANALYSIS_WINDOW,
+    minOutput = SPEED_MIN_OUTPUT,
+    minGenerationMs = SPEED_MIN_GENERATION_MS,
+    minSamples = SPEED_MIN_SAMPLES,
+  } = {},
+) {
   const options = { minOutput, minGenerationMs };
-  const valid = (samples || [])
-    .map((sample) => normalizeSample(sample, options))
-    .filter(Boolean);
+  const valid = (samples || []).map((sample) => normalizeSample(sample, options)).filter(Boolean);
   if (!valid.length) {
     return {
       tps: null,
@@ -91,11 +92,7 @@ export function robustSpeedSummary(samples, {
   const speeds = recent.map((sample) => sample.speed);
   const center = median(speeds);
   const mad = medianAbsoluteDeviation(speeds, center);
-  const threshold = Math.max(
-    1,
-    Number.isFinite(center) ? center * 0.75 : 1,
-    Number.isFinite(mad) ? mad * 6 : 0,
-  );
+  const threshold = Math.max(1, Number.isFinite(center) ? center * 0.75 : 1, Number.isFinite(mad) ? mad * 6 : 0);
 
   let accepted = recent;
   if (speeds.length >= 5) {
@@ -113,7 +110,9 @@ export function robustSpeedSummary(samples, {
     const compactSpread = Number.isFinite(threeMedian) && spread <= Math.max(1, threeMedian * 0.35);
     const previousSpeeds = recent.slice(0, -3).map((sample) => sample.speed);
     const previousMedian = median(previousSpeeds);
-    const shifted = Number.isFinite(previousMedian) && previousSpeeds.length >= 3 &&
+    const shifted =
+      Number.isFinite(previousMedian) &&
+      previousSpeeds.length >= 3 &&
       (threeMedian >= previousMedian * 2 || threeMedian <= previousMedian / 2);
     if (compactSpread && shifted) accepted = lastThree;
   }
@@ -123,11 +122,8 @@ export function robustSpeedSummary(samples, {
   const sampleCount = display.length;
   const tps = sampleCount >= minSamples ? median(displaySpeeds) : null;
   const timingSource = display.some((sample) => sample.timingSource === "item") ? "item" : "record";
-  const confidence = sampleCount >= 5 && timingSource === "item"
-    ? "high"
-    : sampleCount >= minSamples
-      ? "medium"
-      : "low";
+  const confidence =
+    sampleCount >= 5 && timingSource === "item" ? "high" : sampleCount >= minSamples ? "medium" : "low";
 
   return {
     tps,

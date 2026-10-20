@@ -9,7 +9,9 @@ export const DEFAULT_CDP_PORT = 9229;
 export function portArgOf(argv, fallback = "auto") {
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--port") {
-      const value = String(argv[index + 1] || "").trim().toLowerCase();
+      const value = String(argv[index + 1] || "")
+        .trim()
+        .toLowerCase();
       if (value) return value;
     }
   }
@@ -40,7 +42,9 @@ function readCodexProcessCommandLines(timeoutMs) {
 }
 
 export async function resolveCdpPort(requested = "auto", { timeoutMs = 6000 } = {}) {
-  const raw = String(requested || "auto").trim().toLowerCase();
+  const raw = String(requested || "auto")
+    .trim()
+    .toLowerCase();
   const explicit = Number(raw);
   if (Number.isInteger(explicit) && explicit >= 1 && explicit <= 65535) return explicit;
   try {

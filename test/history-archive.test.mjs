@@ -4,10 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import {
-  UsageHistoryArchive,
-  HISTORY_RETENTION_DAYS,
-} from "../history-archive.mjs";
+import { UsageHistoryArchive, HISTORY_RETENTION_DAYS } from "../history-archive.mjs";
 
 function record(index, turnId, baseMs) {
   return {
@@ -29,10 +26,46 @@ test("历史归档：超过 500 条仍全部写入本地，重复刷新不重复
     const archive = new UsageHistoryArchive(root);
     const base = Date.parse("2026-10-17T00:00:00.000Z");
     const turns = [
-      { turnId: "T0", start: "2026-01-01T00:00:00.000Z", startLabel: "00:00", requestCount: 1, input: 1, cached: 1, output: 1, total: 2 },
-      { turnId: "T1", start: new Date(base).toISOString(), startLabel: "08:00", requestCount: 200, input: 1, cached: 1, output: 1, total: 2 },
-      { turnId: "T2", start: new Date(base + 200000).toISOString(), startLabel: "08:03", requestCount: 200, input: 1, cached: 1, output: 1, total: 2 },
-      { turnId: "T3", start: new Date(base + 400000).toISOString(), startLabel: "08:06", requestCount: 120, input: 1, cached: 1, output: 1, total: 2 },
+      {
+        turnId: "T0",
+        start: "2026-01-01T00:00:00.000Z",
+        startLabel: "00:00",
+        requestCount: 1,
+        input: 1,
+        cached: 1,
+        output: 1,
+        total: 2,
+      },
+      {
+        turnId: "T1",
+        start: new Date(base).toISOString(),
+        startLabel: "08:00",
+        requestCount: 200,
+        input: 1,
+        cached: 1,
+        output: 1,
+        total: 2,
+      },
+      {
+        turnId: "T2",
+        start: new Date(base + 200000).toISOString(),
+        startLabel: "08:03",
+        requestCount: 200,
+        input: 1,
+        cached: 1,
+        output: 1,
+        total: 2,
+      },
+      {
+        turnId: "T3",
+        start: new Date(base + 400000).toISOString(),
+        startLabel: "08:06",
+        requestCount: 120,
+        input: 1,
+        cached: 1,
+        output: 1,
+        total: 2,
+      },
     ];
     const records = [
       ...Array.from({ length: 200 }, (_, index) => record(index, "T1", base)),
@@ -44,22 +77,35 @@ test("历史归档：超过 500 条仍全部写入本地，重复刷新不重复
 
     const sessionDir = path.join(root, "sessions", first.sessionHash);
     const requestFiles = fs.readdirSync(sessionDir).filter((name) => name.startsWith("requests-"));
-    const lines = requestFiles.flatMap((name) => fs.readFileSync(path.join(sessionDir, name), "utf8").trim().split(/\r?\n/));
+    const lines = requestFiles.flatMap((name) =>
+      fs.readFileSync(path.join(sessionDir, name), "utf8").trim().split(/\r?\n/),
+    );
     assert.equal(lines.length, 520);
-    assert.ok(lines.every((line) => !line.includes("thread-secret-value")), "归档不能包含原始 threadId");
+    assert.ok(
+      lines.every((line) => !line.includes("thread-secret-value")),
+      "归档不能包含原始 threadId",
+    );
 
     const second = archive.archiveSession({ threadId: "thread-secret-value", turns, records, now: base + 600000 });
     assert.equal(second.appended, 0, "相同记录重复刷新不能重复追加");
 
     const nextRecords = [...records, record(520, "T3", base + 520000)];
     turns.at(-1).requestCount += 1;
-    const third = archive.archiveSession({ threadId: "thread-secret-value", turns, records: nextRecords, now: base + 700000 });
+    const third = archive.archiveSession({
+      threadId: "thread-secret-value",
+      turns,
+      records: nextRecords,
+      now: base + 700000,
+    });
     assert.equal(third.appended, 1);
 
     const turnSnapshot = JSON.parse(fs.readFileSync(path.join(sessionDir, "turns.json"), "utf8"));
     assert.equal(turnSnapshot.turns.length, 3);
     assert.equal(turnSnapshot.turns.at(-1).requests, 121);
-    assert.ok(turnSnapshot.turns.every((turn) => turn.start !== "2026-01-01T00:00:00.000Z"), "超过 60 天的轮次摘要应被过滤");
+    assert.ok(
+      turnSnapshot.turns.every((turn) => turn.start !== "2026-01-01T00:00:00.000Z"),
+      "超过 60 天的轮次摘要应被过滤",
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

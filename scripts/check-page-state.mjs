@@ -60,9 +60,7 @@ for (const page of pages) {
         return ring ? ring.getAttribute("aria-label") : null;
       })(),
       mainPresent: !!document.querySelector("main"),
-      composerPresent: !!document.querySelector(
-        '[data-thread-find-composer="true"], [data-codex-composer="true"]',
-      ),
+      composerPresent: !!document.querySelector('[data-thread-find-composer="true"], [data-codex-composer="true"]'),
       conversationPresent: !!document.querySelector('main [data-thread-find-target="conversation"]'),
       sidebarThreadPresent: !!document.querySelector(
         '[data-app-action-sidebar-thread-id], [aria-current="page"][data-app-action-sidebar-thread-id]',

@@ -2,6 +2,10 @@ import js from "@eslint/js";
 import globals from "globals";
 
 const recommendedRules = js.configs.recommended.rules;
+const scriptGlobals = {
+  ...globals.node,
+  ...globals.browser,
+};
 
 export default [
   {
@@ -18,6 +22,14 @@ export default [
       ...recommendedRules,
       "no-empty": ["error", { allowEmptyCatch: true }],
       "no-unused-vars": ["error", { caughtErrors: "none" }],
+    },
+  },
+  {
+    files: ["scripts/**/*.mjs", "test/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: scriptGlobals,
     },
   },
   {

@@ -10,8 +10,12 @@ const stats = await import("../token-stats.mjs");
 
 const sessionsDir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
 const walk = (dir, out = []) => {
-  let entries = [];
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) walk(full, out);
@@ -48,48 +52,57 @@ for (const line of fs.readFileSync(newest.file, "utf8").split(/\r?\n/)) {
   }
 }
 
-console.log(JSON.stringify({
-  file: path.basename(newest.file).slice(0, 27) + "…",
-  window: { firstTs, lastTs },
-  raw: { usageRecordLines, tokenCountLines },
-  parsedAfterDedupe: {
-    usageRecords: parsed.usageRecords.length,
-    counts: parsed.counts.length,
-  },
-  // 一对一认领的三类分类（会话级，与参考脚本 classify.cjs 对照）。
-  classification: {
-    echo: result.echoStats.total,
-    replay: result.replayStats.count,
-    unique: result.uniqueStats.count,
-    uniqueSelfDuplicate: result.uniqueStats.selfDuplicate,
-    legacyRaw: result.legacyStats.raw,
-    legacyDeduped: result.legacyStats.deduped,
-    claimedModern: result.legacyStats.claimedModern,
-    modernKept: parsed.usageRecords.length,
-  },
-  statsRequestCount: result.requestCount,
-  sessionTotal: result.sessionTotal,
-  prefixSum: {
-    modernPerRequestSum,
-    sessionTotalMinusSum: result.sessionTotal - modernPerRequestSum,
-  },
-  echoStats: result.echoStats,
-  replayStats: result.replayStats,
-  formatConflictCount: result.formatConflictCount,
-  acceptance: {
-    // 结构断言（见 docs/F1-merge-spec.md）：全部必须为 true；比例用 1%，lagMaxMs 只作观测、不写死数值。
-    echoEqualsClaimedModern: result.echoStats.total === result.legacyStats.claimedModern,
-    classesSumEqualsLegacyDeduped: result.echoStats.total + result.replayStats.count + result.uniqueStats.count === result.legacyStats.deduped,
-    legacyDedupedPlusSelfDuplicateEqualsRaw: result.legacyStats.deduped + result.uniqueStats.selfDuplicate === result.legacyStats.raw,
-    requestCountEqualsModernPlusUnique: result.requestCount === parsed.usageRecords.length + result.uniqueStats.count,
-    sessionTotalMatchesPrefixSum: result.sessionTotal === modernPerRequestSum,
-    trueConflictsZero: result.formatConflictCount === 0,
-    overThresholdRatioWithinOnePercent: result.echoStats.total > 0
-      ? result.echoStats.overThreshold / result.echoStats.total <= 0.01
-      : false,
-    overThresholdRatio: result.echoStats.total > 0
-      ? Number((result.echoStats.overThreshold / result.echoStats.total).toFixed(5))
-      : null,
-  },
-  turns: result.turns.length,
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      file: path.basename(newest.file).slice(0, 27) + "…",
+      window: { firstTs, lastTs },
+      raw: { usageRecordLines, tokenCountLines },
+      parsedAfterDedupe: {
+        usageRecords: parsed.usageRecords.length,
+        counts: parsed.counts.length,
+      },
+      // 一对一认领的三类分类（会话级，与参考脚本 classify.cjs 对照）。
+      classification: {
+        echo: result.echoStats.total,
+        replay: result.replayStats.count,
+        unique: result.uniqueStats.count,
+        uniqueSelfDuplicate: result.uniqueStats.selfDuplicate,
+        legacyRaw: result.legacyStats.raw,
+        legacyDeduped: result.legacyStats.deduped,
+        claimedModern: result.legacyStats.claimedModern,
+        modernKept: parsed.usageRecords.length,
+      },
+      statsRequestCount: result.requestCount,
+      sessionTotal: result.sessionTotal,
+      prefixSum: {
+        modernPerRequestSum,
+        sessionTotalMinusSum: result.sessionTotal - modernPerRequestSum,
+      },
+      echoStats: result.echoStats,
+      replayStats: result.replayStats,
+      formatConflictCount: result.formatConflictCount,
+      acceptance: {
+        // 结构断言（见 docs/F1-merge-spec.md）：全部必须为 true；比例用 1%，lagMaxMs 只作观测、不写死数值。
+        echoEqualsClaimedModern: result.echoStats.total === result.legacyStats.claimedModern,
+        classesSumEqualsLegacyDeduped:
+          result.echoStats.total + result.replayStats.count + result.uniqueStats.count === result.legacyStats.deduped,
+        legacyDedupedPlusSelfDuplicateEqualsRaw:
+          result.legacyStats.deduped + result.uniqueStats.selfDuplicate === result.legacyStats.raw,
+        requestCountEqualsModernPlusUnique:
+          result.requestCount === parsed.usageRecords.length + result.uniqueStats.count,
+        sessionTotalMatchesPrefixSum: result.sessionTotal === modernPerRequestSum,
+        trueConflictsZero: result.formatConflictCount === 0,
+        overThresholdRatioWithinOnePercent:
+          result.echoStats.total > 0 ? result.echoStats.overThreshold / result.echoStats.total <= 0.01 : false,
+        overThresholdRatio:
+          result.echoStats.total > 0
+            ? Number((result.echoStats.overThreshold / result.echoStats.total).toFixed(5))
+            : null,
+      },
+      turns: result.turns.length,
+    },
+    null,
+    2,
+  ),
+);

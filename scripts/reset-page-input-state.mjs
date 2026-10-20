@@ -33,9 +33,7 @@ const snapshot = () =>
     probeGlobalExists: typeof window.__tuiInputProbe === "object" && window.__tuiInputProbe !== null,
     hasFocus: document.hasFocus(),
     visibilityState: document.visibilityState,
-    activeElement: document.activeElement
-      ? document.activeElement.id || document.activeElement.tagName
-      : null,
+    activeElement: document.activeElement ? document.activeElement.id || document.activeElement.tagName : null,
   }));
 
 const before = await snapshot();

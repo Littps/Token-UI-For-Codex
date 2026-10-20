@@ -352,8 +352,14 @@ test("实机：紧凑条优先使用稳健速度，样本不足显示 --T/s", as
     const canonicalJson = (value) => {
       if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
       if (value && typeof value === "object") {
-        return "{" + Object.keys(value).sort()
-          .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+        return (
+          "{" +
+          Object.keys(value)
+            .sort()
+            .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key]))
+            .join(",") +
+          "}"
+        );
       }
       return JSON.stringify(value);
     };

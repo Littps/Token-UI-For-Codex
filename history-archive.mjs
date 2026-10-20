@@ -7,7 +7,11 @@ export const HISTORY_FILE_MAX_BYTES = 32 * 1024 * 1024;
 export const HISTORY_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 function sessionHashOf(threadId) {
-  return crypto.createHash("sha256").update(String(threadId || "")).digest("hex").slice(0, 32);
+  return crypto
+    .createHash("sha256")
+    .update(String(threadId || ""))
+    .digest("hex")
+    .slice(0, 32);
 }
 
 function hashKey(parts) {
@@ -52,11 +56,14 @@ function readKeys(file) {
 }
 
 export class UsageHistoryArchive {
-  constructor(root, {
-    retentionDays = HISTORY_RETENTION_DAYS,
-    maxFileBytes = HISTORY_FILE_MAX_BYTES,
-    cleanupIntervalMs = HISTORY_CLEANUP_INTERVAL_MS,
-  } = {}) {
+  constructor(
+    root,
+    {
+      retentionDays = HISTORY_RETENTION_DAYS,
+      maxFileBytes = HISTORY_FILE_MAX_BYTES,
+      cleanupIntervalMs = HISTORY_CLEANUP_INTERVAL_MS,
+    } = {},
+  ) {
     this.root = root;
     this.retentionDays = retentionDays;
     this.maxFileBytes = maxFileBytes;
@@ -182,7 +189,8 @@ export class UsageHistoryArchive {
       if (turnIndex < 0) continue;
       const requestIndex = (state.turnCounts.get(turnIndex) || 0) + 1;
       state.turnCounts.set(turnIndex, requestIndex);
-      const threadTotal = record.threadUsage && Number.isFinite(record.threadUsage.total) ? record.threadUsage.total : null;
+      const threadTotal =
+        record.threadUsage && Number.isFinite(record.threadUsage.total) ? record.threadUsage.total : null;
       const turnTotal = record.turnUsage && Number.isFinite(record.turnUsage.total) ? record.turnUsage.total : null;
       const key = hashKey([
         state.hash,
@@ -197,23 +205,25 @@ export class UsageHistoryArchive {
       ]);
       if (state.seen.has(key)) continue;
       state.seen.add(key);
-      lines.push(JSON.stringify({
-        v: 1,
-        kind: "request",
-        key,
-        sessionHash: state.hash,
-        observedAt: new Date(now).toISOString(),
-        turnIndex: turnIndex + 1,
-        requestIndex,
-        ts: record.ts || "",
-        input: record.input == null ? null : record.input,
-        cached: record.cached == null ? null : record.cached,
-        uncached: record.input != null && record.cached != null ? Math.max(0, record.input - record.cached) : null,
-        output: record.output == null ? null : record.output,
-        total: record.requestTotal == null ? null : record.requestTotal,
-        threadTotal,
-        turnTotal,
-      }));
+      lines.push(
+        JSON.stringify({
+          v: 1,
+          kind: "request",
+          key,
+          sessionHash: state.hash,
+          observedAt: new Date(now).toISOString(),
+          turnIndex: turnIndex + 1,
+          requestIndex,
+          ts: record.ts || "",
+          input: record.input == null ? null : record.input,
+          cached: record.cached == null ? null : record.cached,
+          uncached: record.input != null && record.cached != null ? Math.max(0, record.input - record.cached) : null,
+          output: record.output == null ? null : record.output,
+          total: record.requestTotal == null ? null : record.requestTotal,
+          threadTotal,
+          turnTotal,
+        }),
+      );
     }
 
     if (lines.length) {

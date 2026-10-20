@@ -18,7 +18,11 @@ for (let index = 0; index < argv.length; index += 1) {
 
 const sourceRoot = path.join(import.meta.dirname, "..");
 const pluginCacheRoot = path.join(os.homedir(), ".codex", "plugins", "cache", "tokens-ui-for-codex-local");
-const userScriptsRoot = path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Codex++", "user_scripts");
+const userScriptsRoot = path.join(
+  process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"),
+  "Codex++",
+  "user_scripts",
+);
 
 function sha256(file) {
   try {
@@ -33,7 +37,8 @@ function newestPluginDir(root) {
     // 插件 cache 的真实层级是 <marketplace>/<插件名>/<版本>/（实测），
     // 旧实现只探测了一层，导致"插件cache"长期为 null 而未被察觉。
     // 这里对最多两层做探测，取包含 token-stats.mjs 的最新目录。
-    const levelOne = fs.readdirSync(root, { withFileTypes: true })
+    const levelOne = fs
+      .readdirSync(root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => path.join(root, entry.name));
     const candidates = [];
@@ -41,7 +46,8 @@ function newestPluginDir(root) {
       if (fs.existsSync(path.join(dir, "token-stats.mjs"))) candidates.push(dir);
       let nested = [];
       try {
-        nested = fs.readdirSync(dir, { withFileTypes: true })
+        nested = fs
+          .readdirSync(dir, { withFileTypes: true })
           .filter((entry) => entry.isDirectory())
           .map((entry) => path.join(dir, entry.name));
       } catch {}
@@ -60,7 +66,17 @@ const pluginCacheDir = newestPluginDir(pluginCacheRoot);
 const deployPluginDir = deployRoot ? path.join(deployRoot, "plugins", "tokens-ui-for-codex") : null;
 
 // 注意：launch-silent.vbs 由安装脚本按本机路径生成，各副本内容必然不同，因此不纳入一致性比对。
-const CHECKED_FILES = ["token-stats.mjs", "speed-stats.mjs", "history-archive.mjs", "tokens-ui-for-codex-panel.js", "protocol.mjs", "find-codex.ps1", "install.ps1", "install-autostart.ps1", "uninstall-autostart.ps1"];
+const CHECKED_FILES = [
+  "token-stats.mjs",
+  "speed-stats.mjs",
+  "history-archive.mjs",
+  "tokens-ui-for-codex-panel.js",
+  "protocol.mjs",
+  "find-codex.ps1",
+  "install.ps1",
+  "install-autostart.ps1",
+  "uninstall-autostart.ps1",
+];
 
 const copies = [
   { name: "源码", root: sourceRoot },
@@ -77,11 +93,10 @@ for (const file of CHECKED_FILES) {
     row[copy.name] = copy.root ? sha256(path.join(copy.root, file)) : null;
   }
   // Codex++ 只保存用户脚本
-  row["user_scripts"] = file === "tokens-ui-for-codex-panel.js"
-    ? sha256(path.join(userScriptsRoot, file))
-    : "n/a";
-  const values = [row["源码"], row["部署"], row["插件cache"], row["user_scripts"]]
-    .filter((value) => value && value !== "n/a");
+  row["user_scripts"] = file === "tokens-ui-for-codex-panel.js" ? sha256(path.join(userScriptsRoot, file)) : "n/a";
+  const values = [row["源码"], row["部署"], row["插件cache"], row["user_scripts"]].filter(
+    (value) => value && value !== "n/a",
+  );
   row.consistent = values.length > 0 && values.every((value) => value === values[0]);
   if (!row.consistent) mismatches += 1;
   results.push(row);
@@ -92,7 +107,10 @@ if (zipPath && fs.existsSync(zipPath)) {
   const buffer = fs.readFileSync(zipPath);
   let eocd = -1;
   for (let index = buffer.length - 22; index >= 0 && index > buffer.length - 66000; index -= 1) {
-    if (buffer.readUInt32LE(index) === 0x06054b50) { eocd = index; break; }
+    if (buffer.readUInt32LE(index) === 0x06054b50) {
+      eocd = index;
+      break;
+    }
   }
   if (eocd >= 0) {
     const entryCount = buffer.readUInt16LE(eocd + 10);
@@ -126,14 +144,20 @@ if (zipPath && fs.existsSync(zipPath)) {
   }
 }
 
-console.log(JSON.stringify({
-  sourceRoot,
-  deployPluginDir,
-  pluginCacheDir,
-  userScriptsRoot,
-  zipPath: zipPath || null,
-  mismatches,
-  results,
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      sourceRoot,
+      deployPluginDir,
+      pluginCacheDir,
+      userScriptsRoot,
+      zipPath: zipPath || null,
+      mismatches,
+      results,
+    },
+    null,
+    2,
+  ),
+);
 
 if (mismatches > 0) process.exitCode = 1;

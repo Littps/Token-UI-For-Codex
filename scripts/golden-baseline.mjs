@@ -101,11 +101,7 @@ function freezeCorpus() {
 // 否则每次都会重新复制语料，正在增长的会话又会把哈希变掉。
 // 需要更新语料时用 --refresh-corpus；想彻底清理，手动删除临时目录即可。
 
-const mode = process.argv.includes("--write")
-  ? "write"
-  : process.argv.includes("--check")
-    ? "check"
-    : null;
+const mode = process.argv.includes("--write") ? "write" : process.argv.includes("--check") ? "check" : null;
 
 if (!mode) {
   console.error("用法: node scripts/golden-baseline.mjs --write | --check");
@@ -132,9 +128,7 @@ function listSessions() {
 }
 
 function threadIdOf(file) {
-  const match = path.basename(file).match(
-    /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
-  );
+  const match = path.basename(file).match(/-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i);
   return match ? match[1] : null;
 }
 
@@ -146,8 +140,8 @@ function fileKeyOf(file) {
 function runCli(args) {
   const childEnv = { ...process.env };
   delete childEnv.TUI_TOKENS_AS_MODULE;
-  childEnv.CODEX_HOME = snapshotRoot;            // 指向冻结语料
-  childEnv.LOCALAPPDATA = snapshotStateDir;      // 状态隔离，不碰真实 client-thread-map.json
+  childEnv.CODEX_HOME = snapshotRoot; // 指向冻结语料
+  childEnv.LOCALAPPDATA = snapshotStateDir; // 状态隔离，不碰真实 client-thread-map.json
   childEnv.APPDATA = snapshotStateDir;
   try {
     const stdout = execFileSync(process.execPath, [statsScript, ...args], {
@@ -225,7 +219,9 @@ if (mode === "write") {
   fs.mkdirSync(path.dirname(baselineFile), { recursive: true });
   fs.writeFileSync(baselineFile, JSON.stringify(payload, null, 2) + "\n", "utf8");
   console.log("已写入基线：" + path.relative(root, baselineFile));
-  console.log("用例数：" + entries.length + "（其中 --detail 抽样 " + cases.filter((c) => c.kind === "detail").length + " 个）");
+  console.log(
+    "用例数：" + entries.length + "（其中 --detail 抽样 " + cases.filter((c) => c.kind === "detail").length + " 个）",
+  );
   process.exit(0);
 }
 

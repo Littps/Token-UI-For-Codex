@@ -37,8 +37,14 @@ if (!targetId && targets.length > 1) {
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error("CDP 连接超时")), 8000);
-  ws.addEventListener("open", () => { clearTimeout(timer); resolve(); });
-  ws.addEventListener("error", () => { clearTimeout(timer); reject(new Error("CDP 连接失败")); });
+  ws.addEventListener("open", () => {
+    clearTimeout(timer);
+    resolve();
+  });
+  ws.addEventListener("error", () => {
+    clearTimeout(timer);
+    reject(new Error("CDP 连接失败"));
+  });
 });
 
 const id = 1;
@@ -58,5 +64,7 @@ const done = new Promise((resolve, reject) => {
 });
 ws.send(JSON.stringify({ id, method: "Page.reload", params: { ignoreCache: true } }));
 await done.catch(() => {});
-try { ws.close(); } catch {}
+try {
+  ws.close();
+} catch {}
 console.log("已请求重载 Codex 页面: " + target.id + (target.title ? " (" + target.title + ")" : ""));

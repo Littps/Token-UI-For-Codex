@@ -20,11 +20,24 @@ const report = {};
     JSON.stringify({
       timestamp: "2026-09-17T10:00:01.000Z",
       type: "event_msg",
-      payload: { type: "token_count", info: {
-        model_context_window: 1000000,
-        last_token_usage: { input_tokens: 990000, output_tokens: 10000, cached_input_tokens: 0, total_tokens: 1000000 },
-        total_token_usage: { input_tokens: 990000, output_tokens: 10000, cached_input_tokens: 0, total_tokens: 1000000 },
-      } },
+      payload: {
+        type: "token_count",
+        info: {
+          model_context_window: 1000000,
+          last_token_usage: {
+            input_tokens: 990000,
+            output_tokens: 10000,
+            cached_input_tokens: 0,
+            total_tokens: 1000000,
+          },
+          total_token_usage: {
+            input_tokens: 990000,
+            output_tokens: 10000,
+            cached_input_tokens: 0,
+            total_tokens: 1000000,
+          },
+        },
+      },
     }),
     JSON.stringify({
       timestamp: "2026-09-17T10:00:02.000Z",
@@ -55,8 +68,12 @@ const report = {};
 {
   const sessionsDir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
   const walk = (dir, out = []) => {
-    let entries = [];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return out;
+    }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full, out);
@@ -64,7 +81,9 @@ const report = {};
     }
     return out;
   };
-  const files = walk(sessionsDir).map((file) => ({ file, mtimeMs: fs.statSync(file).mtimeMs })).sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const files = walk(sessionsDir)
+    .map((file) => ({ file, mtimeMs: fs.statSync(file).mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
   let lastUsage = null;
   let window = null;
   for (const entry of files) {
@@ -72,10 +91,15 @@ const report = {};
     for (const line of text.split(/\r?\n/)) {
       if (!line.includes("token_usage_record") && !line.includes("model_context_window")) continue;
       let event;
-      try { event = JSON.parse(line); } catch { continue; }
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
       const payload = event.payload || {};
       if (Number.isFinite(payload.model_context_window)) window = payload.model_context_window;
-      if (payload.info && Number.isFinite(payload.info.model_context_window)) window = payload.info.model_context_window;
+      if (payload.info && Number.isFinite(payload.info.model_context_window))
+        window = payload.info.model_context_window;
       if (event.type === "token_usage_record" && payload.usage) {
         lastUsage = {
           input: payload.usage.input_tokens,
@@ -105,11 +129,11 @@ const report = {};
   report.F3_protocol_dead_code = {
     healthStatuses: statuses,
     statusesNeverAssigned: statuses.filter((status) => {
-      const pattern = new RegExp("status: \\\"" + status + "\\\"|status = \\\"" + status + "\\\"|\\\"" + status + "\\\"");
       const assignments = monitorSource.match(new RegExp("(status|currentHealth)[^\\n]*" + status, "g")) || [];
       return status !== "healthy" && status !== "starting" && assignments.length === 0;
     }),
-    outOfOrderInPayload: /outOfOrder\s*:/.test(panelSource) || /outOfOrder/.test(monitorSource.split("payloadFor")[1] || ""),
+    outOfOrderInPayload:
+      /outOfOrder\s*:/.test(panelSource) || /outOfOrder/.test(monitorSource.split("payloadFor")[1] || ""),
     modelSwitchRenderedInPanel: /modelSwitchCount[^\n]*textNode|modelSwitchCount[^\n]*append/.test(panelSource),
     title: "F3",
   };
@@ -120,12 +144,34 @@ const report = {};
   const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v3.schema.json", import.meta.url), "utf8"));
   const required = schema.required || [];
   const alwaysProduced = [
-    "protocolName", "schemaVersion", "authRequired", "auth", "capabilities", "modelContextWindow", "requestCount",
+    "protocolName",
+    "schemaVersion",
+    "authRequired",
+    "auth",
+    "capabilities",
+    "modelContextWindow",
+    "requestCount",
     "currentTurnRequestCount",
-    "sessionTotal", "sessionInput", "sessionCached", "sessionOutput", "contextUsed",
-    "turnTotal", "turnInput", "turnCached", "turnOutput", "currentTurnIndex", "turns",
-    "turnsTruncated", "turnTotalCount", "requestDetails", "requestDetailsTruncated",
-    "requestDetailTotal", "modelSwitchCount", "cumulativeResetCount", "health", "updatedAt",
+    "sessionTotal",
+    "sessionInput",
+    "sessionCached",
+    "sessionOutput",
+    "contextUsed",
+    "turnTotal",
+    "turnInput",
+    "turnCached",
+    "turnOutput",
+    "currentTurnIndex",
+    "turns",
+    "turnsTruncated",
+    "turnTotalCount",
+    "requestDetails",
+    "requestDetailsTruncated",
+    "requestDetailTotal",
+    "modelSwitchCount",
+    "cumulativeResetCount",
+    "health",
+    "updatedAt",
   ];
   report.F4_schema_drift = {
     requiredCount: required.length,

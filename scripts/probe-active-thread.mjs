@@ -41,7 +41,7 @@ function fail(message) {
 // ---- 从源码里抽出注入页面的表达式 ---------------------------------------
 
 function constantValue(source, name) {
-  const stringMatch = source.match(new RegExp("const\\s+" + name + "\\s*=\\s*\"([^\"]*)\""));
+  const stringMatch = source.match(new RegExp("const\\s+" + name + '\\s*=\\s*"([^"]*)"'));
   if (stringMatch) return stringMatch[1];
   const numberMatch = source.match(new RegExp("const\\s+" + name + "\\s*=\\s*(\\d+)"));
   if (numberMatch) return Number(numberMatch[1]);

@@ -17,7 +17,20 @@ for (let index = 0; index < argv.length; index += 1) {
 if (!roots.length && !zipPaths.length) roots.push(process.cwd());
 
 const SKIP_DIRS = new Set([".git", "node_modules", "backups", ".codex", "dist", "build"]);
-const SKIP_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".exe", ".7z", ".zip", ".woff", ".woff2", ".ttf"]);
+const SKIP_EXT = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".ico",
+  ".exe",
+  ".7z",
+  ".zip",
+  ".woff",
+  ".woff2",
+  ".ttf",
+]);
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
 // 本机用户名 / 主机名规则按运行环境推导，避免把任何用户名硬编码进仓库。
@@ -45,8 +58,18 @@ function buildLocalIdentityPattern() {
 }
 
 const RULES = [
-  { id: "api-key", severity: "high", label: "API 密钥（sk-/sk-ant-/sk-proj-）", pattern: /\b(?:sk|sk-ant|sk-proj)-[A-Za-z0-9_-]{16,}/g },
-  { id: "github-token", severity: "high", label: "GitHub Token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/g },
+  {
+    id: "api-key",
+    severity: "high",
+    label: "API 密钥（sk-/sk-ant-/sk-proj-）",
+    pattern: /\b(?:sk|sk-ant|sk-proj)-[A-Za-z0-9_-]{16,}/g,
+  },
+  {
+    id: "github-token",
+    severity: "high",
+    label: "GitHub Token",
+    pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  },
   { id: "aws-key", severity: "high", label: "AWS Access Key", pattern: /\bAKIA[0-9A-Z]{16}\b/g },
   { id: "private-key", severity: "high", label: "私钥文件内容", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
   { id: "bearer", severity: "high", label: "Bearer 令牌", pattern: /Bearer\s+[A-Za-z0-9._-]{20,}/g },
@@ -55,14 +78,30 @@ const RULES = [
     id: "secret-assignment",
     severity: "high",
     label: "可能的密钥赋值",
-    pattern: /(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*["']?[A-Za-z0-9._\-]{10,}/gi,
+    pattern:
+      /(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*["']?[A-Za-z0-9._-]{10,}/gi,
   },
   { id: "email", severity: "medium", label: "邮箱地址", pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g },
-  { id: "windows-user-path", severity: "medium", label: "本机绝对路径（含用户名）", pattern: /[A-Za-z]:\\Users\\[^\\\s"')]+/g },
-  { id: "local-username", severity: "medium", label: "本机用户名/主机名（按运行环境推导）", pattern: buildLocalIdentityPattern() },
+  {
+    id: "windows-user-path",
+    severity: "medium",
+    label: "本机绝对路径（含用户名）",
+    pattern: /[A-Za-z]:\\Users\\[^\\\s"')]+/g,
+  },
+  {
+    id: "local-username",
+    severity: "medium",
+    label: "本机用户名/主机名（按运行环境推导）",
+    pattern: buildLocalIdentityPattern(),
+  },
   { id: "cn-mobile", severity: "medium", label: "中国大陆手机号", pattern: /\b1[3-9]\d{9}\b/g },
   { id: "wechat-id", severity: "medium", label: "微信标识", pattern: /\bwxid_[A-Za-z0-9_-]{6,}\b/g },
-  { id: "session-log-path", severity: "low", label: "会话日志路径引用（文档说明用）", pattern: /\.codex\\sessions|rollout-\d{4}-\d{2}-\d{2}T/g },
+  {
+    id: "session-log-path",
+    severity: "low",
+    label: "会话日志路径引用（文档说明用）",
+    pattern: /\.codex\\sessions|rollout-\d{4}-\d{2}-\d{2}T/g,
+  },
 ];
 
 function mask(value) {

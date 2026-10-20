@@ -12,10 +12,7 @@ for (let index = 0; index < argv.length; index += 1) {
   if (argv[index] === "--files" && Number.isInteger(Number(argv[index + 1]))) fileCount = Number(argv[index + 1]);
 }
 
-const sessionsDir = path.join(
-  process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
-  "sessions",
-);
+const sessionsDir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
 
 function listRolloutFiles(dir, out = []) {
   let entries;
@@ -96,7 +93,10 @@ for (const entry of files) {
       candidates.push({ location: type + ".payload.info.model_context_window", value: info.model_context_window });
     }
     if (payload.context_window && Number.isFinite(payload.context_window.limit_tokens)) {
-      candidates.push({ location: type + ".payload.context_window.limit_tokens", value: payload.context_window.limit_tokens });
+      candidates.push({
+        location: type + ".payload.context_window.limit_tokens",
+        value: payload.context_window.limit_tokens,
+      });
     }
 
     for (const candidate of candidates) {
@@ -106,7 +106,10 @@ for (const entry of files) {
       if (candidate.location.endsWith("info.model_context_window") && stats.ordinalFirstTokenCountWindow === null) {
         stats.ordinalFirstTokenCountWindow = ordinal;
       }
-      if (candidate.location === "turn_context.payload.model_context_window" && stats.ordinalFirstTurnContextWindow === null) {
+      if (
+        candidate.location === "turn_context.payload.model_context_window" &&
+        stats.ordinalFirstTurnContextWindow === null
+      ) {
         stats.ordinalFirstTurnContextWindow = ordinal;
       }
     }

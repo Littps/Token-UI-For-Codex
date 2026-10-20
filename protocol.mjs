@@ -33,12 +33,7 @@ export const HEALTH_STATUSES = Object.freeze([
   "failed",
 ]);
 
-export const RECOVERY_STATES = Object.freeze([
-  "idle",
-  "retrying",
-  "recovered",
-  "failed",
-]);
+export const RECOVERY_STATES = Object.freeze(["idle", "retrying", "recovered", "failed"]);
 
 export const TARGET_MODES = Object.freeze(["auto", "focused", "manual"]);
 export const TARGET_SELECTIONS = Object.freeze(["unknown", "single", "focused", "visible", "manual", "required"]);
@@ -93,7 +88,14 @@ export function validateHealth(health) {
     errors.push("health.recoveryState is invalid");
   }
   if (health.platform !== "windows") errors.push("health.platform must be windows");
-  for (const key of ["platformSupported", "nodeSupported", "cdpReachable", "pageAttached", "dataFresh", "monitorRunning"]) {
+  for (const key of [
+    "platformSupported",
+    "nodeSupported",
+    "cdpReachable",
+    "pageAttached",
+    "dataFresh",
+    "monitorRunning",
+  ]) {
     if (typeof health[key] !== "boolean") errors.push("health." + key + " must be boolean");
   }
   if (typeof health.targetMode !== "string" || !TARGET_MODES.includes(health.targetMode)) {
@@ -109,7 +111,8 @@ export function validateHealth(health) {
     if (!isNullableString(health[key])) errors.push("health." + key + " must be null or a string");
   }
   for (const key of ["autostartInstalled"]) {
-    if (health[key] != null && typeof health[key] !== "boolean") errors.push("health." + key + " must be null or boolean");
+    if (health[key] != null && typeof health[key] !== "boolean")
+      errors.push("health." + key + " must be null or boolean");
   }
   if (typeof health.installationState !== "string" || !INSTALL_STATES.includes(health.installationState)) {
     errors.push("health.installationState is invalid");
@@ -134,7 +137,8 @@ function validateTurn(turn, index) {
 
 function validateRequest(request, index) {
   const errors = [];
-  if (!request || typeof request !== "object" || Array.isArray(request)) return ["requestDetails[" + index + "] must be an object"];
+  if (!request || typeof request !== "object" || Array.isArray(request))
+    return ["requestDetails[" + index + "] must be an object"];
   if (!Number.isInteger(request.index) || request.index < 1) errors.push("request.index is invalid");
   if (typeof request.time !== "string") errors.push("request.time must be a string");
   for (const key of ["input", "cached", "uncached", "output", "total"]) {
@@ -148,7 +152,8 @@ function validateAuth(auth) {
   if (!auth || typeof auth !== "object" || Array.isArray(auth)) return ["auth must be an object"];
   if (auth.v !== 1) errors.push("auth.v is invalid");
   if (!isFiniteNumber(auth.ts) || auth.ts < 0) errors.push("auth.ts is invalid");
-  if (typeof auth.nonce !== "string" || auth.nonce.length < 16 || auth.nonce.length > 64) errors.push("auth.nonce is invalid");
+  if (typeof auth.nonce !== "string" || auth.nonce.length < 16 || auth.nonce.length > 64)
+    errors.push("auth.nonce is invalid");
   if (!Number.isInteger(auth.seq) || auth.seq < 1) errors.push("auth.seq is invalid");
   if (typeof auth.mac !== "string" || !/^[0-9a-f]{64}$/.test(auth.mac)) errors.push("auth.mac is invalid");
   return errors;
@@ -173,13 +178,42 @@ export function validatePayload(payload, { allowLegacy = true, requireAuth = fal
   if (!Array.isArray(payload.capabilities) || payload.capabilities.some((item) => typeof item !== "string")) {
     errors.push("capabilities must be an array of strings");
   }
-  for (const key of ["requestCount", "currentTurnRequestCount", "turnTotal", "turnInput", "turnOutput", "currentTurnIndex", "turnTotalCount", "requestDetailTotal", "modelSwitchCount", "cumulativeResetCount", "turnsLimit", "requestsLimit"]) {
+  for (const key of [
+    "requestCount",
+    "currentTurnRequestCount",
+    "turnTotal",
+    "turnInput",
+    "turnOutput",
+    "currentTurnIndex",
+    "turnTotalCount",
+    "requestDetailTotal",
+    "modelSwitchCount",
+    "cumulativeResetCount",
+    "turnsLimit",
+    "requestsLimit",
+  ]) {
     if (!isNonNegativeNumber(payload[key])) errors.push(key + " must be a non-negative number");
   }
   for (const key of ["compactSpeedSampleCount", "compactSpeedWindow"]) {
     if (payload[key] != null && !isNonNegativeNumber(payload[key])) errors.push(key + " must be a non-negative number");
   }
-  for (const key of ["sessionTotal", "contextUsed", "modelContextWindow", "sessionInput", "sessionCached", "sessionOutput", "turnCached", "turnTps", "turnWallTps", "sessionTps", "lastRequestTps", "genEstimateTps", "compactTps", "effectiveTps", "turnEffectiveTps"]) {
+  for (const key of [
+    "sessionTotal",
+    "contextUsed",
+    "modelContextWindow",
+    "sessionInput",
+    "sessionCached",
+    "sessionOutput",
+    "turnCached",
+    "turnTps",
+    "turnWallTps",
+    "sessionTps",
+    "lastRequestTps",
+    "genEstimateTps",
+    "compactTps",
+    "effectiveTps",
+    "turnEffectiveTps",
+  ]) {
     if (!isNullableNonNegativeNumber(payload[key])) errors.push(key + " must be null or a non-negative number");
   }
   for (const key of ["effectiveSampleCount", "effectiveWindow"]) {
