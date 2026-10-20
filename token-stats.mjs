@@ -1417,18 +1417,9 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
   return { turnCounters, threadCounters, latestThreadUsage, latestContextUsed };
 }
 
-function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
-  const collected = collectUnifiedRecords(parsed);
-  const records = collected.records;
-  const { turns, turnIndexById } = seedTurnList(parsed, records);
-  const { turnCounters, threadCounters, latestThreadUsage, latestContextUsed } = assignRecordsToTurns(
-    records,
-    turns,
-    turnIndexById,
-    retainRequests,
-  );
-
+function attachTurnTimings(parsed, turns) {
   const timing = buildTimingMaps(parsed);
+  let latestGenSample = null;
   for (const turn of turns) {
     const task = turn.turnId ? timing.tasks.get(turn.turnId) : null;
     const sample = calculateTurnSpeedSample(turn, task, turn.turnId ? timing.items.get(turn.turnId) : null);
@@ -1454,7 +1445,23 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     turn.timingCoverage = sample.timingCoverage;
     turn.timingSource = sample.timingSource;
     turn.timingQuality = sample.timingQuality;
+    if (turn.genEstimateTps != null) latestGenSample = turn;
   }
+  return latestGenSample;
+}
+
+function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
+  const collected = collectUnifiedRecords(parsed);
+  const records = collected.records;
+  const { turns, turnIndexById } = seedTurnList(parsed, records);
+  const { turnCounters, threadCounters, latestThreadUsage, latestContextUsed } = assignRecordsToTurns(
+    records,
+    turns,
+    turnIndexById,
+    retainRequests,
+  );
+
+  const latestGenSample = attachTurnTimings(parsed, turns);
 
   const threadUsage = latestThreadUsage || {};
   // 纯生成耗时聚合：sessionTps = 会话加权平均（Σ输出 ÷ Σ生成耗时）；
@@ -1486,7 +1493,6 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
   const effectiveMsTotal = effectiveWindowSamples.reduce((sum, turn) => sum + turn.effectiveMs, 0);
   const effectiveTps =
     effectiveOutputTotal > 0 && effectiveMsTotal > 0 ? effectiveOutputTotal / (effectiveMsTotal / 1000) : null;
-  const latestGenSample = [...turns].reverse().find((turn) => turn.genEstimateTps != null);
   const lastTurn = turns.length ? turns[turns.length - 1] : null;
   const currentModel = [...records].reverse().find((record) => record.model)?.model || null;
   const speedSeries = records
