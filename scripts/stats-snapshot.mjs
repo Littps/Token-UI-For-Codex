@@ -170,7 +170,7 @@ try {
       fs.writeFileSync(expectedPath, actual, "utf8");
       continue;
     }
-    const expected = fs.existsSync(expectedPath) ? fs.readFileSync(expectedPath, "utf8") : "";
+    const expected = fs.existsSync(expectedPath) ? fs.readFileSync(expectedPath, "utf8").replace(/\r\n/g, "\n") : "";
     if (expected !== actual) {
       failures += 1;
       console.error("stats snapshot mismatch: " + name);

@@ -176,7 +176,7 @@ Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden |
   Assert-True ($healthyExit -eq 0) ("Healthy watchdog check failed: " + $healthyExit)
   Assert-True ([int]$healthyHeartbeat.pid -eq $firstPid) "Healthy check restarted the monitor"
 
-  Stop-Process -Id $firstPid -Force
+  Stop-Process -Id $firstPid -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 800
   $restartExit = Invoke-Watchdog -ForceStart
   Assert-True ($restartExit -eq 0) ("Crash recovery failed: " + $restartExit)
@@ -202,7 +202,7 @@ Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden |
   $startedPids += $thirdPid
   Assert-True ($thirdPid -ne $secondPid) "Hung monitor was not replaced"
 
-  Stop-Process -Id $thirdPid -Force
+  Stop-Process -Id $thirdPid -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 800
   Remove-Item -LiteralPath (Join-Path $stateDir "watchdog.lock") -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $lockFile, $guardLockFile, $heartbeatFile -Force -ErrorAction SilentlyContinue
@@ -232,7 +232,7 @@ Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden |
   Assert-True ($fourthPid -ne $legacyPid) "Heartbeatless monitor was not replaced"
   Assert-True ($null -eq (Get-Process -Id $legacyPid -ErrorAction SilentlyContinue)) "Legacy monitor PID remained alive"
 
-  Stop-Process -Id $fourthPid -Force
+  Stop-Process -Id $fourthPid -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 800
 
   Remove-Item -LiteralPath $lockFile, $guardLockFile, $heartbeatFile -Force -ErrorAction SilentlyContinue
@@ -257,7 +257,7 @@ Start-Process -FilePath $nodePath -ArgumentList $arguments -WindowStyle Hidden |
   $startedPids += $residentMonitorPid
   Assert-True ($null -ne (Get-Process -Id $resident.Id -ErrorAction SilentlyContinue)) "Resident watchdog exited"
   Start-Sleep -Milliseconds 1500
-  Stop-Process -Id $residentMonitorPid -Force
+  Stop-Process -Id $residentMonitorPid -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 1000
   $residentRestartHeartbeat = Wait-ForDifferentHeartbeat -PreviousPid $residentMonitorPid
   $residentRestartedPid = [int]$residentRestartHeartbeat.pid
