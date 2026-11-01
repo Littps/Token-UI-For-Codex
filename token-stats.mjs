@@ -145,7 +145,7 @@ function readProcessCommandLineByPid(pid) {
     execFile(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", script],
-      { windowsHide: true, timeout: 3000, maxBuffer: 256 * 1024 },
+      { windowsHide: true, timeout: 10000, maxBuffer: 256 * 1024 },
       (error, stdout) => resolve(error ? null : String(stdout || "").trim()),
     );
   });
