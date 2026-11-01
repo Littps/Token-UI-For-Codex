@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const snapshotDir = path.join(root, "test", "snapshots", "stats");
 const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tui-stats-snapshot-"));
+process.env.TZ = "Asia/Shanghai";
 process.env.CODEX_HOME = path.join(stateRoot, "codex");
 process.env.LOCALAPPDATA = stateRoot;
 process.env.APPDATA = stateRoot;
