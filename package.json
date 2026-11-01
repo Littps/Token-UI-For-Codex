@@ -15,13 +15,19 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check token-stats.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check tokens-ui-for-codex-panel.js && npm run lint && npm run format:check",
+    "check": "node --check token-stats.mjs && node --check runtime-paths.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check tokens-ui-for-codex-panel.js && npm run lint && npm run format:check",
     "lint": "eslint .",
     "format:check": "prettier --check \"*.js\" \"*.mjs\" \"scripts/*.mjs\" \"test/*.mjs\"",
     "format": "prettier --write \"*.js\" \"*.mjs\" \"scripts/*.mjs\" \"test/*.mjs\"",
-    "test": "node --test --test-force-exit test/token-stats.test.mjs test/history-archive.test.mjs && npm run test:snapshots",
+    "test": "node --test --test-force-exit test/runtime-paths.test.mjs test/token-stats.test.mjs test/history-archive.test.mjs && npm run test:snapshots",
     "test:snapshots": "node scripts/stats-snapshot.mjs --check",
+    "test:auth-ui": "node --test --test-force-exit test/auth-ui.playwright.test.mjs",
+    "test:watchdog": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-watchdog.ps1",
+    "rust:check": "cargo fmt --manifest-path rust-launcher/Cargo.toml -- --check && cargo clippy --manifest-path rust-launcher/Cargo.toml --all-targets --all-features -- -D warnings && cargo test --manifest-path rust-launcher/Cargo.toml --all-targets -- --test-threads=1",
+    "rust:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File rust-launcher/build-and-package.ps1",
     "test:live": "node --test --test-force-exit test/live-ui.playwright.test.mjs",
+    "repair:history": "node scripts/repair-local-history.mjs",
+    "screenshots:readme": "node scripts/capture-readme-screenshots.mjs",
     "perf": "node scripts/perf-baseline.mjs",
     "verify:live": "node scripts/verify-live.mjs",
     "reload": "node scripts/reload-page.mjs"

@@ -5,6 +5,30 @@ import path from "node:path";
 export const HISTORY_RETENTION_DAYS = 60;
 export const HISTORY_FILE_MAX_BYTES = 32 * 1024 * 1024;
 export const HISTORY_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+export const HISTORY_RANGE_KEYS = Object.freeze(["today", "3d", "7d", "30d", "all"]);
+
+function localDayStart(now, daysBack = 0) {
+  const date = new Date(now);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() - daysBack);
+  return date.getTime();
+}
+
+function localDayKey(now) {
+  const date = new Date(now);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function rangeStart(now, range) {
+  if (range === "today") return localDayStart(now, 0);
+  if (range === "3d") return localDayStart(now, 2);
+  if (range === "7d") return localDayStart(now, 6);
+  if (range === "30d") return localDayStart(now, 29);
+  return null;
+}
 
 function sessionHashOf(threadId) {
   return crypto
@@ -69,6 +93,7 @@ export class UsageHistoryArchive {
     this.maxFileBytes = maxFileBytes;
     this.cleanupIntervalMs = cleanupIntervalMs;
     this.sessions = new Map();
+    this.rangeCache = new Map();
     this.lastCleanupAt = 0;
   }
 
@@ -94,6 +119,7 @@ export class UsageHistoryArchive {
         if (newest < cutoff) fs.rmSync(dir, { recursive: true, force: true });
       }
     } catch {}
+    this.rangeCache.clear();
     this.lastCleanupAt = now;
   }
 
@@ -149,6 +175,12 @@ export class UsageHistoryArchive {
           cached: turn.cached == null ? null : turn.cached,
           output: turn.output || 0,
           total: turn.total || 0,
+          wallMs: Number.isFinite(turn.wallMs) ? turn.wallMs : null,
+          toolWallMs: Number.isFinite(turn.toolWallMs) ? turn.toolWallMs : null,
+          toolCallCount: Number.isFinite(turn.toolCallCount) ? turn.toolCallCount : 0,
+          ttftMs: Number.isFinite(turn.ttftMs) ? turn.ttftMs : null,
+          timingCoverage: Number.isFinite(turn.timingCoverage) ? turn.timingCoverage : null,
+          timingQuality: typeof turn.timingQuality === "string" ? turn.timingQuality : "low",
         }))
         .filter((turn) => {
           const startedAt = Date.parse(turn.start);
@@ -156,7 +188,7 @@ export class UsageHistoryArchive {
         }),
     };
     const text = JSON.stringify(snapshot);
-    if (text === state.lastTurnsJson) return;
+    if (text === state.lastTurnsJson) return false;
     const file = path.join(state.dir, "turns.json");
     const temp = file + "." + process.pid + ".tmp";
     fs.writeFileSync(temp, text, "utf8");
@@ -167,6 +199,7 @@ export class UsageHistoryArchive {
       fs.rmSync(temp, { force: true });
     }
     state.lastTurnsJson = text;
+    return true;
   }
 
   archiveSession({ threadId, turns, records, now = Date.now() }) {
@@ -229,7 +262,8 @@ export class UsageHistoryArchive {
     if (lines.length) {
       fs.appendFileSync(this.requestFile(state, now), lines.join("\n") + "\n", "utf8");
     }
-    this.writeTurnSnapshot(state, turns, now);
+    const turnsChanged = this.writeTurnSnapshot(state, turns, now);
+    if (lines.length || turnsChanged) this.rangeCache.clear();
     state.lastRecordCount = records.length;
     state.archiveCalls += 1;
     return {
@@ -239,5 +273,114 @@ export class UsageHistoryArchive {
       turnCount: turns.length,
       retentionDays: this.retentionDays,
     };
+  }
+
+  aggregateRange(range, now = Date.now()) {
+    if (!HISTORY_RANGE_KEYS.includes(range)) return null;
+    const cacheKey = range + ":" + localDayKey(now);
+    if (this.rangeCache.has(cacheKey)) return this.rangeCache.get(cacheKey);
+
+    const cutoff = rangeStart(now, range);
+    const summary = {
+      range,
+      available: false,
+      retentionDays: this.retentionDays,
+      cutoffAt: cutoff == null ? null : new Date(cutoff).toISOString(),
+      generatedAt: new Date(now).toISOString(),
+      availableFrom: null,
+      availableThrough: null,
+      sessionCount: 0,
+      turnCount: 0,
+      requestCount: 0,
+      input: 0,
+      cached: 0,
+      output: 0,
+      total: 0,
+      cacheComplete: true,
+      wallMs: 0,
+      toolWallMs: 0,
+      toolTimingSampleCount: 0,
+      toolCallCount: 0,
+      ttftTotalMs: 0,
+      ttftSampleCount: 0,
+      ttftAvgMs: null,
+      effectiveMs: null,
+      effectiveTps: null,
+      timingSampleCount: 0,
+    };
+
+    const sessionsRoot = path.join(this.root, "sessions");
+    try {
+      if (!fs.existsSync(sessionsRoot)) {
+        this.rangeCache.set(cacheKey, summary);
+        return summary;
+      }
+    } catch {
+      this.rangeCache.set(cacheKey, summary);
+      return summary;
+    }
+
+    for (const entry of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^[0-9a-f]{32}$/.test(entry.name)) continue;
+      const snapshotFile = path.join(sessionsRoot, entry.name, "turns.json");
+      if (!fs.existsSync(snapshotFile)) continue;
+      let snapshot;
+      try {
+        snapshot = JSON.parse(fs.readFileSync(snapshotFile, "utf8").replace(/^\uFEFF/, ""));
+      } catch {
+        continue;
+      }
+      if (!snapshot || !Array.isArray(snapshot.turns)) continue;
+      let sessionIncluded = false;
+      for (const turn of snapshot.turns) {
+        const startedAt = Date.parse(turn && turn.start);
+        if (!Number.isFinite(startedAt)) continue;
+        if (cutoff != null && startedAt < cutoff) continue;
+        sessionIncluded = true;
+        summary.turnCount += 1;
+        summary.requestCount += Number.isFinite(turn.requests) ? turn.requests : 0;
+        summary.input += Number.isFinite(turn.input) ? turn.input : 0;
+        summary.output += Number.isFinite(turn.output) ? turn.output : 0;
+        summary.total += Number.isFinite(turn.total) ? turn.total : 0;
+        if (Number.isFinite(turn.cached)) summary.cached += turn.cached;
+        else if (Number.isFinite(turn.input) && turn.input > 0) summary.cacheComplete = false;
+        if (Number.isFinite(turn.wallMs)) {
+          summary.wallMs += turn.wallMs;
+          summary.timingSampleCount += 1;
+        }
+        if (Number.isFinite(turn.toolWallMs)) {
+          summary.toolWallMs += turn.toolWallMs;
+          summary.toolTimingSampleCount += 1;
+        }
+        if (Number.isFinite(turn.toolCallCount)) summary.toolCallCount += turn.toolCallCount;
+        if (Number.isFinite(turn.ttftMs)) {
+          summary.ttftTotalMs += turn.ttftMs;
+          summary.ttftSampleCount += 1;
+        }
+        if (!summary.availableFrom || turn.start < summary.availableFrom) {
+          summary.availableFrom = turn.start;
+        }
+        if (!summary.availableThrough || turn.start > summary.availableThrough) {
+          summary.availableThrough = turn.start;
+        }
+      }
+      if (sessionIncluded) summary.sessionCount += 1;
+    }
+
+    summary.available =
+      summary.turnCount > 0 || summary.requestCount > 0 || summary.input > 0 || summary.output > 0 || summary.total > 0;
+    summary.ttftAvgMs = summary.ttftSampleCount > 0 ? summary.ttftTotalMs / summary.ttftSampleCount : null;
+    delete summary.ttftTotalMs;
+    if (summary.timingSampleCount === 0) summary.wallMs = null;
+    if (summary.toolTimingSampleCount === 0) summary.toolWallMs = null;
+    delete summary.toolTimingSampleCount;
+    summary.effectiveMs =
+      Number.isFinite(summary.wallMs) && Number.isFinite(summary.toolWallMs) && summary.wallMs > summary.toolWallMs
+        ? summary.wallMs - summary.toolWallMs
+        : null;
+    summary.effectiveTps =
+      summary.effectiveMs > 0 && summary.output > 0 ? summary.output / (summary.effectiveMs / 1000) : null;
+    this.rangeCache.set(cacheKey, summary);
+    return summary;
   }
 }

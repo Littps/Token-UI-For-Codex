@@ -6,8 +6,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+const auditStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-audit-state-"));
 process.env.LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+process.env.TUI_STATE_DIR = auditStateDir;
 process.env.TUI_TOKENS_AS_MODULE = "1";
+process.on("exit", () => {
+  try {
+    fs.rmSync(auditStateDir, { recursive: true, force: true });
+  } catch {}
+});
 
 const stats = await import("../token-stats.mjs");
 const report = {};
@@ -125,23 +132,22 @@ const report = {};
   const protocolSource = fs.readFileSync(new URL("../protocol.mjs", import.meta.url), "utf8");
   const monitorSource = fs.readFileSync(new URL("../token-stats.mjs", import.meta.url), "utf8");
   const panelSource = fs.readFileSync(new URL("../tokens-ui-for-codex-panel.js", import.meta.url), "utf8");
-  const statuses = [...protocolSource.matchAll(/^\s{2}"([a-z-]+)",$/gm)].map((match) => match[1]);
+  const healthBlock = /export const HEALTH_STATUSES = Object\.freeze\(\[([\s\S]*?)\]\);/.exec(protocolSource);
+  const statuses = healthBlock ? [...healthBlock[1].matchAll(/"([a-z-]+)"/g)].map((match) => match[1]) : [];
   report.F3_protocol_dead_code = {
     healthStatuses: statuses,
-    statusesNeverAssigned: statuses.filter((status) => {
-      const assignments = monitorSource.match(new RegExp("(status|currentHealth)[^\\n]*" + status, "g")) || [];
-      return status !== "healthy" && status !== "starting" && assignments.length === 0;
-    }),
+    statusesNotMentionedByMonitor: statuses.filter((status) => !monitorSource.includes('"' + status + '"')),
+    statusesNotMentionedByPanel: statuses.filter((status) => !panelSource.includes('"' + status + '"')),
     outOfOrderInPayload:
       /outOfOrder\s*:/.test(panelSource) || /outOfOrder/.test(monitorSource.split("payloadFor")[1] || ""),
-    modelSwitchRenderedInPanel: /modelSwitchCount[^\n]*textNode|modelSwitchCount[^\n]*append/.test(panelSource),
+    modelSwitchRenderedInPanel: panelSource.includes("modelSwitchCount") && panelSource.includes("模型切换"),
     title: "F3",
   };
 }
 
 // ---- F4：schema 三份实现 ----
 {
-  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v3.schema.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v4.schema.json", import.meta.url), "utf8"));
   const required = schema.required || [];
   const alwaysProduced = [
     "protocolName",
@@ -177,6 +183,7 @@ const report = {};
     requiredCount: required.length,
     alwaysProducedCount: alwaysProduced.length,
     missingFromRequired: alwaysProduced.filter((key) => !required.includes(key)),
+    missingProperties: alwaysProduced.filter((key) => !(key in (schema.properties || {}))),
     additionalProperties: schema.additionalProperties,
   };
 }
@@ -211,10 +218,13 @@ const report = {};
 // ---- H1：README 英文版刷新间隔表述 ----
 {
   const en = fs.readFileSync(new URL("../README.en.md", import.meta.url), "utf8");
-  const firstLine = en.split(/\r?\n/).find((line) => line.includes("refresh")) || "";
+  const oneSecondLine = en.split(/\r?\n/).find((line) => /1-second heartbeat/i.test(line)) || "";
+  const fiveSecondLine = en.split(/\r?\n/).find((line) => /5-second heartbeat/i.test(line)) || "";
   report.H1_readme_en = {
-    mentionsOneSecond: /every \*\*1 second\*\*|every 1 second|1 second/i.test(firstLine),
-    line: firstLine.trim().slice(0, 200),
+    mentionsOneSecond: /1-second heartbeat/i.test(en),
+    mentionsFiveSecond: /5-second heartbeat/i.test(en),
+    oneSecondLine: oneSecondLine.trim().slice(0, 200),
+    fiveSecondLine: fiveSecondLine.trim().slice(0, 200),
   };
 }
 

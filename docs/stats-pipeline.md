@@ -4,6 +4,8 @@
 
 ## 输入
 
+- 会话候选必须存在对应 rollout，并稳定 2.5 秒后才进入统计管线。
+- `client-new-thread` 只允许唯一的新文件映射；没有可靠映射时显示等待。
 - `IncrementalRolloutParser` 按文件偏移增量读取 JSONL。
 - 同一会话的多个分片由 `mergeSegments()` 合并。
 - parser 只保留结构化事件：usage、turn、task timing、item timing、model 和 user message 时间。
@@ -20,6 +22,8 @@
 - `captureUserMessage()`
 - `captureModernUsage()`
 - `captureLegacyTokenCount()`
+- `captureContextComposition()`
+- `captureResponseMessageContext()`
 
 必须保持的顺序：
 
@@ -36,22 +40,35 @@
 2. `seedTurnList()` 按 `turn_context`、记录 `turn_id`、`user_message`、单轮兜底的优先级建立轮次。
 3. `assignRecordsToTurns()` 将记录归入轮次，维护线程累计、本轮累计、重置计数和最近 500 条明细。
 4. `attachTurnTimings()` 附加生成区间、首字延迟、工具耗时、有效速度和本轮墙钟速度。
-5. `buildSpeedMetrics()` 汇总会话速度、本轮速度、最近有效速度窗口和稳健速度样本。
-6. `buildStatsUnified()` 将内部数据映射为稳定的对外统计对象。
+5. `aggregateSessionTiming()` 汇总处理用时、工具区间并集、TTFT 平均值和样本数。
+6. `buildSpeedMetrics()` 汇总会话速度、本轮速度、最近有效速度窗口和稳健速度样本。
+7. `estimateContextBreakdown()` 只使用数值权重生成上下文分类估算。
+8. `buildStatsUnified()` 将内部数据映射为稳定的对外统计对象。
+
+页面打开详情并声明 `data-tui-range` 时，`UsageHistoryArchive.aggregateRange()`
+读取各会话 `turns.json` 的轮次快照，按本地日边界汇总；关闭详情后只推送
+`rangeSummary=null`，不执行范围计算。
+
+页面会缓存最后一次有效范围汇总和上次展开快照。重新打开详情时先显示缓存并标记
+“刷新中”，收到下一份签名负载后原位替换；范围数值缓存最长保留 24 小时。
 
 ## 不变量
 
 - `requestCount` 只能是 unified 记录数。
+- 不同会话的候选、解析器和 payload 不得因快速切换而互相复用。
 - `sessionTotal` 使用最后一次线程累计，并经过 reset-aware 归一化。
 - 本轮记录缺失 `turnUsage` 时，使用线程累计减本轮起点基线补齐。
 - 有效速度只使用 timing quality 不为 low 的最近 `EFFECTIVE_SPEED_WINDOW` 轮。
 - `retainRequests=false` 时只保留最后遇到轮次的最近 500 条明细，并使用环形缓冲避免数组搬移。
 - 输出字段、空值语义和轮次顺序不能因内部重构变化。
+- 上下文估算不得保留正文，分类数值总和必须等于 `floor(contextUsed)`。
+- 历史范围统计不得读取原始会话正文，只使用结构化轮次快照和数值时间标签。
 
 ## 验证
 
 ```powershell
 npm test
+npm run test:auth-ui
 node scripts\golden-baseline.mjs --check
 node scripts\verify-live.mjs
 ```

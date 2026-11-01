@@ -23,7 +23,9 @@
 累计值使用 reset-aware normalizer：
 
 - 上升：接续
-- 下降：视为 reset，新基线整体纳入
+- 完整重置：权威 `total` 跌到上一值的一半或更低，旧基线整体纳入新链
+- 尾部修订：小于该幅度的回落只接受主机的新值，不重复加入旧累计
+- 缺少权威 `total` 时，才按各字段自身的同一比例规则判断
 - 禁止单调递增假设
 - thread counter 与 turn counter 分别维护 reset 事件
 
@@ -216,6 +218,7 @@ output / (turn_duration - tool_duration)
 | F1-22 | unique 自身重复 | selfDuplicate |
 | F1-23 | 混合格式当前轮 | thread delta 更新 total/input/output/cached |
 | F1-24 | legacy cached 构成差异 | 不静默合并，conflict=1 |
+| F1-25 | 分片尾部微降 | 按修订处理，不重复旧累计 |
 
 ### 轮次与快照
 
@@ -242,6 +245,6 @@ node scripts\verify-live.mjs
 交付前还必须有：
 
 - 真实会话改前/改后对照
-- schema v3 验签通过
+- schema v4 / auth v2 验签通过
 - 页面/监控数值一致
-- 源、部署、cache、用户脚本 `mismatches: 0`
+- 源、部署、cache、用户脚本和安装 ZIP 均存在，`errors: []` 且 `mismatches: 0`

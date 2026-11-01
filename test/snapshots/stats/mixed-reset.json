@@ -3,10 +3,10 @@
   "requestCount": 3,
   "sessionTotal": 680,
   "sessionInput": 150,
-  "sessionCached": 110,
+  "sessionCached": 60,
   "sessionOutput": 30,
   "modelSwitchCount": 0,
-  "cumulativeResetCount": 3,
+  "cumulativeResetCount": 2,
   "sessionTps": 16.666666666666668,
   "lastRequestTps": 10,
   "turnTps": 16.666666666666668,
@@ -43,6 +43,12 @@
     "claimedModern": 0
   },
   "contextUsed": 60,
+  "contextBreakdown": null,
+  "sessionWallMs": 3000,
+  "sessionToolWallMs": null,
+  "sessionToolCallCount": 0,
+  "sessionTtftAvgMs": null,
+  "sessionTimingSampleCount": 0,
   "turns": [
     {
       "turnId": "turn-1",
@@ -72,7 +78,7 @@
           "totalInfo": {
             "input": 100,
             "output": 20,
-            "cached": 90,
+            "cached": 40,
             "total": 620
           },
           "model": null
@@ -86,7 +92,7 @@
           "totalInfo": {
             "input": 150,
             "output": 30,
-            "cached": 110,
+            "cached": 60,
             "total": 680
           },
           "model": "fixture-model"
@@ -96,7 +102,13 @@
       "input": 150,
       "output": 30,
       "cached": 70,
-      "total": 180
+      "total": 180,
+      "wallMs": 3000,
+      "toolWallMs": 0,
+      "toolCallCount": 0,
+      "ttftMs": null,
+      "timingCoverage": null,
+      "timingQuality": "low"
     }
   ]
 }

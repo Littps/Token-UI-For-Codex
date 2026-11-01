@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 
@@ -10,6 +11,9 @@ const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tokens-ui-test-"));
 process.env.CODEX_HOME = path.join(testRoot, "codex");
 process.env.LOCALAPPDATA = path.join(testRoot, "local");
 process.env.APPDATA = path.join(testRoot, "roaming");
+process.env.TUI_ALLOW_MULTI_MONITOR = "1";
+process.env.TUI_GUARD_LOCK_FILE = path.join(testRoot, "guard", "monitor.guard.lock");
+process.env.TUI_HEARTBEAT_FILE = path.join(testRoot, "heartbeat", "monitor-heartbeat.json");
 process.env.TUI_TOKENS_AS_MODULE = "1";
 fs.mkdirSync(process.env.CODEX_HOME, { recursive: true });
 after(() => {
@@ -72,9 +76,10 @@ test("CDP 客户端审计：只统计客户端侧到目标端口的 ESTABLISHED 
 });
 
 test("实例状态：陈旧 PID 锁会清理，PID 复用不会被误判为监控", async () => {
-  const stateDir = path.join(process.env.LOCALAPPDATA, "tokens-ui-for-codex");
-  const lockFile = path.join(stateDir, "monitor.lock");
+  const stateDir = stats.RUNTIME_PATHS.stateDir;
+  const lockFile = stats.RUNTIME_PATHS.lockFile;
   fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
 
   fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999, startedAt: new Date().toISOString() }), "utf8");
   const stale = await stats.monitorInstanceState();
@@ -90,7 +95,7 @@ test("实例状态：陈旧 PID 锁会清理，PID 复用不会被误判为监�
 });
 
 test("自启状态读取兼容 PowerShell 5.1 的 UTF-8 BOM", () => {
-  const stateDir = path.join(process.env.LOCALAPPDATA, "tokens-ui-for-codex");
+  const stateDir = stats.RUNTIME_PATHS.stateDir;
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(
     path.join(stateDir, "autostart-state.json"),
@@ -98,6 +103,22 @@ test("自启状态读取兼容 PowerShell 5.1 的 UTF-8 BOM", () => {
     "utf8",
   );
   assert.equal(stats.environmentSnapshot().autostartInstalled, true);
+});
+
+test("监控心跳：序号递增并记录 PID、路径和状态目录", () => {
+  const session = { heartbeatSeq: 0, lastHeartbeatAt: 0 };
+  assert.equal(stats.persistMonitorHeartbeat(session, { force: true }), true);
+  const first = JSON.parse(fs.readFileSync(stats.MONITOR_HEARTBEAT_FILE, "utf8"));
+  assert.equal(first.pid, process.pid);
+  assert.equal(first.heartbeatSeq, 1);
+  assert.equal(first.stateDir, stats.RUNTIME_PATHS.stateDir);
+  assert.equal(first.lockFile, stats.RUNTIME_PATHS.lockFile);
+  assert.equal(first.guardLockFile, stats.RUNTIME_PATHS.guardLockFile);
+
+  assert.equal(stats.persistMonitorHeartbeat(session, { force: true }), true);
+  const second = JSON.parse(fs.readFileSync(stats.MONITOR_HEARTBEAT_FILE, "utf8"));
+  assert.equal(second.heartbeatSeq, 2);
+  assert.ok(Date.parse(second.heartbeatAt) >= Date.parse(first.heartbeatAt));
 });
 
 const threadId = "test-thread";
@@ -357,10 +378,10 @@ test("context window is still detected when only task_started carries it", () =>
   assert.equal(stats.payloadFor(stats.buildStats(parsed)).modelContextWindow, windowSize);
 });
 
-test("payload protocol validates and negotiates signed schema v3", () => {
+test("payload protocol validates and negotiates signed schema v4", () => {
   const payload = stats.payloadFor(stats.emptyStats(threadId, file));
   assert.equal(payload.protocolName, protocol.PROTOCOL_NAME);
-  assert.equal(payload.schemaVersion, 3);
+  assert.equal(payload.schemaVersion, 4);
   assert.equal(payload.authRequired, true);
   assert.equal(protocol.validatePayload(payload, { allowLegacy: false }).ok, true);
   assert.equal(
@@ -368,12 +389,23 @@ test("payload protocol validates and negotiates signed schema v3", () => {
     false,
     "未签名模板不能作为最终负载",
   );
-  assert.equal(protocol.negotiateSchemaVersion([1, 2, 3]), 3);
+  assert.equal(protocol.negotiateSchemaVersion([3, 4]), 4);
   assert.equal(protocol.negotiateSchemaVersion([1]), null);
   assert.equal(protocol.validatePayload({ ...payload, protocolName: "wrong" }).ok, false);
+  assert.equal(protocol.validatePayload({ ...payload, health: null }).ok, false);
+  assert.equal(protocol.validatePayload({ ...payload, snapshot: "false" }).ok, false);
+  assert.equal(protocol.validatePayload({ ...payload, sessionInput: 1, sessionCached: 2 }).ok, false);
+  assert.equal(protocol.validatePayload({ ...payload, currentTurnIndex: payload.turnTotalCount + 1 }).ok, false);
   const signed = {
     ...payload,
-    auth: { v: 1, ts: Date.now(), nonce: "0123456789abcdef", seq: 1, mac: "a".repeat(64) },
+    auth: {
+      v: 2,
+      keyId: "0123456789abcdef0123456789abcdef",
+      ts: Date.now(),
+      nonce: "0123456789abcdef0123456789abcdef",
+      seq: 1,
+      mac: "a".repeat(64),
+    },
   };
   assert.equal(protocol.validatePayload(signed, { allowLegacy: false, requireAuth: true }).ok, true);
   assert.equal(
@@ -381,17 +413,134 @@ test("payload protocol validates and negotiates signed schema v3", () => {
       .ok,
     false,
   );
+  assert.equal(
+    protocol.validatePayload(
+      { ...signed, auth: { ...signed.auth, keyId: "bad" } },
+      { allowLegacy: false, requireAuth: true },
+    ).ok,
+    false,
+  );
+  assert.equal(
+    protocol.validatePayload(
+      { ...signed, auth: { ...signed.auth, nonce: "short" } },
+      { allowLegacy: false, requireAuth: true },
+    ).ok,
+    false,
+  );
+  assert.equal(protocol.validatePayload({ ...signed, schemaVersion: 3 }, { allowLegacy: false }).ok, false);
 });
 
 test("checked JSON schema documents the same protocol contract", () => {
-  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v3.schema.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v4.schema.json", import.meta.url), "utf8"));
+  const template = stats.payloadFor(stats.emptyStats(threadId, file));
+  const producedKeys = [...Object.keys(template), "auth"].sort();
   assert.equal(schema.properties.protocolName.const, protocol.PROTOCOL_NAME);
   assert.equal(schema.properties.schemaVersion.const, protocol.PROTOCOL_SCHEMA_VERSION);
   assert.equal(schema.properties.authRequired.const, true);
+  assert.equal(schema.properties.auth.properties.v.const, protocol.AUTH_VERSION);
+  assert.ok(schema.properties.auth.required.includes("keyId"));
+  assert.ok(schema.required.includes("modelSwitchCount"));
+  assert.ok(schema.required.includes("cumulativeResetCount"));
+  assert.ok(schema.required.includes("health"));
+  assert.ok(schema.required.includes("turnsTruncated"));
+  assert.ok(schema.required.includes("sessionChanged"));
   assert.ok(schema.required.includes("auth"));
   assert.ok(schema.required.includes("currentTurnRequestCount"));
+  assert.deepEqual([...schema.required].sort(), producedKeys, "schema.required 必须与实际负载键完全一致");
+  assert.deepEqual(
+    producedKeys.filter((key) => key !== "auth" && !(key in schema.properties)),
+    [],
+    "实际负载字段必须在 schema.properties 中声明",
+  );
   assert.equal(schema.properties.requestDetails.maxItems, 500);
   assert.equal(schema.properties.turns.maxItems, 500);
+});
+
+test("RANGE-1 范围汇总负载通过协议校验且只包含数值与时间标签", () => {
+  const rangeSummary = {
+    range: "7d",
+    available: true,
+    retentionDays: 60,
+    cutoffAt: "2026-10-26T16:00:00.000Z",
+    generatedAt: "2026-11-01T10:00:00.000Z",
+    availableFrom: "2026-10-27T01:00:00.000Z",
+    availableThrough: "2026-11-01T09:00:00.000Z",
+    sessionCount: 2,
+    turnCount: 4,
+    requestCount: 8,
+    input: 1000,
+    cached: 800,
+    output: 200,
+    total: 1200,
+    cacheComplete: true,
+    wallMs: 20000,
+    toolWallMs: 5000,
+    toolCallCount: 6,
+    ttftAvgMs: 700,
+    effectiveMs: 15000,
+    effectiveTps: 13.333333333333334,
+    timingSampleCount: 4,
+    ttftSampleCount: 4,
+  };
+  const payload = stats.payloadFor(stats.emptyStats(threadId, file), undefined, null, false, false, rangeSummary);
+  assert.deepEqual(payload.rangeSummary, rangeSummary);
+  assert.equal(protocol.validatePayload(payload, { allowLegacy: false }).ok, true);
+});
+
+test("auth v2 signing text authenticates body and complete auth envelope", () => {
+  const body = {
+    protocolName: protocol.PROTOCOL_NAME,
+    schemaVersion: protocol.PROTOCOL_SCHEMA_VERSION,
+    authRequired: true,
+    requestCount: 3,
+  };
+  const auth = {
+    v: protocol.AUTH_VERSION,
+    keyId: "0123456789abcdef0123456789abcdef",
+    ts: 1760000000000,
+    nonce: "fedcba9876543210fedcba9876543210",
+    seq: 7,
+  };
+  const expected = protocol.authSigningText(body, auth);
+  assert.match(expected, new RegExp("^" + protocol.AUTH_DOMAIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.notEqual(protocol.authSigningText({ ...body, requestCount: 4 }, auth), expected);
+  assert.notEqual(protocol.authSigningText(body, { ...auth, v: 1 }), expected);
+  assert.notEqual(protocol.authSigningText(body, { ...auth, keyId: "f".repeat(32) }), expected);
+  assert.notEqual(protocol.authSigningText(body, { ...auth, ts: auth.ts + 1 }), expected);
+  assert.notEqual(protocol.authSigningText(body, { ...auth, nonce: "0".repeat(32) }), expected);
+  assert.notEqual(protocol.authSigningText(body, { ...auth, seq: auth.seq + 1 }), expected);
+});
+
+test("auth v2 signer produces a MAC over seq, keyId, timestamp, nonce and body", () => {
+  const payload = stats.payloadFor(stats.emptyStats(threadId, file));
+  const key = Buffer.from("11".repeat(32), "hex");
+  const options = {
+    key,
+    keyId: "0123456789abcdef0123456789abcdef",
+    ts: 1760000000000,
+    nonce: "fedcba9876543210fedcba9876543210",
+    seq: 9,
+  };
+  const signed = stats.signPayloadWithAuth(payload, options);
+  assert.equal(protocol.validatePayload(signed, { allowLegacy: false, requireAuth: true }).ok, true);
+  const body = { ...signed };
+  delete body.auth;
+  const expected = crypto.createHmac("sha256", key).update(protocol.authSigningText(body, signed.auth)).digest("hex");
+  assert.equal(signed.auth.mac, expected);
+  const seqChanged = stats.signPayloadWithAuth(payload, { ...options, seq: 10 });
+  assert.notEqual(seqChanged.auth.mac, signed.auth.mac);
+  const keyIdChanged = stats.signPayloadWithAuth(payload, { ...options, keyId: "f".repeat(32) });
+  assert.notEqual(keyIdChanged.auth.mac, signed.auth.mac);
+  assert.throws(() => stats.signPayloadWithAuth(payload, { ...options, key: Buffer.alloc(31) }), /32-byte Buffer/);
+  assert.throws(() => stats.signPayloadWithAuth(payload, { ...options, nonce: "bad" }), /nonce is invalid/);
+});
+
+test("strict canonical JSON rejects values that cannot be signed deterministically", () => {
+  assert.throws(() => protocol.canonicalJson({ value: undefined }), /does not support undefined/);
+  assert.throws(() => protocol.canonicalJson({ value: Number.NaN }), /non-finite/);
+  const cyclic = {};
+  cyclic.self = cyclic;
+  assert.throws(() => protocol.canonicalJson(cyclic), /cyclic/);
 });
 
 test("协议和 schema 都在 500 条处拒绝超限数组", () => {
@@ -421,6 +570,15 @@ test("协议和 schema 都在 500 条处拒绝超限数组", () => {
     requestDetails: Array.from({ length: 501 }, () => ({ ...request })),
   };
   assert.equal(protocol.validatePayload(oversized, { allowLegacy: false }).ok, false);
+});
+
+test("verify-sync strict 模式缺少部署目录和 ZIP 时失败关闭", () => {
+  const script = path.join(import.meta.dirname, "..", "scripts", "verify-sync.mjs");
+  const result = spawnSync(process.execPath, [script], { encoding: "utf8", env: process.env });
+  assert.equal(result.status, 1);
+  const report = JSON.parse(result.stdout);
+  assert.ok(report.errors.includes("--deploy is required in strict mode"));
+  assert.ok(report.errors.includes("--zip is required in strict mode"));
 });
 
 test("automatic target selection prefers the focused Codex window and manual selection is deterministic", async () => {
@@ -1240,6 +1398,49 @@ test("F1-24 legacy 自身去重保留 cached 构成差异并记为真冲突", ()
   assert.equal(result.formatConflictCount, 1, "同 ts 且数值构成不同应进入真冲突计数");
 });
 
+test("F1-25 分片尾部微降：按主机修订处理，不把整段累计重复相加", () => {
+  const result = fixtureStats([
+    usage("2026-11-01T10:15:18.574Z", "micro-1", {
+      input: 672462,
+      output: 877,
+      cached: 672256,
+      total: 673339,
+      turnId: "turn-a",
+      turnTotal: 4021057,
+      threadInput: 2664251872,
+      threadOutput: 5902682,
+      threadCached: 2624669696,
+      threadTotal: 2670154554,
+    }),
+    usage("2026-11-01T10:16:41.863Z", "micro-2", {
+      input: 660912,
+      output: 1466,
+      cached: 26752,
+      total: 662378,
+      turnId: "turn-b",
+      turnTotal: 662378,
+      threadInput: 2660896718,
+      threadOutput: 5899157,
+      threadCached: 2620686976,
+      threadTotal: 2666795875,
+    }),
+    usage("2026-11-01T10:16:45.926Z", "micro-3", {
+      input: 667556,
+      output: 543,
+      total: 668099,
+      turnId: "turn-b",
+      turnTotal: 1330477,
+      threadInput: 2661564274,
+      threadOutput: 5899700,
+      threadCached: 2621349248,
+      threadTotal: 2667463974,
+    }),
+  ]);
+  assert.equal(result.sessionTotal, 2667463974);
+  assert.equal(result.sessionInput, 2661564274);
+  assert.equal(result.cumulativeResetCount, 0);
+});
+
 test("快照的当前提问请求数不能复用整个会话请求数", () => {
   const snapshot = stats.snapshotStatsFrom({
     sessionTotal: 900,
@@ -1854,6 +2055,121 @@ test("TPS-5 少于 3 个有效样本时 compactTps 为 null，不显示单条尖
   assert.equal(payload.compactSpeedConfidence, "low");
 });
 
+test("TIMING-1 会话与当前轮输出总用时、工具并集用时和 TTFT", () => {
+  writeLines([
+    user("2026-09-17T16:00:00.000Z"),
+    event("2026-09-17T16:00:00.000Z", "turn_context", {
+      turn_id: "T-TIME",
+      model_context_window: 100000,
+    }),
+    event("2026-09-17T16:00:01.000Z", "event_msg", {
+      type: "item_completed",
+      turn_id: "T-TIME",
+      started_at_ms: 1000,
+      completed_at_ms: 2000,
+      item: { id: "tool-1", type: "CommandExecution" },
+    }),
+    event("2026-09-17T16:00:02.000Z", "event_msg", {
+      type: "item_completed",
+      turn_id: "T-TIME",
+      started_at_ms: 1800,
+      completed_at_ms: 3300,
+      item: { id: "tool-2", type: "CommandExecution" },
+    }),
+    event("2026-09-17T16:00:06.000Z", "event_msg", {
+      type: "task_complete",
+      turn_id: "T-TIME",
+      duration_ms: 6000,
+      time_to_first_token_ms: 900,
+    }),
+    usage("2026-09-17T16:00:06.100Z", "timing-usage", {
+      turnId: "T-TIME",
+      input: 100,
+      output: 20,
+      cached: 0,
+      total: 120,
+      turnTotal: 120,
+      threadTotal: 120,
+    }),
+  ]);
+
+  const payload = stats.payloadFor(stats.buildStats(new stats.IncrementalRolloutParser(file).readAll()));
+  assert.equal(payload.sessionWallMs, 6000);
+  assert.equal(payload.sessionToolWallMs, 2300, "重叠工具区间只能计算一次");
+  assert.equal(payload.sessionToolCallCount, 2);
+  assert.equal(payload.sessionTtftAvgMs, 900);
+  assert.equal(payload.sessionTimingSampleCount, 1);
+  const current = payload.turns.at(-1);
+  assert.equal(current.wallMs, 6000);
+  assert.equal(current.toolWallMs, 2300);
+  assert.equal(current.toolCallCount, 2);
+  assert.equal(current.ttftMs, 900);
+});
+
+test("CONTEXT-1 本地分类估算总和等于已用上下文且不保留正文", () => {
+  const secretMessage = "S".repeat(160);
+  const secretInstruction = "I".repeat(400);
+  const secretToolDescription = "T".repeat(120);
+  writeLines([
+    event("2026-09-17T16:10:00.000Z", "session_meta", {
+      base_instructions: { text: secretInstruction },
+      context_window: { window_id: "ctx" },
+    }),
+    event("2026-09-17T16:10:00.100Z", "turn_context", {
+      turn_id: "T-CONTEXT",
+      model_context_window: 100000,
+      collaboration_mode: { settings: { developer_instructions: "D".repeat(80) } },
+    }),
+    event("2026-09-17T16:10:00.200Z", "compacted", {
+      retained_context: {
+        user_messages: [{ message_id: "m1", text: secretMessage }],
+        assistant_messages: [],
+      },
+      resume_metadata: {
+        dynamic_tools: {
+          tools: [{ name: "shell", description: secretToolDescription }],
+        },
+      },
+    }),
+    event("2026-09-17T16:10:00.300Z", "response_item", {
+      type: "message",
+      role: "assistant",
+      id: "m2",
+      content: [{ type: "output_text", text: "A".repeat(80) }],
+    }),
+    usage("2026-09-17T16:10:01.000Z", "context-usage", {
+      turnId: "T-CONTEXT",
+      input: 4800,
+      output: 200,
+      cached: 0,
+      total: 5000,
+      turnTotal: 5000,
+      threadTotal: 5000,
+    }),
+  ]);
+
+  const parsed = new stats.IncrementalRolloutParser(file).readAll();
+  const payload = stats.payloadFor(stats.buildStats(parsed));
+  assert.ok(payload.contextBreakdown, "上下文分类估算缺失");
+  const breakdown = payload.contextBreakdown;
+  for (const key of ["systemPromptTokens", "toolDefinitionTokens", "conversationTokens", "otherTokens"]) {
+    assert.ok(Number.isSafeInteger(breakdown[key]) && breakdown[key] >= 0, `${key} 不是完整整数`);
+  }
+  assert.equal(
+    breakdown.systemPromptTokens +
+      breakdown.toolDefinitionTokens +
+      breakdown.conversationTokens +
+      breakdown.otherTokens,
+    Math.floor(payload.contextUsed),
+    "分类估算总和必须等于真实已用量",
+  );
+  const parsedContext = JSON.stringify(parsed.contextComposition);
+  assert.ok(!parsedContext.includes(secretMessage));
+  assert.ok(!parsedContext.includes(secretInstruction));
+  assert.ok(!parsedContext.includes(secretToolDescription));
+  assert.equal(protocol.validatePayload(payload, { allowLegacy: false }).ok, true);
+});
+
 test("速度估算与有效速度：使用 item_completed 时间窗并剥离工具耗时", () => {
   writeLines([
     turnContext("2026-09-17T14:10:00.000Z", "T-SPEED", 1),
@@ -1909,4 +2225,105 @@ test("速度估算与有效速度：使用 item_completed 时间窗并剥离工�
   assert.equal(payload.effectiveSampleCount, 1);
   assert.equal(payload.effectiveWindow, 25);
   assert.equal(payload.speedTimingConfidence, "high");
+});
+
+test("新对话映射只接受 placeholder 激活之后创建的唯一会话文件", () => {
+  const mappingDir = path.join(testRoot, "mapping-candidates");
+  fs.mkdirSync(mappingDir, { recursive: true });
+  const oldThread = "11111111-1111-1111-1111-111111111111";
+  const newThread = "22222222-2222-2222-2222-222222222222";
+  const oldFile = path.join(mappingDir, `rollout-2026-08-22T19-15-30-${oldThread}.jsonl`);
+  const newFile = path.join(mappingDir, `rollout-2026-10-18T15-35-00-${newThread}.jsonl`);
+  fs.writeFileSync(oldFile, "{}\n", "utf8");
+  fs.writeFileSync(newFile, "{}\n", "utf8");
+  const activatedAt = new Date(2026, 9, 18, 15, 33, 43).getTime();
+  const candidates = stats.findClientFileCandidatesSince(activatedAt, { files: [oldFile, newFile] });
+  assert.deepEqual(
+    candidates.map((item) => item.threadId),
+    [newThread],
+  );
+  assert.equal(stats.findNewestClientFileSince(activatedAt, "", null, [oldFile]), null);
+  assert.equal(stats.findNewestClientFileSince(activatedAt, "", null, [oldFile, newFile]), newThread);
+  assert.equal(
+    stats.findClientFileCandidatesSince(activatedAt, {
+      files: [oldFile, newFile],
+      claimedSet: new Set([newThread]),
+    }).length,
+    0,
+  );
+});
+
+test("会话候选需稳定确认，缺失 rollout 文件的候选不能替换当前会话", () => {
+  const activeThread = stats.threadIdOf(file);
+  assert.ok(activeThread);
+  const session = stats.createWatchSession({ port: 9229 });
+  session.rolloutFilesOverride = [file];
+  const first = stats.confirmWatchThread(session, activeThread, activeThread);
+  assert.equal(first.stable, false, "首次候选不应立即切换");
+  session.pendingThreadSince = 0;
+  const confirmed = stats.confirmWatchThread(session, activeThread, activeThread);
+  assert.equal(confirmed.stable, true);
+  assert.equal(confirmed.thread, activeThread);
+
+  const invalid = stats.confirmWatchThread(session, "missing-thread", "missing-thread");
+  assert.equal(invalid.thread, activeThread, "无文件候选不应替换已确认会话");
+  assert.equal(session.threadIdentityInvalid, true);
+});
+
+test("启动清理会删除无文件或早于 placeholder 激活的持久映射", () => {
+  const mappingDir = path.join(testRoot, "mapping-sanitize");
+  fs.mkdirSync(mappingDir, { recursive: true });
+  const oldThread = "33333333-3333-3333-3333-333333333333";
+  const newThread = "44444444-4444-4444-4444-444444444444";
+  const oldFile = path.join(mappingDir, `rollout-2026-08-22T19-15-30-${oldThread}.jsonl`);
+  const newFile = path.join(mappingDir, `rollout-2026-10-18T15-35-00-${newThread}.jsonl`);
+  fs.writeFileSync(oldFile, "{}\n", "utf8");
+  fs.writeFileSync(newFile, "{}\n", "utf8");
+  const activatedAt = new Date(2026, 9, 18, 15, 33, 43).getTime();
+  stats.clientState.clientMap["old-placeholder"] = oldThread;
+  stats.clientState.clientMap["new-placeholder"] = newThread;
+  stats.clientState.clientMap["missing-placeholder"] = "55555555-5555-5555-5555-555555555555";
+  stats.clientState.activatedAt["old-placeholder"] = activatedAt;
+  stats.clientState.activatedAt["new-placeholder"] = activatedAt;
+  stats.clientState.activatedAt["missing-placeholder"] = activatedAt;
+
+  const removed = stats.sanitizeClientMappings([oldFile, newFile]);
+  assert.equal(removed, 2);
+  assert.equal(stats.clientState.clientMap["old-placeholder"], undefined);
+  assert.equal(stats.clientState.clientMap["missing-placeholder"], undefined);
+  assert.equal(stats.clientState.clientMap["new-placeholder"], newThread);
+
+  delete stats.clientState.clientMap["new-placeholder"];
+  delete stats.clientState.activatedAt["new-placeholder"];
+});
+
+test("rollout 新增时 sourceChanged 为真，确保详情展开期间也能推送新数据", () => {
+  writeLines([
+    turnContext("2026-09-17T15:20:00.000Z", "T-SOURCE", 1),
+    usage("2026-09-17T15:20:01.000Z", "source-r1", {
+      turnId: "T-SOURCE",
+      threadTotal: 13,
+      turnTotal: 13,
+    }),
+  ]);
+  const activeThread = stats.threadIdOf(file);
+  const session = stats.createWatchSession({ port: 9229 });
+  session.rolloutFilesOverride = [file];
+  const first = stats.readWatchStats(session, activeThread);
+  const unchanged = stats.readWatchStats(session, activeThread);
+  fs.appendFileSync(
+    file,
+    "\n" +
+      usage("2026-09-17T15:20:02.000Z", "source-r2", {
+        turnId: "T-SOURCE",
+        threadTotal: 26,
+        turnTotal: 26,
+      }) +
+      "\n",
+    "utf8",
+  );
+  const appended = stats.readWatchStats(session, activeThread);
+  assert.equal(first.sourceChanged, true);
+  assert.equal(unchanged.sourceChanged, false);
+  assert.equal(appended.sourceChanged, true);
 });

@@ -45,7 +45,7 @@ foreach ($extra in @("install.bat", "install.ps1")) {
 $excluded = @(
   "\\backups\\", "\\.git\\", "\\node_modules\\",
   "\\test\\", "\\scripts\\", "\\docs\\", "\\.github\\",
-  "\\package\.json$", "\\AGENTS\.md$", "\\.gitignore$", "\.bak$",
+  "\\package\.json$", "\\runtime-paths\.json$", "\\AGENTS\.md$", "\\.gitignore$", "\.bak$",
   "\\launch-silent\.vbs$", "\\launch-confirm\.vbs$", "\\start-monitor\.ps1$"
 )
 $files = $files | Where-Object {

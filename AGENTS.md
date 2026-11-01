@@ -27,7 +27,7 @@
 - 没有第三方 npm 运行时依赖
 - 只使用 Node.js 22+ 内置模块和 WebSocket/fetch
 - 部署不需要 `npm install`
-- Playwright 只用于 `npm run test:live`
+- Playwright 用于 `npm run test:auth-ui` 和 `npm run test:live`
 - CI 同时覆盖 Node.js 22 和 24
 
 ## 2. 组件
@@ -50,13 +50,23 @@
 - 读取本地 Codex rollout JSONL
 - 增量解析与分片合并
 - 统计请求、轮次、缓存、速度和上下文
-- 通过本机 CDP 推送签名 schema v3 负载
+- 通过本机 CDP 推送签名 schema v4 / auth v2 负载
 - 写入健康快照、简略快照和日志
+
+会话身份约束：
+
+- 页面候选必须存在对应 rollout，空白新对话除外
+- 候选连续稳定 2.5 秒后才允许切换
+- `client-new-thread` 只接受激活后创建的唯一会话文件
+- 禁止把新 placeholder 映射到任意“最新未认领旧文件”
+- React Fiber 兜底只接受 `conversationId` / `localConversationId` / `threadId`
+- 最后确认 ID 最多沿用 8 秒；过期后宁可等待，不得继续显示旧会话
 
 ### 协议
 
 - `protocol.mjs`
-- `schemas/payload-v3.schema.json`
+- `schemas/payload-v4.schema.json`
+- `docs/auth-v2.md`
 - 页面事件：`tokens-ui-for-codex`
 - 页面全局：`window.__tuiForCodex`
 
@@ -85,7 +95,7 @@ Codex rollout JSONL
   → IncrementalRolloutParser
   → buildStats / mixed-format merge
   → payloadFor
-  → signPayload (HMAC-SHA256 + ts + nonce + seq)
+  → signPayload (auth v2：body + v + keyId + ts + nonce + seq)
   → local CDP
   → panel verifyPayloadAuth
   → adoptData
@@ -102,16 +112,16 @@ Codex rollout JSONL
 
 ## 4. 协议约束
 
-schema v3 是严格签名-only：
+schema v4 / auth v2 是严格签名-only：
 
 - 必须 `authRequired: true`
-- 必须有 `auth.v=1`
-- 必须有 `ts`、`nonce`、`seq`、`mac`
+- 必须有 `auth.v=2`
+- 必须有 `keyId`、`ts`、`nonce`、`seq`、`mac`
 - 时间窗 ±30 秒
 - nonce 不可重复
 - seq 必须严格递增
-- MAC = HMAC-SHA256(canonicalJson(body) + "|" + ts + "|" + nonce)
-- boot 负载与事件负载走同一验签函数
+- `keyId` 变化时清空旧密钥、nonce 与 seq 状态
+- MAC 输入包含固定域分隔、body 和完整 auth 信封
 - 验证前深拷贝，验证后应用同一快照
 
 拒绝条件：
@@ -122,6 +132,7 @@ schema v3 是严格签名-only：
 - nonce 重放
 - seq 倒退
 - `authRequired !== true`
+- 旧 schema v3 / auth v1
 
 ## 5. 统计口径
 
@@ -156,6 +167,10 @@ schema v3 是严格签名-only：
 - 详情标题显示本轮墙钟平均；墙钟速度只使用 output，不使用上下文累计量
 - 会话有效速度使用最近 25 个高/中置信度轮次加权
 - 输出 token 已包含 reasoning，不得重复加
+- 总用时优先取 `task_complete.duration_ms`
+- 工具用时必须取工具区间并集，不能把并行工具 duration 直接相加
+- 会话 TTFT 取有效轮次的算术平均值，并记录样本数
+- 缺失计时保持 `null`，不得写 0
 
 ## 6. 推送与加载
 
@@ -179,7 +194,7 @@ schema v3 是严格签名-only：
 
 本地历史：
 
-- `%LOCALAPPDATA%\tokens-ui-for-codex\history\sessions\<sessionHash>\`
+- `<runtime-paths.json 的 historyDir>\sessions\<sessionHash>\`
 - 请求：`requests-YYYYMM*.jsonl`
 - 轮次：`turns.json`
 - 保留 60 天；请求文件 32MB 分段；每 6 小时清理
@@ -198,6 +213,19 @@ schema v3 是严格签名-only：
 - 深浅色跟随宿主
 - 主题观察器只监听 `<html>`，不要订阅整棵 DOM 的 class/style
 - 磨砂玻璃必须有低性能降级
+- 高性能设备使用强磨砂；关闭详情带约 110ms 退场动画
+- 上下文分类是本地估算，界面必须标 `≈` 和免责声明
+- 上下文分类数值总和必须等于 `floor(contextUsed)`，缺失来源显示 `--`
+- 上下文分类只保存数值权重，不保存正文；other/template 超过 60% 时隐藏分类图
+- 原组件模式资源基线按 watchdog 90–120 MB、Node 140–160 MB 记录；`rust-launcher/`
+  0.1.0 Alpha 的 supervisor 实测约 6.8–6.9 MB，单独标注，不得把它与真实 Node 合计混写
+- “统计信息”范围仅允许 `today / 3d / 7d / 30d / all`，默认 `all` 并持久化选择
+- 详情关闭时必须停止范围计算并使 `rangeSummary` 为 `null`
+- 范围统计只读取 `turns.json` 的结构化数值，不得读取原始会话正文
+- 紧凑条完整线程累计与详情本地归档范围是不同口径；禁止用两者相等作为测试条件
+- 重新打开详情时允许先显示最长 24 小时的范围数值缓存，但必须明确标记并在新负载到达后替换
+- 同页详情快照缓存必须包含会话切换失效；缓存只保存现有脱敏数字、时间与索引
+- 健康灯悬浮/聚焦提示必须展示错误码、原因、恢复状态和最近成功时间；未知错误统一标为“其他”
 
 ## 8. 文件编码
 
@@ -223,24 +251,28 @@ schema v3 是严格签名-only：
 
 - `tokens-ui-for-codex-monitor`
 - 安装后立即执行一次
-- 登录时执行
-- 无周期巡检
+- 登录时启动一次常驻 watchdog；进程内每 15 秒检查
 - Limited
 - 不请求 UAC
 
 主链：
 
 ```text
-wscript.exe → launch-silent.vbs → node
+powershell.exe -WindowStyle Hidden → monitor-watchdog.ps1 -Resident
+                                           ↓ 异常或停止时
+                                      launch-silent.ps1 → node
 ```
 
 手动入口：
 
 ```text
-launch-confirm.vbs → start-monitor.ps1 → Y 确认 → launch-silent.vbs
+launch-confirm.vbs → start-monitor.ps1 → Y 确认
+→ monitor-watchdog.ps1 -Resident -ForceStart → launch-silent.ps1 → node
 ```
 
-安装更新时必须停止所有旧 `token-stats.mjs --watch`，再启动新实例。
+watchdog 保持常驻；进程消失或连续心跳停滞时才重启。默认一个 Windows 用户
+只允许一个监控。原地升级遗留的无心跳旧监控，只有超过启动宽限、脚本路径匹配
+且不存在其他监控时才受控迁移一次；停止未确认时不得清理锁或启动第二实例。
 
 ## 10. 副本同步
 
@@ -254,10 +286,13 @@ launch-confirm.vbs → start-monitor.ps1 → Y 确认 → launch-silent.vbs
 运行：
 
 ```powershell
-node scripts\verify-sync.mjs --deploy "<部署根>"
+node scripts\verify-sync.mjs --deploy "<部署根>" --zip "<安装包>"
 ```
 
-必须 `mismatches: 0`。
+必须 `errors: []` 且 `mismatches: 0`。
+
+默认严格要求源码、部署、cache、用户脚本和 ZIP 全部存在；`--allow-partial`
+仅供开发诊断，不得作为发布门禁。
 
 更新用户脚本后必须重载 Codex 页面。
 
@@ -266,10 +301,11 @@ node scripts\verify-sync.mjs --deploy "<部署根>"
 ```powershell
 npm run check
 npm test
+npm run test:auth-ui
 node scripts\golden-baseline.mjs --check
 node scripts\verify-live.mjs
 npm run test:live
-node scripts\verify-sync.mjs --deploy "<部署根>"
+node scripts\verify-sync.mjs --deploy "<部署根>" --zip "<安装包>"
 ```
 
 PowerShell：
@@ -294,10 +330,11 @@ pwsh -NoProfile -Command '$errors=$null; [System.Management.Automation.Language.
 
 ## 12. 当前基线
 
-- 单元测试：66
-- Golden：0 不一致
-- `verify-live`：15 项，failed=0
-- Playwright：12 通过 / 2 安全跳过
+- 单元测试：87
+- 本地隔离页 auth UI：5
+- 固定合成快照：0 不一致；真实本机 Golden corpus 未随源码发布
+- `verify-live`：29 项，部署当前源码后复跑
+- 实机 Playwright：19 个用例；当前 17 通过 / 2 安全跳过
 - 连续监控重启：5 轮通过
 - 分页：5 轮通过
 - 主题快速切换：20 轮通过
@@ -305,6 +342,7 @@ pwsh -NoProfile -Command '$errors=$null; [System.Management.Automation.Language.
 ## 13. 安全与隐私
 
 - 页面负载不含路径、线程 ID、response ID、turn ID、消息正文、密钥
+- 上下文估算只可下发数值权重和估算版本，不得下发 prompt、工具描述或消息正文
 - 不读取会话正文
 - 不修改 Codex++ `user_scripts.json`
 - 不修改 Codex `config.toml`
@@ -329,7 +367,8 @@ pwsh -NoProfile -Command '$errors=$null; [System.Management.Automation.Language.
 - Windows only
 - 依赖 Codex++
 - DOM 锚点可能随 Codex 大版本更新变化
-- 无周期性 watchdog
+- watchdog 只处理进程存活，不重启 CDP/页面/数据暂时不可用
 - 实时逐 token 速度不可得
 - 多窗口需要唯一焦点或手动 target
 - 受限企业环境可能禁用计划任务、用户脚本或 CDP
+- HMAC 只提供基础完整性，不隔离同用户恶意进程或同一页面的恶意脚本

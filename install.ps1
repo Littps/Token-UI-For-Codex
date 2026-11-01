@@ -7,11 +7,19 @@
 # 可选参数：
 #   -SkipAutostart   不安装“登录自启守护”（默认会安装）
 #   -SkipPlugin      跳过 Codex 插件注册（只安装用户脚本）
+#   -CodexHome <path> 覆盖 Codex Home
+#   -StateDir <path>  覆盖运行时状态目录
+#   -LockFile <path>  覆盖监控锁文件
+#   -ResetRuntimePaths 忽略已有 runtime-paths.json 并重新解析
 
 [CmdletBinding()]
 param(
   [switch]$SkipAutostart,
-  [switch]$SkipPlugin
+  [switch]$SkipPlugin,
+  [string]$CodexHome = "",
+  [string]$StateDir = "",
+  [string]$LockFile = "",
+  [switch]$ResetRuntimePaths
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +27,15 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $releasePluginRoot = Join-Path $root "plugins\tokens-ui-for-codex"
+$resolvedCodexHome = if ($CodexHome) {
+  [System.IO.Path]::GetFullPath($CodexHome)
+} elseif ($env:TUI_CODEX_HOME) {
+  [System.IO.Path]::GetFullPath($env:TUI_CODEX_HOME)
+} elseif ($env:CODEX_HOME) {
+  [System.IO.Path]::GetFullPath($env:CODEX_HOME)
+} else {
+  Join-Path $env:USERPROFILE ".codex"
+}
 
 # 发布包模式：install.ps1 位于含 plugins/ 与 .agents/ 的部署根。
 # 源码包模式：仓库根只有 token-stats.mjs 等源码。此时在 LOCALAPPDATA 生成
@@ -27,23 +44,31 @@ if (Test-Path -LiteralPath (Join-Path $releasePluginRoot ".codex-plugin\plugin.j
   $layoutRoot = $root
   $pluginRoot = $releasePluginRoot
 } elseif (Test-Path -LiteralPath (Join-Path $root "token-stats.mjs") -PathType Leaf) {
-  $stageRoot = Join-Path $env:LOCALAPPDATA "tokens-ui-for-codex\install-stage"
-  $expectedStageBase = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "tokens-ui-for-codex"))
-  $resolvedStage = [System.IO.Path]::GetFullPath($stageRoot)
-  if (-not $resolvedStage.StartsWith($expectedStageBase, [System.StringComparison]::OrdinalIgnoreCase) -or
-      $resolvedStage.TrimEnd("\") -eq $expectedStageBase.TrimEnd("\")) {
-    throw "拒绝清理未验证的 staging 路径：$resolvedStage"
+  $stageBase = Join-Path $resolvedCodexHome "tokens-ui-for-codex"
+  $stageRoot = Join-Path $stageBase "install-stage"
+  $stageStamp = (Get-Date -Format "yyyyMMddHHmmss") + "-" + $PID
+  $stageNext = Join-Path $stageBase ("install-stage.next-" + $stageStamp)
+  $stagePrevious = Join-Path $stageBase ("install-stage.previous-" + $stageStamp)
+  $expectedStageBase = [System.IO.Path]::GetFullPath($stageBase)
+  foreach ($candidate in @($stageRoot, $stageNext, $stagePrevious)) {
+    $resolvedCandidate = [System.IO.Path]::GetFullPath($candidate)
+    if (-not $resolvedCandidate.StartsWith($expectedStageBase, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $resolvedCandidate.TrimEnd("\") -eq $expectedStageBase.TrimEnd("\")) {
+      throw "拒绝使用未验证的 staging 路径：$resolvedCandidate"
+    }
   }
-  if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
-  $pluginRoot = Join-Path $stageRoot "plugins\tokens-ui-for-codex"
+  New-Item -ItemType Directory -Path $stageBase -Force | Out-Null
+  if (Test-Path -LiteralPath $stageNext) { Remove-Item -LiteralPath $stageNext -Recurse -Force }
+  $pluginRoot = Join-Path $stageNext "plugins\tokens-ui-for-codex"
   New-Item -ItemType Directory -Path $pluginRoot -Force | Out-Null
-  New-Item -ItemType Directory -Path (Join-Path $stageRoot ".agents\plugins") -Force | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $stageNext ".agents\plugins") -Force | Out-Null
 
   foreach ($file in @(
-      "token-stats.mjs", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js",
+      "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js",
       "find-codex.ps1", "install-autostart.ps1", "uninstall-autostart.ps1",
       "install.bat", "install.ps1", "README.md", "README.en.md", "README.agent.md",
-      "MIGRATION-FOR-AGENTS.md", "AGENTS.md", "LICENSE", "CHANGELOG.md", "package.json"
+      "MIGRATION-FOR-AGENTS.md", "DEPLOYMENT.md", "AGENTS.md", "LICENSE", "CHANGELOG.md",
+      "package.json", "readme01.png", "readme02.png", "readme03.png"
     )) {
     $source = Join-Path $root $file
     if (Test-Path -LiteralPath $source -PathType Leaf) {
@@ -54,6 +79,13 @@ if (Test-Path -LiteralPath (Join-Path $releasePluginRoot ".codex-plugin\plugin.j
     $sourceDir = Join-Path $root $dirName
     if (Test-Path -LiteralPath $sourceDir -PathType Container) {
       Copy-Item -LiteralPath $sourceDir -Destination (Join-Path $pluginRoot $dirName) -Recurse -Force
+    }
+  }
+  # 发布包根必须能直接执行安装脚本，并包含部署说明。
+  foreach ($file in @("DEPLOYMENT.md", "install.bat", "install.ps1")) {
+    $source = Join-Path $root $file
+    if (Test-Path -LiteralPath $source -PathType Leaf) {
+      Copy-Item -LiteralPath $source -Destination (Join-Path $stageNext $file) -Force
     }
   }
 
@@ -102,7 +134,55 @@ if (Test-Path -LiteralPath (Join-Path $releasePluginRoot ".codex-plugin\plugin.j
     )
   }
   $marketplaceJsonText = ($marketplace | ConvertTo-Json -Depth 8) + "`r`n"
-  [System.IO.File]::WriteAllText((Join-Path $stageRoot ".agents\plugins\marketplace.json"), $marketplaceJsonText, $utf8NoBom)
+  [System.IO.File]::WriteAllText((Join-Path $stageNext ".agents\plugins\marketplace.json"), $marketplaceJsonText, $utf8NoBom)
+
+  # 先完整校验新 staging，再切换目录。失败时保留旧的 install-stage，不让半成品生效。
+  $requiredStageFiles = @(
+    "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs",
+    "tokens-ui-for-codex-panel.js", "find-codex.ps1", "install-autostart.ps1",
+    "uninstall-autostart.ps1", "package.json", "DEPLOYMENT.md",
+    "readme01.png", "readme02.png", "readme03.png", ".codex-plugin\plugin.json",
+    "schemas\payload-v4.schema.json"
+  )
+  foreach ($relative in $requiredStageFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $pluginRoot $relative) -PathType Leaf)) {
+      throw "staging 校验失败，缺少文件：$relative"
+    }
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $stageNext ".agents\plugins\marketplace.json") -PathType Leaf)) {
+    throw "staging 校验失败，缺少 marketplace.json"
+  }
+  foreach ($relative in @("DEPLOYMENT.md", "install.bat", "install.ps1")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $stageNext $relative) -PathType Leaf)) {
+      throw "staging 校验失败，发布包根缺少文件：$relative"
+    }
+  }
+  foreach ($relative in @("token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "protocol.mjs", "tokens-ui-for-codex-panel.js")) {
+    $sourceHash = (Get-FileHash -LiteralPath (Join-Path $root $relative) -Algorithm SHA256).Hash
+    $stageHash = (Get-FileHash -LiteralPath (Join-Path $pluginRoot $relative) -Algorithm SHA256).Hash
+    if ($sourceHash -ne $stageHash) { throw "staging 哈希不一致：$relative" }
+  }
+
+  $movedPrevious = $false
+  try {
+    if (Test-Path -LiteralPath $stageRoot) {
+      Move-Item -LiteralPath $stageRoot -Destination $stagePrevious -Force
+      $movedPrevious = $true
+    }
+    Move-Item -LiteralPath $stageNext -Destination $stageRoot -Force
+  } catch {
+    if (Test-Path -LiteralPath $stageNext) {
+      Remove-Item -LiteralPath $stageNext -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($movedPrevious -and -not (Test-Path -LiteralPath $stageRoot) -and (Test-Path -LiteralPath $stagePrevious)) {
+      Move-Item -LiteralPath $stagePrevious -Destination $stageRoot -Force
+    }
+    throw
+  }
+  if ($movedPrevious -and (Test-Path -LiteralPath $stagePrevious)) {
+    Remove-Item -LiteralPath $stagePrevious -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  $pluginRoot = Join-Path $stageRoot "plugins\tokens-ui-for-codex"
   $layoutRoot = $stageRoot
 } else {
   # 交给后续检查给出统一、可读的“缺少文件”错误。
@@ -132,7 +212,25 @@ $locator = Join-Path $pluginRoot "find-codex.ps1"
 if (Test-Path -LiteralPath $locator) { . $locator }
 
 # ---- 安装日志：安装窗口关闭后仍可回溯 --------------------------------------
-$logFile = Join-Path $env:LOCALAPPDATA "tokens-ui-for-codex\install.log"
+$bootstrapStateDir = if ($StateDir) {
+  [System.IO.Path]::GetFullPath($StateDir)
+} elseif ($env:TUI_STATE_DIR) {
+  [System.IO.Path]::GetFullPath($env:TUI_STATE_DIR)
+} else {
+  $existingRuntimeConfig = Join-Path $pluginRoot "runtime-paths.json"
+  if (Test-Path -LiteralPath $existingRuntimeConfig) {
+    try {
+      $configuredStateDir = [string]((Get-Content -Raw -Encoding UTF8 -LiteralPath $existingRuntimeConfig | ConvertFrom-Json).stateDir)
+      if ($configuredStateDir) { [System.IO.Path]::GetFullPath($configuredStateDir) }
+      else { Join-Path $resolvedCodexHome "tokens-ui-for-codex\state" }
+    } catch {
+      Join-Path $resolvedCodexHome "tokens-ui-for-codex\state"
+    }
+  } else {
+    Join-Path $resolvedCodexHome "tokens-ui-for-codex\state"
+  }
+}
+$logFile = Join-Path $bootstrapStateDir "install.log"
 function Write-Log {
   param([string]$Text)
   try {
@@ -184,12 +282,14 @@ if ($codexPlusPlus -and $codexPlusPlus.installed) {
   $runningLabel = if ($codexPlusPlus.running) { "运行中" } else { "未运行（启动后统计条才会注入页面）" }
   Write-Ok ("Codex++：已安装（" + $runningLabel + "）")
 } else {
-  Write-Note "未检测到 Codex++：请先安装 Codex++（否则统计条无法注入）。脚本会继续完成其余步骤。"
+  Write-Note "未检测到 Codex++：请先安装 Codex++（否则统计条无法注入）。"
+  $blocking += "未安装 Codex++，无法安装页面用户脚本。"
 }
 if (Test-Path -LiteralPath $userScripts) {
   Write-Ok ("Codex++ 用户脚本目录：" + $userScripts)
 } else {
   Write-Note ("未检测到 Codex++ 用户脚本目录：" + $userScripts)
+  $blocking += "未找到 Codex++ 用户脚本目录：$userScripts"
 }
 $plusSwitch = if (Get-Command Get-CodexPlusPlusSwitchState -ErrorAction SilentlyContinue) { Get-CodexPlusPlusSwitchState } else { "missing" }
 switch ($plusSwitch) {
@@ -198,6 +298,7 @@ switch ($plusSwitch) {
     Write-Bad "Codex++ 用户脚本总开关处于关闭状态（enabled=false）——统计条不会注入。"
     Write-Note "请在 Codex++ 管理器中启用用户脚本后重试；本安装器不会修改该配置文件。"
     Write-Log "Codex++ 用户脚本总开关: disabled"
+    $blocking += "Codex++ 用户脚本总开关处于关闭状态。"
   }
   "missing"  { Write-Note "未找到 Codex++ 的 user_scripts.json（Codex++ 首次启动后会自动生成）。" }
   default    { Write-Note ("Codex++ 用户脚本开关状态异常：" + $plusSwitch + "（只读检查，未修改该文件）。") }
@@ -214,6 +315,7 @@ if ($codex) {
   Write-Note "后果：Codex 插件不会被注册 → 插件技能不可用（统计条与监控不受影响）。"
   Write-Note "如需插件技能，请在 Codex 自带的终端里重跑本脚本。"
   Write-Log "codex 命令未找到 -> 跳过插件注册"
+  if (-not $SkipPlugin) { $blocking += "未找到 codex 命令，无法注册 Codex 插件。" }
 }
 
 # Codex 桌面版（MSIX）：动态查询包信息，用于自检与排障输出。
@@ -229,6 +331,24 @@ if ($codexApp -and $codexApp.installed) {
 if ($blocking.Count -gt 0) {
   Write-Step "安装中止"
   foreach ($item in $blocking) { Write-Bad $item }
+  exit 1
+}
+
+# schema v4 与旧版不兼容：必须先停旧监控，再替换用户脚本，避免旧 v3 推送持续进入新面板。
+$oldMonitors = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -and $_.CommandLine -match 'token-stats\.mjs' -and $_.CommandLine -match '--watch' })
+foreach ($proc in $oldMonitors) {
+  try {
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+    Write-Note ("已停止旧监控实例 PID " + $proc.ProcessId + "（协议升级前清理）")
+  } catch {
+    Write-Bad ("停止旧监控失败 PID " + $proc.ProcessId + "：" + $_.Exception.Message)
+    $blocking += "停止旧监控失败：PID $($proc.ProcessId)"
+  }
+}
+if ($blocking.Count -gt 0) {
+  Write-Step "安装中止"
+  $blocking | Select-Object -Unique | ForEach-Object { Write-Bad $_ }
   exit 1
 }
 
@@ -253,7 +373,10 @@ if (Test-Path -LiteralPath $userScripts) {
     $retired = $file.FullName + ".superseded-" + $supersededStamp + ".bak"
     Move-Item -LiteralPath $file.FullName -Destination $retired -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $retired) { Write-Note ("已停用历史面板脚本（改名备份）：" + $file.Name) }
-    else { Write-Bad ("历史面板脚本停用失败，可能与应用内重复统计条共存：" + $file.Name) }
+    else {
+      Write-Bad ("历史面板脚本停用失败，可能与应用内重复统计条共存：" + $file.Name)
+      $blocking += "历史面板脚本停用失败：$($file.Name)"
+    }
   }
 
   $hashSource = (Get-FileHash -LiteralPath $panelSource -Algorithm SHA256).Hash
@@ -283,7 +406,10 @@ if ($SkipPlugin -or -not $codex) {
   ($installOutput | Out-String).Trim() -split "`n" | ForEach-Object { if ($_.Trim()) { Write-Host ("   " + $_.Trim()) } }
   $listOutput = (& $codex.Source plugin list 2>&1 | Out-String)
   if ($listOutput -match "tokens-ui-for-codex@") { Write-Ok "插件已安装并启用" }
-  else { Write-Note "未在 plugin list 中确认到插件，请手动执行：codex plugin list" }
+  else {
+    Write-Bad "未在 plugin list 中确认到插件。"
+    $blocking += "Codex 插件注册后未出现在 plugin list。"
+  }
 }
 
 Write-Step "4/5 安装登录自启（计划任务）"
@@ -294,8 +420,13 @@ if ($SkipAutostart) {
   if (Test-Path -LiteralPath $autostart) {
     try {
       $preferPwsh = Get-Command pwsh -ErrorAction SilentlyContinue
-      if ($preferPwsh) { & $preferPwsh.Source -NoProfile -ExecutionPolicy Bypass -File $autostart }
-      else { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $autostart }
+      $autostartArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $autostart)
+      if ($CodexHome) { $autostartArgs += @("-CodexHome", $CodexHome) }
+      if ($StateDir) { $autostartArgs += @("-StateDir", $StateDir) }
+      if ($LockFile) { $autostartArgs += @("-LockFile", $LockFile) }
+      if ($ResetRuntimePaths) { $autostartArgs += "-ResetRuntimePaths" }
+      if ($preferPwsh) { & $preferPwsh.Source @autostartArgs }
+      else { & powershell.exe @autostartArgs }
       # 关键修正：必须检查子脚本退出码。
       # 之前这里无条件打印"已安装"，子脚本失败（Node 版本不足 / 计划任务被权限拒绝）时
       # 会被完全掩盖——这是"装完却不生效"的直接原因。
@@ -313,9 +444,11 @@ if ($SkipAutostart) {
     } catch {
       Write-Note ("自启安装未完成：" + $_.Exception.Message)
       Write-Note ("可手动运行：powershell -ExecutionPolicy Bypass -File `"" + $autostart + "`"")
+      $blocking += "登录自启安装异常：$($_.Exception.Message)"
     }
   } else {
     Write-Note "未找到 install-autostart.ps1，跳过。"
+    $blocking += "未找到 install-autostart.ps1。"
   }
 }
 
@@ -325,21 +458,36 @@ if ($selfTask) {
   $selfInfo = Get-ScheduledTaskInfo -TaskName "tokens-ui-for-codex-monitor" -ErrorAction SilentlyContinue
   Write-Ok ("自启任务：已注册（状态 " + $selfTask.State + "，上次运行 " + $selfInfo.LastRunTime + "）")
   Write-Log ("自检 任务: 已注册 " + $selfTask.State)
+  $taskText = ($selfTask.Actions | ForEach-Object { [string]$_.Execute + " " + [string]$_.Arguments }) -join " "
+  if ($taskText -match 'monitor-watchdog\.ps1') {
+    Write-Ok "自启任务：已切换到 watchdog 控制面"
+  } else {
+    Write-Bad "自启任务仍指向旧启动器。"
+    $blocking += "自启任务未使用 monitor-watchdog.ps1。"
+  }
 } else {
   Write-Bad "自启任务：未注册 → 登录后不会自动启动监控"
   Write-Log "自检 任务: 未注册"
+  if (-not $SkipAutostart) { $blocking += "自启任务未注册。" }
 }
 
 if ($codex) {
   $selfPluginList = (& $codex.Source plugin list 2>&1 | Out-String)
   if ($selfPluginList -match "tokens-ui-for-codex@") { Write-Ok "Codex 插件：已注册" }
-  else { Write-Bad "Codex 插件：未注册（技能不可用）" }
+  else {
+    Write-Bad "Codex 插件：未注册（技能不可用）"
+    if (-not $SkipPlugin) { $blocking += "Codex 插件未注册。" }
+  }
 } else {
   Write-Bad "Codex 插件：未注册（未找到 codex 命令）"
+  if (-not $SkipPlugin) { $blocking += "Codex 插件未注册（未找到 codex 命令）。" }
 }
 
 if (Test-Path -LiteralPath $userScriptTarget) { Write-Ok "Codex++ 用户脚本：已安装" }
-else { Write-Bad "Codex++ 用户脚本：未安装（统计条不会出现）" }
+else {
+  Write-Bad "Codex++ 用户脚本：未安装（统计条不会出现）"
+  $blocking += "Codex++ 用户脚本未安装。"
+}
 
 if (Get-Command Test-CodexRunning -ErrorAction SilentlyContinue) {
   if (Test-CodexRunning) { Write-Ok "Codex 桌面版：正在运行" }
@@ -347,17 +495,33 @@ if (Get-Command Test-CodexRunning -ErrorAction SilentlyContinue) {
 }
 
 $selfMonitor = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -and $_.CommandLine -match 'token-stats\.mjs' })
+  Where-Object { $_.CommandLine -and $_.CommandLine -match 'token-stats\.mjs' -and $_.CommandLine -match '--watch' })
 if ($selfMonitor.Count -gt 0) { Write-Ok ("监控进程：运行中 (PID " + $selfMonitor[0].ProcessId + ")") }
-else { Write-Note "监控进程：未运行（可从详情面板「启动监控」或开始菜单手动启动；登录时也会自启）" }
+else {
+  Write-Note "监控进程：未运行（可从详情面板「启动监控」或开始菜单手动启动；登录时也会自启）"
+  if (-not $SkipAutostart) { $blocking += "监控进程未运行。" }
+}
 Write-Note ("安装日志：" + $logFile)
+
+if ($blocking.Count -gt 0) {
+  Write-Step "安装未完成"
+  $blocking | Select-Object -Unique | ForEach-Object { Write-Bad $_ }
+  Write-Host ("安装日志：" + $logFile) -ForegroundColor Yellow
+  exit 1
+}
 
 Write-Step "5/5 完成"
 $manualPort = "auto"
 try {
-  $autostartStatePath = Join-Path $env:LOCALAPPDATA "tokens-ui-for-codex\autostart-state.json"
+  $runtimeConfigPath = Join-Path $pluginRoot "runtime-paths.json"
+  $resolvedStateDir = $bootstrapStateDir
+  if (Test-Path -LiteralPath $runtimeConfigPath) {
+    $runtimeConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $runtimeConfigPath | ConvertFrom-Json
+    if ($runtimeConfig.stateDir) { $resolvedStateDir = [string]$runtimeConfig.stateDir }
+  }
+  $autostartStatePath = Join-Path $resolvedStateDir "autostart-state.json"
   if (Test-Path -LiteralPath $autostartStatePath) {
-    $savedPort = (Get-Content -Raw -LiteralPath $autostartStatePath | ConvertFrom-Json).port
+    $savedPort = (Get-Content -Raw -Encoding UTF8 -LiteralPath $autostartStatePath | ConvertFrom-Json).port
     if ($savedPort) { $manualPort = [string]$savedPort }
   }
 } catch {

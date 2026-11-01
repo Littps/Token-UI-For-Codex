@@ -2,6 +2,22 @@
 
 本文件记录本地合成基准，用于比较同一台机器上的改前/改后结果。
 
+## 当前原组件模式实测
+
+2026-11-01 在 Windows 11 当前开发机观测：
+
+| 进程 | 工作集 | 私有提交 |
+| --- | ---: | ---: |
+| PowerShell watchdog | 约 90–120 MB | 约 90–100 MB |
+| Node monitor | 约 140–160 MB | 约 140–160 MB |
+
+合计约 230–280 MB，空闲 CPU 采样接近 0%。该值是原组件模式观测值，不是 Rust
+launcher 的预测值，也不是跨设备 SLA。详细说明见 `docs/context-and-resources.md`。
+
+`rust-launcher/` 0.1.0 Alpha 在独立计划任务和模拟 Node 夹具中测得 supervisor
+工作集约 6.8–6.9 MB，3 秒采样低于 0.001% 单核显示精度。该数字只代表 Rust 启动层，
+不包含真实 Node；它不是正式默认模式，也不是跨设备 SLA。
+
 ## 命令
 
 ```powershell

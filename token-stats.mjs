@@ -23,17 +23,34 @@ import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
+  AUTH_KEY_BYTES,
+  AUTH_KEY_ID_PATTERN,
+  AUTH_NONCE_PATTERN,
+  AUTH_VERSION,
   PROTOCOL_NAME,
   PROTOCOL_CAPABILITIES,
   PROTOCOL_SCHEMA_VERSION,
+  authSigningText,
   makeHealth,
   normalizeHealth,
   validatePayload,
 } from "./protocol.mjs";
 import { robustSpeedSummary, unionDurationMs, SPEED_SAMPLE_WINDOW } from "./speed-stats.mjs";
-import { UsageHistoryArchive } from "./history-archive.mjs";
+import { HISTORY_RANGE_KEYS, UsageHistoryArchive } from "./history-archive.mjs";
+import { resolveRuntimePaths } from "./runtime-paths.mjs";
 
-const SESSIONS_DIR = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "sessions");
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const RUNTIME_PATHS = resolveRuntimePaths({
+  argv: process.argv.slice(2),
+  env: process.env,
+  homeDir: os.homedir(),
+  scriptDir: SCRIPT_DIR,
+});
+const MONITOR_STARTED_AT = new Date().toISOString();
+const heartbeatIntervalOverride = Number(process.env.TUI_MONITOR_HEARTBEAT_INTERVAL_MS);
+const MONITOR_HEARTBEAT_INTERVAL_MS =
+  Number.isFinite(heartbeatIntervalOverride) && heartbeatIntervalOverride >= 1000 ? heartbeatIntervalOverride : 10000;
+const SESSIONS_DIR = path.join(RUNTIME_PATHS.codexHome, "sessions");
 const ROLLOUT_RE = /^rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(.+)\.jsonl$/;
 const ROLLOUT_FILE_RE = /^rollout-.*\.jsonl$/;
 const ROLLOUT_FILE_LIST_CACHE_MS = 1500;
@@ -77,11 +94,12 @@ const ECHO_LAG_THRESHOLD_MS = 60000;
 // lagMaxMs 只作观测，不写死具体数值（它随会话长度自然增长）；replay 陈旧度另计 replayStats。
 const DEFAULT_TARGET_SELECTOR = "auto";
 const FILE_FINGERPRINT_BYTES = 4096;
-const LOCAL_ROOT_DIR = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-const STATE_DIR_NAME = "tokens-ui-for-codex";
-const LOCAL_STATE_DIR = path.join(LOCAL_ROOT_DIR, STATE_DIR_NAME);
-const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const usageHistoryArchive = new UsageHistoryArchive(path.join(LOCAL_STATE_DIR, "history"));
+const LOCAL_STATE_DIR = RUNTIME_PATHS.stateDir;
+const MONITOR_LOCK_FILE = RUNTIME_PATHS.lockFile;
+const MONITOR_GUARD_LOCK_FILE = RUNTIME_PATHS.guardLockFile;
+const MONITOR_HEARTBEAT_FILE = RUNTIME_PATHS.heartbeatFile;
+const usageHistoryArchive = new UsageHistoryArchive(RUNTIME_PATHS.historyDir);
+const ownedLockFiles = new Set();
 
 // PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM；JSON.parse 不接受 BOM。
 // 读取时统一剥离，兼容历史状态文件与用户手工编辑。
@@ -100,24 +118,24 @@ function isProcessAlive(pid) {
   }
 }
 
-function monitorLockPath() {
-  return path.join(LOCAL_STATE_DIR, "monitor.lock");
-}
-
-function readMonitorLock() {
+function readLockFile(file) {
   try {
-    const lock = readJsonFileUtf8(monitorLockPath());
+    const lock = readJsonFileUtf8(file);
     return lock && Number.isInteger(lock.pid) && lock.pid > 0 ? lock : null;
   } catch {
     return null;
   }
 }
 
-function clearMonitorLock() {
+function removeOwnedOrStaleLock(file) {
   try {
-    fs.rmSync(monitorLockPath(), { force: true });
+    const lock = readLockFile(file);
+    if (lock && isProcessAlive(lock.pid) && lock.pid !== process.pid) return false;
+    fs.rmSync(file, { force: true });
+    ownedLockFiles.delete(file);
+    return true;
   } catch {
-    // 状态查询不能因为清理失败而阻塞启动；下次 acquire 会继续处理。
+    return false;
   }
 }
 
@@ -133,65 +151,153 @@ function readProcessCommandLineByPid(pid) {
   });
 }
 
-// 给手工启动器做预检查：锁文件里的 PID 必须仍存活，且命令行确实指向本监控脚本。
-// 这样既能拦住“已经有一个实例”的手工启动，也能清掉 PID 被系统复用后的陈旧锁。
-async function monitorInstanceState() {
-  const lock = readMonitorLock();
-  if (!lock) return { running: false, reason: "no-lock", pid: null };
-  if (!isProcessAlive(lock.pid)) {
-    clearMonitorLock();
-    return { running: false, reason: "stale-pid", pid: lock.pid };
-  }
-  const commandLine = await readProcessCommandLineByPid(lock.pid);
-  if (commandLine && !/token-stats\.mjs/i.test(commandLine)) {
-    clearMonitorLock();
-    return { running: false, reason: "pid-reused", pid: lock.pid };
-  }
-  return { running: true, reason: "running", pid: lock.pid, startedAt: lock.startedAt || null };
+function listMonitorProcesses() {
+  return new Promise((resolve) => {
+    const script =
+      "$items = Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | " +
+      'Where-Object { $_.CommandLine -and $_.CommandLine -match "token-stats\\.mjs" -and $_.CommandLine -match "--watch" } | ' +
+      "Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine; " +
+      "if ($items) { $items | ConvertTo-Json -Compress }";
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 },
+      (error, stdout) => {
+        if (error || !String(stdout || "").trim()) return resolve([]);
+        try {
+          const parsed = JSON.parse(String(stdout).trim());
+          resolve(Array.isArray(parsed) ? parsed : [parsed]);
+        } catch {
+          resolve([]);
+        }
+      },
+    );
+  });
 }
 
-async function printMonitorInstanceState() {
-  const state = await monitorInstanceState();
+async function auditOtherMonitorProcesses() {
+  const processes = await listMonitorProcesses();
+  return processes.filter((item) => Number(item.ProcessId) !== process.pid);
+}
+
+function lockPayload(args) {
+  return {
+    schemaVersion: 2,
+    pid: process.pid,
+    startedAt: MONITOR_STARTED_AT,
+    scriptPath: fileURLToPath(import.meta.url),
+    codexHome: RUNTIME_PATHS.codexHome,
+    stateDir: LOCAL_STATE_DIR,
+    target: args && args.target ? args.target : DEFAULT_TARGET_SELECTOR,
+    port: args && Number.isInteger(args.port) ? args.port : null,
+    processKind: "monitor",
+  };
+}
+
+async function acquireLockFile(file, payload) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    fs.writeFileSync(file, JSON.stringify(payload), { encoding: "utf8", flag: "wx" });
+    ownedLockFiles.add(file);
+    return { ok: true, reason: "created" };
+  } catch (error) {
+    if (!error || error.code !== "EEXIST") throw error;
+  }
+
+  const held = readLockFile(file);
+  if (held && isProcessAlive(held.pid)) {
+    const commandLine = await readProcessCommandLineByPid(held.pid);
+    // 读取失败时不能当作陈旧锁，否则两个监控会同时运行。
+    if (!commandLine || /token-stats\.mjs/i.test(commandLine)) {
+      return { ok: false, reason: "running", pid: held.pid };
+    }
+  }
+  fs.writeFileSync(file, JSON.stringify(payload), "utf8");
+  ownedLockFiles.add(file);
+  return { ok: true, reason: "replaced-stale" };
+}
+
+// 给手工启动器做预检查：锁文件里的 PID 必须仍存活，且命令行确实指向本监控脚本。
+// 这样既能拦住“已经有一个实例”的手工启动，也能清掉 PID 被系统复用后的陈旧锁。
+async function monitorInstanceState(args = {}) {
+  const allowMultiMonitor = args.allowMultiMonitor === true || process.env.TUI_ALLOW_MULTI_MONITOR === "1";
+  if (!allowMultiMonitor) {
+    const others = await auditOtherMonitorProcesses();
+    if (others.length) {
+      return {
+        running: true,
+        reason: "process-audit",
+        pid: Number(others[0].ProcessId) || null,
+        startedAt: others[0].CreationDate || null,
+      };
+    }
+  }
+
+  let stalePid = null;
+  for (const [file, label] of [
+    [MONITOR_GUARD_LOCK_FILE, "guard"],
+    [MONITOR_LOCK_FILE, "primary"],
+  ]) {
+    const lock = readLockFile(file);
+    if (!lock) continue;
+    if (!isProcessAlive(lock.pid)) {
+      removeOwnedOrStaleLock(file);
+      if (label === "primary") stalePid = lock.pid;
+      continue;
+    }
+    const commandLine = await readProcessCommandLineByPid(lock.pid);
+    if (!commandLine || /token-stats\.mjs/i.test(commandLine)) {
+      return { running: true, reason: label + "-running", pid: lock.pid, startedAt: lock.startedAt || null };
+    }
+    removeOwnedOrStaleLock(file);
+    return { running: false, reason: "pid-reused", pid: lock.pid };
+  }
+  if (stalePid) return { running: false, reason: "stale-pid", pid: stalePid };
+  return { running: false, reason: "no-lock", pid: null };
+}
+
+async function printMonitorInstanceState(args) {
+  const state = await monitorInstanceState(args);
   if (state.running) {
-    console.log("monitor already running (PID " + state.pid + ")");
+    console.log("monitor already running" + (state.pid ? " (PID " + state.pid + ")" : ""));
     return 0;
   }
   console.log("monitor not running" + (state.reason ? " (" + state.reason + ")" : ""));
   return 1;
 }
 
-async function acquireSingleInstanceLock() {
-  const lockFile = monitorLockPath();
-  const payload = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
+async function acquireSingleInstanceLock(args = {}) {
+  const payload = lockPayload(args);
   try {
     fs.mkdirSync(LOCAL_STATE_DIR, { recursive: true });
-    fs.writeFileSync(lockFile, payload, { encoding: "utf8", flag: "wx" });
+    if (!args.allowMultiMonitor) {
+      const others = await auditOtherMonitorProcesses();
+      if (others.length) return false;
+    }
+
+    let guardAcquired = false;
+    if (!args.allowMultiMonitor) {
+      const guard = await acquireLockFile(MONITOR_GUARD_LOCK_FILE, payload);
+      if (!guard.ok) return false;
+      guardAcquired = true;
+    }
+
+    const primary = await acquireLockFile(MONITOR_LOCK_FILE, payload);
+    if (!primary.ok) {
+      if (guardAcquired) removeOwnedOrStaleLock(MONITOR_GUARD_LOCK_FILE);
+      return false;
+    }
     return true;
   } catch (error) {
-    if (!error || error.code !== "EEXIST") return true; // 其它异常不阻塞启动
+    monitorLog("单实例锁失败，已拒绝启动第二实例: " + (error && error.message ? error.message : error));
+    return false;
   }
-  try {
-    const held = readJsonFileUtf8(lockFile);
-    if (held && Number.isInteger(held.pid) && isProcessAlive(held.pid)) {
-      // PID 存活还不够：系统可能已复用该 PID。只有命令行仍指向本监控时才认为实例存活。
-      const commandLine = await readProcessCommandLineByPid(held.pid);
-      if (!commandLine || /token-stats\.mjs/i.test(commandLine)) return false;
-    }
-  } catch {
-    // 锁文件损坏 → 按陈旧锁处理
-  }
-  try {
-    fs.writeFileSync(lockFile, payload, "utf8");
-  } catch {
-    // 覆盖失败也无妨，下一轮再试
-  }
-  return true;
 }
 const MONITOR_HEALTH_FILE = path.join(LOCAL_STATE_DIR, "monitor-health.json");
 const AUTOSTART_STATE_FILE = path.join(LOCAL_STATE_DIR, "autostart-state.json");
 const LAST_SUMMARY_FILE = path.join(LOCAL_STATE_DIR, "last-summary.json");
 const LAST_SUMMARY_VERSION = 3;
-const LOG_DIR = path.join(LOCAL_STATE_DIR, "logs");
+const LOG_DIR = RUNTIME_PATHS.logDir;
 const LOG_ROTATE_BYTES = 1024 * 1024;
 const MAX_LOG_FILES = 30;
 const CODEX_PLUS_PLUS_USER_SCRIPTS = path.join(
@@ -377,10 +483,159 @@ function captureModelChange(state, event, timestamp) {
   }
 }
 
+// Context composition is estimated locally. Only numeric weights are retained:
+// prompt text, tool descriptions and message bodies never enter parsed snapshots
+// or the CDP payload.
+function estimateTextTokenWeight(value) {
+  if (typeof value !== "string" || !value) return 0;
+  let ascii = 0;
+  let nonAscii = 0;
+  for (const char of value) {
+    if (char.codePointAt(0) <= 0x7f) ascii += 1;
+    else nonAscii += 1;
+  }
+  return ascii / 4 + nonAscii / 1.5;
+}
+
+function estimateValueTokenWeight(value) {
+  if (typeof value === "string") return estimateTextTokenWeight(value);
+  if (value == null) return 0;
+  try {
+    return estimateTextTokenWeight(JSON.stringify(value));
+  } catch {
+    return 0;
+  }
+}
+
+function messageContentWeight(content) {
+  if (typeof content === "string") return estimateTextTokenWeight(content);
+  if (!Array.isArray(content)) return 0;
+  let weight = 0;
+  for (const part of content) {
+    if (part && typeof part.text === "string") weight += estimateTextTokenWeight(part.text);
+  }
+  return weight;
+}
+
+function messageListWeight(messages) {
+  if (!Array.isArray(messages)) return 0;
+  let weight = 0;
+  for (const message of messages) {
+    if (!message) continue;
+    if (typeof message.text === "string") {
+      weight += estimateTextTokenWeight(message.text);
+    } else {
+      weight += messageContentWeight(message.content);
+    }
+  }
+  return weight;
+}
+
+function worldInstructionWeight(payload) {
+  const state = payload && payload.state;
+  if (!state || typeof state !== "object") return 0;
+  const fields = [
+    "apps_instructions",
+    "collaboration_mode.instructions",
+    "context_window_guidance",
+    "environments_instructions",
+    "host_skills.instructionsSent",
+    "managed_developer_instructions",
+    "permissions.instructions",
+    "plugins_instructions",
+    "skills.instructionsSent",
+    "cloud_skills.instructionsSent",
+  ];
+  let weight = 0;
+  for (const field of fields) {
+    let value = state;
+    for (const part of field.split(".")) {
+      if (!value || typeof value !== "object") {
+        value = null;
+        break;
+      }
+      value = value[part];
+    }
+    weight += estimateValueTokenWeight(value);
+  }
+  return weight;
+}
+
+function captureContextComposition(state, event) {
+  const payload = event && event.payload;
+  if (!payload || typeof payload !== "object") return;
+
+  if (event.type === "session_meta" && payload.base_instructions) {
+    const weight =
+      typeof payload.base_instructions === "string"
+        ? estimateTextTokenWeight(payload.base_instructions)
+        : estimateTextTokenWeight(payload.base_instructions.text);
+    if (weight > 0) {
+      state.baseInstructionWeight = weight;
+      state.hasSystemContext = true;
+    }
+  }
+
+  if (event.type === "world_state") {
+    const weight = worldInstructionWeight(payload);
+    if (weight > 0) {
+      state.worldInstructionWeight = weight;
+      state.hasSystemContext = true;
+    }
+  }
+
+  if (event.type === "compacted") {
+    const retained = payload.retained_context || {};
+    const userMessages = Array.isArray(retained.user_messages) ? retained.user_messages : [];
+    const assistantMessages = Array.isArray(retained.assistant_messages) ? retained.assistant_messages : [];
+    if (userMessages.length || assistantMessages.length) {
+      state.messageContextWeight = messageListWeight(userMessages) + messageListWeight(assistantMessages);
+      state.contextMessageIds = new Set();
+      for (const message of [...userMessages, ...assistantMessages]) {
+        const id = message && (message.message_id || message.id);
+        if (typeof id === "string" && id) state.contextMessageIds.add(id);
+      }
+      state.hasMessageContext = true;
+    }
+    const tools =
+      payload.resume_metadata && payload.resume_metadata.dynamic_tools && payload.resume_metadata.dynamic_tools.tools;
+    const toolWeight = Array.isArray(tools) && tools.length > 0 ? estimateValueTokenWeight(tools) : 0;
+    if (toolWeight > 0) {
+      state.toolDefinitionWeight = toolWeight;
+      state.hasToolContext = true;
+    }
+  }
+}
+
+function captureResponseMessageContext(state, event) {
+  if (event.type !== "response_item" || !event.payload) return;
+  const role = event.payload.role;
+  if (role !== "user" && role !== "assistant") return;
+  const id =
+    (typeof event.payload.id === "string" && event.payload.id) ||
+    [role, event.ordinal ?? "", event.timestamp ?? ""].join("|");
+  if (state.contextMessageIds.has(id)) return;
+  state.contextMessageIds.add(id);
+  const weight = messageContentWeight(event.payload.content);
+  if (weight > 0) {
+    state.messageContextWeight += weight;
+    state.hasMessageContext = true;
+  }
+}
+
 function captureTurnContext(state, event, timestamp) {
   if (event.type !== "turn_context" || !event.payload) return;
   if (Number.isFinite(event.payload.model_context_window)) {
     state.modelContextWindow = event.payload.model_context_window;
+  }
+  const developerWeight = estimateTextTokenWeight(
+    event.payload.collaboration_mode &&
+      event.payload.collaboration_mode.settings &&
+      event.payload.collaboration_mode.settings.developer_instructions,
+  );
+  if (developerWeight > 0) {
+    state.developerInstructionWeight = developerWeight;
+    state.hasSystemContext = true;
   }
   const contextTurnId = typeof event.payload.turn_id === "string" ? event.payload.turn_id : "";
   if (!contextTurnId) return;
@@ -541,6 +796,8 @@ function processParserEvent(state, event) {
   const timestamp = typeof event.timestamp === "string" ? event.timestamp : "";
   if (timestamp && timestamp > state.lastTimestamp) state.lastTimestamp = timestamp;
 
+  captureContextComposition(state, event);
+  captureResponseMessageContext(state, event);
   captureModelChange(state, event, timestamp);
   captureTurnContext(state, event, timestamp);
 
@@ -622,6 +879,15 @@ class IncrementalRolloutParser {
     this.modelChanges = [];
     this.currentModel = null;
     this.modelContextWindow = null;
+    this.baseInstructionWeight = 0;
+    this.worldInstructionWeight = 0;
+    this.developerInstructionWeight = 0;
+    this.messageContextWeight = 0;
+    this.toolDefinitionWeight = 0;
+    this.hasSystemContext = false;
+    this.hasMessageContext = false;
+    this.hasToolContext = false;
+    this.contextMessageIds = new Set();
     this.previousCountKey = null;
     this.snapshotCache = null;
     this.dirty = true;
@@ -735,6 +1001,20 @@ class IncrementalRolloutParser {
       modelContextWindow: this.modelContextWindow,
       modelChanges: this.modelChanges,
       formatConflicts: this.formatConflicts,
+      contextComposition:
+        this.hasSystemContext || this.hasToolContext || this.hasMessageContext
+          ? {
+              systemWeight: Math.max(
+                this.worldInstructionWeight,
+                this.baseInstructionWeight + this.developerInstructionWeight,
+              ),
+              toolWeight: this.toolDefinitionWeight,
+              messageWeight: this.messageContextWeight,
+              hasSystem: this.hasSystemContext,
+              hasTools: this.hasToolContext,
+              hasMessages: this.hasMessageContext,
+            }
+          : null,
     };
     this.dirty = false;
     return this.snapshotCache;
@@ -887,13 +1167,24 @@ function createCumulativeCounters() {
   };
 }
 
+// 累计链只有跌到上一值的一半或更低才视为“从头开始”的完整重置。
+// Host 在分片/尾部重写时会偶发极小回落；把这种修订当成 reset 会把整段旧累计再加一遍。
+const CUMULATIVE_RESET_RATIO = 0.5;
+
 function normalizeCumulativeUsage(usage = {}, counters) {
   let sawReset = false;
   const normalized = {};
+  const totalValue = Number.isFinite(usage.total) ? usage.total : null;
+  const totalLast = counters.total.last;
+  const totalAuthoritative = totalValue != null && totalLast != null;
+  const totalIsReset = totalAuthoritative && totalValue < totalLast && totalValue <= totalLast * CUMULATIVE_RESET_RATIO;
   for (const key of ["input", "output", "cached", "total"]) {
     const value = Number.isFinite(usage[key]) ? usage[key] : null;
     const counter = counters[key];
-    if (value != null && counter.last != null && value < counter.last) {
+    const keyIsReset = totalAuthoritative
+      ? totalIsReset
+      : value != null && counter.last != null && value < counter.last && value <= counter.last * CUMULATIVE_RESET_RATIO;
+    if (value != null && counter.last != null && value < counter.last && keyIsReset) {
       counter.base += counter.last;
       sawReset = true;
     }
@@ -1191,9 +1482,13 @@ function calculateTurnSpeedSample(turn, task, items) {
     ? Math.max(...generationIntervals.map((interval) => interval[1])) -
       Math.min(...generationIntervals.map((interval) => interval[0]))
     : 0;
+  const toolIntervals = (items || [])
+    .filter((item) => isToolItemType(item.itemType))
+    .map((item) => [item.startedAtMs, item.completedAtMs]);
   const toolMs = (items || [])
     .filter((item) => isToolItemType(item.itemType))
     .reduce((sum, item) => sum + (Number.isFinite(item.durationMs) ? item.durationMs : 0), 0);
+  const toolWallMs = unionDurationMs(toolIntervals);
   const legacyGenerationMs = Number.isFinite(turn.legacyGenMs) && turn.legacyGenMs > 0 ? turn.legacyGenMs : 0;
   const genMs = generationMs > 0 ? generationMs : legacyGenerationMs;
   const durationMs = task && Number.isFinite(task.durationMs) && task.durationMs > 0 ? task.durationMs : null;
@@ -1223,12 +1518,58 @@ function calculateTurnSpeedSample(turn, task, items) {
     generationSpanMs,
     effectiveMs,
     toolMs,
+    toolWallMs,
+    toolCallCount: toolIntervals.length,
     ttftMs,
     genEstimateTps,
     effectiveTps,
     timingCoverage,
     timingSource,
     timingQuality,
+  };
+}
+
+function estimateContextBreakdown(contextComposition, contextUsed) {
+  if (!contextComposition || !Number.isFinite(contextUsed) || contextUsed <= 0) return null;
+  if (!contextComposition.hasSystem && !contextComposition.hasTools && !contextComposition.hasMessages) {
+    return null;
+  }
+  const values = [
+    {
+      available: contextComposition.hasSystem === true,
+      weight: Math.max(0, Number(contextComposition.systemWeight) || 0),
+    },
+    {
+      available: contextComposition.hasTools === true,
+      weight: Math.max(0, Number(contextComposition.toolWeight) || 0),
+    },
+    {
+      available: contextComposition.hasMessages === true,
+      weight: Math.max(0, Number(contextComposition.messageWeight) || 0),
+    },
+  ];
+  const totalWeight = values.reduce((sum, value) => sum + (value.available ? value.weight : 0), 0);
+  if (totalWeight <= 0) return null;
+
+  const total = Math.max(0, Math.floor(contextUsed));
+  const scale = totalWeight > total ? total / totalWeight : 1;
+  const estimated = values.map((value) => (value.available ? Math.max(0, Math.floor(value.weight * scale)) : null));
+  let classified = estimated.reduce((sum, value) => sum + (value == null ? 0 : value), 0);
+  if (classified > total) {
+    const correctionScale = total / classified;
+    for (let index = 0; index < estimated.length; index += 1) {
+      if (estimated[index] != null) estimated[index] = Math.floor(estimated[index] * correctionScale);
+    }
+    classified = estimated.reduce((sum, value) => sum + (value == null ? 0 : value), 0);
+  }
+  const other = Math.max(0, total - classified);
+  return {
+    estimated: true,
+    estimatorVersion: 1,
+    systemPromptTokens: estimated[0],
+    toolDefinitionTokens: estimated[1],
+    conversationTokens: estimated[2],
+    otherTokens: other,
   };
 }
 
@@ -1261,6 +1602,8 @@ function createTurnAccumulator(start, fallbackTs, turnId = "") {
     effectiveTps: null,
     ttftMs: null,
     toolMs: null,
+    toolWallMs: null,
+    toolCallCount: 0,
     timingCoverage: null,
     timingSource: "none",
   };
@@ -1503,12 +1846,38 @@ function attachTurnTimings(parsed, turns) {
     turn.effectiveTps = sample.effectiveTps;
     turn.ttftMs = sample.ttftMs;
     turn.toolMs = sample.toolMs;
+    turn.toolWallMs = sample.toolWallMs;
+    turn.toolCallCount = sample.toolCallCount;
     turn.timingCoverage = sample.timingCoverage;
     turn.timingSource = sample.timingSource;
     turn.timingQuality = sample.timingQuality;
     if (turn.genEstimateTps != null) latestGenSample = turn;
   }
   return latestGenSample;
+}
+
+function aggregateSessionTiming(turns) {
+  let wallMs = 0;
+  let toolWallMs = 0;
+  let toolCallCount = 0;
+  let ttftTotalMs = 0;
+  let ttftSampleCount = 0;
+  for (const turn of turns) {
+    if (Number.isFinite(turn.wallMs) && turn.wallMs > 0) wallMs += turn.wallMs;
+    if (Number.isFinite(turn.toolWallMs) && turn.toolWallMs > 0) toolWallMs += turn.toolWallMs;
+    if (Number.isFinite(turn.toolCallCount) && turn.toolCallCount > 0) toolCallCount += turn.toolCallCount;
+    if (Number.isFinite(turn.ttftMs) && turn.ttftMs >= 0) {
+      ttftTotalMs += turn.ttftMs;
+      ttftSampleCount += 1;
+    }
+  }
+  return {
+    wallMs: wallMs > 0 ? wallMs : null,
+    toolWallMs: toolWallMs > 0 ? toolWallMs : null,
+    toolCallCount,
+    ttftAvgMs: ttftSampleCount > 0 ? ttftTotalMs / ttftSampleCount : null,
+    ttftSampleCount,
+  };
 }
 
 function buildSpeedMetrics(turns, recordMetrics, threadCounters, turnCounters) {
@@ -1590,6 +1959,13 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     cumulativeResetCount,
     lastTurn,
   } = buildSpeedMetrics(turns, recordMetrics, threadCounters, turnCounters);
+  const sessionTiming = aggregateSessionTiming(turns);
+  const contextUsed =
+    latestContextUsed != null
+      ? parsed.modelContextWindow != null
+        ? Math.min(latestContextUsed, parsed.modelContextWindow)
+        : latestContextUsed
+      : null;
 
   return {
     threadId: parsed.threadId,
@@ -1622,12 +1998,13 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     replayStats: collected.replayStats,
     uniqueStats: collected.uniqueStats,
     legacyStats: collected.legacyStats,
-    contextUsed:
-      latestContextUsed != null
-        ? parsed.modelContextWindow != null
-          ? Math.min(latestContextUsed, parsed.modelContextWindow)
-          : latestContextUsed
-        : null,
+    contextUsed,
+    contextBreakdown: estimateContextBreakdown(parsed.contextComposition, contextUsed),
+    sessionWallMs: sessionTiming.wallMs,
+    sessionToolWallMs: sessionTiming.toolWallMs,
+    sessionToolCallCount: sessionTiming.toolCallCount,
+    sessionTtftAvgMs: sessionTiming.ttftAvgMs,
+    sessionTimingSampleCount: sessionTiming.ttftSampleCount,
     archiveRecords: includeArchiveRecords ? records : undefined,
     turns: turns.map((turn) => ({
       turnId: turn.turnId,
@@ -1639,6 +2016,12 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
       output: turn.output,
       cached: turn.cacheAvailable ? turn.cached : null,
       total: turn.total,
+      wallMs: turn.wallMs,
+      toolWallMs: turn.toolWallMs,
+      toolCallCount: turn.toolCallCount,
+      ttftMs: turn.ttftMs,
+      timingCoverage: turn.timingCoverage,
+      timingQuality: turn.timingQuality,
     })),
   };
 }
@@ -1652,6 +2035,12 @@ function turnPayloadFor(turn, index) {
     uncached: turn.input != null && turn.cached != null ? Math.max(0, turn.input - turn.cached) : null,
     output: turn.output,
     total: turn.total,
+    wallMs: Number.isFinite(turn.wallMs) ? turn.wallMs : null,
+    toolWallMs: Number.isFinite(turn.toolWallMs) ? turn.toolWallMs : null,
+    toolCallCount: Number.isFinite(turn.toolCallCount) ? turn.toolCallCount : 0,
+    ttftMs: Number.isFinite(turn.ttftMs) ? turn.ttftMs : null,
+    timingCoverage: Number.isFinite(turn.timingCoverage) ? turn.timingCoverage : null,
+    timingQuality: typeof turn.timingQuality === "string" ? turn.timingQuality : "low",
   };
 }
 
@@ -1661,6 +2050,7 @@ function payloadFor(
   requestedWindow = null,
   sessionChanged = false,
   snapshot = false,
+  rangeSummary = null,
 ) {
   // 窗口 = 本次推送包含多少条轮次摘要 / 请求明细。缺省按「弹层打开」的档位，保证非 CDP 路径（CLI）行为不变。
   const turnWindow =
@@ -1702,10 +2092,29 @@ function payloadFor(
         : null,
     sessionTps: Number.isFinite(stats.sessionTps) ? stats.sessionTps : null,
     contextUsed: stats.contextUsed,
+    contextBreakdown:
+      stats.contextBreakdown && typeof stats.contextBreakdown === "object" ? { ...stats.contextBreakdown } : null,
+    sessionWallMs: Number.isFinite(stats.sessionWallMs) ? stats.sessionWallMs : null,
+    sessionToolWallMs: Number.isFinite(stats.sessionToolWallMs) ? stats.sessionToolWallMs : null,
+    sessionToolCallCount: Number.isFinite(stats.sessionToolCallCount) ? stats.sessionToolCallCount : 0,
+    sessionTtftAvgMs: Number.isFinite(stats.sessionTtftAvgMs) ? stats.sessionTtftAvgMs : null,
+    sessionTimingSampleCount: Number.isFinite(stats.sessionTimingSampleCount) ? stats.sessionTimingSampleCount : 0,
+    rangeSummary:
+      rangeSummary && typeof rangeSummary === "object"
+        ? {
+            ...rangeSummary,
+          }
+        : null,
     turnTotal: currentTurn ? currentTurn.total : 0,
     turnInput: currentTurn ? currentTurn.input : 0,
     turnCached: currentTurn ? currentTurn.cached : 0,
     turnOutput: currentTurn ? currentTurn.output : 0,
+    turnWallMs: currentTurn ? currentTurn.wallMs : null,
+    turnToolWallMs: currentTurn ? currentTurn.toolWallMs : null,
+    turnToolCallCount: currentTurn ? currentTurn.toolCallCount : 0,
+    turnTtftMs: currentTurn ? currentTurn.ttftMs : null,
+    turnTimingCoverage: currentTurn ? currentTurn.timingCoverage : null,
+    turnTimingQuality: currentTurn ? currentTurn.timingQuality : "low",
     turnCacheHitRate: (() => {
       const input = currentTurn ? currentTurn.input : null;
       const cached = currentTurn ? currentTurn.cached : null;
@@ -2149,7 +2558,6 @@ async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTO
       ws,
       pending: new Map(),
       pageChanged: true,
-      authKeySet: false,
       lastTargetCheckAt: Date.now(),
     };
     cdpConnection = connection;
@@ -2166,8 +2574,6 @@ async function ensureCdpConnection(port, targetSelector = DEFAULT_TARGET_SELECTO
         msg.method === "Page.loadEventFired"
       ) {
         connection.pageChanged = true;
-        // 页面导航会清掉注入的 key，下一次推送前需要重新注入
-        connection.authKeySet = false;
         return;
       }
       const pending = connection.pending.get(msg.id);
@@ -2302,8 +2708,10 @@ async function activeThreadId(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
           '[data-app-action-sidebar-thread-active="true"]',
           '[aria-selected="true"]'
         ]);
-        var SCAN_ID_KEYS = ["conversationId", "localConversationId", "threadId", "id", "key"];
-        var SCAN_PROP_PATTERN = /^(?:props|children|memoizedProps|pendingProps|memoizedState|stateNode|child|sibling|return|alternate|value|current|context|node|chain|conversationId|localConversationId|threadId|id|key|params|thread|conversation)$/;
+        // 只接受明确表示会话的字段。通用 id/key 会命中消息、文件、请求等任意 UUID，
+        // 曾导致新对话在多个旧会话之间反复串线。
+        var SCAN_ID_KEYS = ["conversationId", "localConversationId", "threadId"];
+        var SCAN_PROP_PATTERN = /^(?:props|children|memoizedProps|pendingProps|memoizedState|stateNode|child|sibling|return|alternate|value|current|context|node|chain|conversationId|localConversationId|threadId|params|thread|conversation)$/;
         var SCAN_BRANCH_LIMIT = 40;
         var SCAN_MAX_DEPTH = 14;
 
@@ -2458,10 +2866,10 @@ async function activeThreadId(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
             return null;
           }
           var anchors = [
-            document.querySelector("main"),
             document.querySelector('[data-thread-find-target="conversation"]'),
             document.querySelector('[data-thread-find-composer="true"]'),
             document.querySelector('[data-codex-composer="true"]'),
+            document.querySelector("main"),
             document.getElementById("root")
           ];
           for (var a = 0; a < anchors.length; a++) {
@@ -2479,10 +2887,19 @@ async function activeThreadId(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
           }
           window.__tuiForCodexActiveIdCache = { id: null, at: now };
         } catch (e) {}
-        // 侧边栏收起时 active/current 节点会消失；主会话区仍在时沿用最后确认的 ID。
+        // 侧边栏收起时 active/current 节点会短暂消失；只允许沿用最后确认 ID 8 秒。
+        // 超过该窗口仍无法确认时返回 null，宁可等待也不能继续拿旧会话。
         try {
           var last = window.__tuiForCodexActiveId;
-          if (last && last.id && document.querySelector('main [data-thread-find-target="conversation"]') && hasConversationSurface()) return last.id;
+          if (
+            last &&
+            last.id &&
+            Date.now() - Number(last.at || 0) < 8000 &&
+            document.querySelector('main [data-thread-find-target="conversation"]') &&
+            hasConversationSurface()
+          ) {
+            return last.id;
+          }
         } catch (e) {}
         return null;
      })()`,
@@ -2503,48 +2920,50 @@ async function activeThreadId(port, targetSelector = DEFAULT_TARGET_SELECTOR) {
   return null;
 }
 
-// 会话级 HMAC 密钥：只存在于监控内存，经 CDP 注入页面；用于识别伪造/重放的负载。
-const SESSION_AUTH_KEY = crypto.randomBytes(32).toString("hex");
+// 会话级 HMAC 密钥：原始 32 字节只存在于监控内存。每次推送通过 CDP 短暂交接，
+// 页面同步捕获后立即删除全局入口，只保留不可导出的 CryptoKey。
+const SESSION_AUTH_KEY = crypto.randomBytes(AUTH_KEY_BYTES);
+const SESSION_AUTH_KEY_ID = crypto.randomBytes(16).toString("hex");
 let sessionAuthSeq = 0;
 
-function canonicalJson(value) {
-  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
-  if (value && typeof value === "object") {
-    return (
-      "{" +
-      Object.keys(value)
-        .sort()
-        .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key]))
-        .join(",") +
-      "}"
-    );
+function signPayloadWithAuth(payload, { key, keyId, ts, nonce, seq }) {
+  if (!Buffer.isBuffer(key) || key.length !== AUTH_KEY_BYTES) {
+    throw new TypeError("auth key must be a 32-byte Buffer");
   }
-  return JSON.stringify(value);
+  if (typeof keyId !== "string" || !AUTH_KEY_ID_PATTERN.test(keyId)) {
+    throw new TypeError("auth keyId is invalid");
+  }
+  if (!Number.isSafeInteger(ts) || ts < 0 || !Number.isSafeInteger(seq) || seq < 1) {
+    throw new TypeError("auth timestamp or sequence is invalid");
+  }
+  if (typeof nonce !== "string" || !AUTH_NONCE_PATTERN.test(nonce)) {
+    throw new TypeError("auth nonce is invalid");
+  }
+  const body = { ...payload };
+  delete body.auth;
+  const authCore = {
+    v: AUTH_VERSION,
+    keyId,
+    ts,
+    nonce,
+    seq,
+  };
+  const mac = crypto.createHmac("sha256", key).update(authSigningText(body, authCore)).digest("hex");
+  return { ...body, auth: { ...authCore, mac } };
 }
 
 function signPayload(payload) {
-  const ts = Date.now();
-  const nonce = crypto.randomBytes(8).toString("hex");
   sessionAuthSeq += 1;
-  const body = { ...payload };
-  delete body.auth;
-  const mac = crypto
-    .createHmac("sha256", SESSION_AUTH_KEY)
-    .update(canonicalJson(body) + "|" + ts + "|" + nonce)
-    .digest("hex");
-  return { ...body, auth: { v: 1, ts, nonce, seq: sessionAuthSeq, mac } };
-}
-
-async function ensurePageAuthKey(port, targetSelector) {
-  if (cdpConnection && cdpConnection.authKeySet) return;
-  const expr =
-    "(function () { window.__tuiForCodexAuthKey = " + JSON.stringify(SESSION_AUTH_KEY) + "; return true; })()";
-  await cdpEval(port, expr, targetSelector);
-  if (cdpConnection) cdpConnection.authKeySet = true;
+  return signPayloadWithAuth(payload, {
+    key: SESSION_AUTH_KEY,
+    keyId: SESSION_AUTH_KEY_ID,
+    ts: Date.now(),
+    nonce: crypto.randomBytes(16).toString("hex"),
+    seq: sessionAuthSeq,
+  });
 }
 
 async function cdpPush(port, payload, targetSelector = DEFAULT_TARGET_SELECTOR) {
-  await ensurePageAuthKey(port, targetSelector);
   const signedPayload = signPayload(payload);
   const signedValidation = validatePayload(signedPayload, { allowLegacy: false, requireAuth: true });
   if (!signedValidation.ok) {
@@ -2553,13 +2972,22 @@ async function cdpPush(port, payload, targetSelector = DEFAULT_TARGET_SELECTOR) 
     throw error;
   }
   const signedSerialized = JSON.stringify(signedPayload);
+  const bootstrapSerialized = JSON.stringify({
+    key: SESSION_AUTH_KEY.toString("hex"),
+    keyId: SESSION_AUTH_KEY_ID,
+  });
   const expr = `(function () {
     var protocol = window.__tuiForCodexProtocol;
     if (!window.__tuiForCodexNativeUiInstalled) return "page-not-ready";
     if (!protocol || protocol.protocolName !== "${PROTOCOL_NAME}" || !Array.isArray(protocol.supportedSchemaVersions) || protocol.supportedSchemaVersions.indexOf(${PROTOCOL_SCHEMA_VERSION}) < 0) return "protocol-mismatch";
     var payload = ${signedSerialized};
+    window.__tuiForCodexAuthBootstrap = ${bootstrapSerialized};
     window.__tuiForCodex = payload;
-    window.dispatchEvent(new Event("tokens-ui-for-codex"));
+    try {
+      window.dispatchEvent(new Event("tokens-ui-for-codex"));
+    } finally {
+      delete window.__tuiForCodexAuthBootstrap;
+    }
     return "ok";
   })()`;
   const result = await cdpEval(port, expr, targetSelector);
@@ -2628,6 +3056,13 @@ function mergeSegments(parsedParts) {
       break;
     }
   }
+  let contextComposition = null;
+  for (let index = valid.length - 1; index >= 0; index -= 1) {
+    if (valid[index].contextComposition) {
+      contextComposition = valid[index].contextComposition;
+      break;
+    }
+  }
   return {
     file: latest.file,
     threadId: latest.threadId,
@@ -2643,6 +3078,7 @@ function mergeSegments(parsedParts) {
     modelContextWindow,
     modelChanges: valid.flatMap((part) => part.modelChanges),
     formatConflicts: valid.reduce((sum, part) => sum + (part.formatConflicts || 0), 0),
+    contextComposition,
   };
 }
 
@@ -2683,6 +3119,12 @@ function emptyStats(threadId, file) {
     sessionCached: 0,
     sessionOutput: 0,
     contextUsed: 0,
+    contextBreakdown: null,
+    sessionWallMs: null,
+    sessionToolWallMs: null,
+    sessionToolCallCount: 0,
+    sessionTtftAvgMs: null,
+    sessionTimingSampleCount: 0,
     modelSwitchCount: 0,
     cumulativeResetCount: 0,
     genEstimateTps: null,
@@ -2722,6 +3164,12 @@ function writeLastSummary(session, stats, threadId) {
     requestCount: stats.requestCount,
     currentTurnRequestCount: currentTurn ? currentTurn.requestCount : 0,
     contextUsed: stats.contextUsed,
+    contextBreakdown: stats.contextBreakdown,
+    sessionWallMs: stats.sessionWallMs,
+    sessionToolWallMs: stats.sessionToolWallMs,
+    sessionToolCallCount: stats.sessionToolCallCount,
+    sessionTtftAvgMs: stats.sessionTtftAvgMs,
+    sessionTimingSampleCount: stats.sessionTimingSampleCount,
     modelContextWindow: stats.modelContextWindow,
     turnTotal: currentTurn ? currentTurn.total : 0,
     turnInput: currentTurn ? currentTurn.input : 0,
@@ -2780,6 +3228,12 @@ function snapshotStatsFrom(summary) {
     sessionOutput: summary.sessionOutput,
     requestCount: summary.requestCount,
     contextUsed: summary.contextUsed,
+    contextBreakdown: summary.contextBreakdown || null,
+    sessionWallMs: summary.sessionWallMs,
+    sessionToolWallMs: summary.sessionToolWallMs,
+    sessionToolCallCount: summary.sessionToolCallCount,
+    sessionTtftAvgMs: summary.sessionTtftAvgMs,
+    sessionTimingSampleCount: summary.sessionTimingSampleCount,
     modelContextWindow: summary.modelContextWindow,
     genEstimateTps: summary.genEstimateTps,
     compactTps: summary.compactTps,
@@ -2805,6 +3259,12 @@ function snapshotStatsFrom(summary) {
       cached: Number.isFinite(summary.turnCached) ? summary.turnCached : 0,
       output: Number.isFinite(summary.turnOutput) ? summary.turnOutput : 0,
       total: Number.isFinite(summary.turnTotal) ? summary.turnTotal : 0,
+      wallMs: Number.isFinite(summary.turnWallMs) ? summary.turnWallMs : null,
+      toolWallMs: Number.isFinite(summary.turnToolWallMs) ? summary.turnToolWallMs : null,
+      toolCallCount: Number.isFinite(summary.turnToolCallCount) ? summary.turnToolCallCount : 0,
+      ttftMs: Number.isFinite(summary.turnTtftMs) ? summary.turnTtftMs : null,
+      timingCoverage: Number.isFinite(summary.turnTimingCoverage) ? summary.turnTimingCoverage : null,
+      timingQuality: ["high", "medium", "low"].includes(summary.turnTimingQuality) ? summary.turnTimingQuality : "low",
     },
   ];
   stats.currentTurnIndex = 1;
@@ -2847,7 +3307,11 @@ function environmentSnapshot() {
     // 状态目录可能处于 Windows/MSIX 的不同虚拟视图；文件不在当前视图时，
     // 用同目录安装器生成的 launch-silent.vbs 作为“自启入口已安装”的兼容判据。
   }
-  if (autostartInstalled == null && fs.existsSync(path.join(SCRIPT_DIR, "launch-silent.vbs")))
+  if (
+    autostartInstalled == null &&
+    (fs.existsSync(path.join(SCRIPT_DIR, "launch-silent.vbs")) ||
+      fs.existsSync(path.join(SCRIPT_DIR, "launch-silent.ps1")))
+  )
     autostartInstalled = true;
   return {
     platform: "windows",
@@ -2920,6 +3384,42 @@ function persistMonitorHealth(health) {
   } catch (error) {
     // 健康文件是排障入口，写入失败必须可见；这里不能用空 catch 静默吞掉。
     console.error("[Tokens UI For Codex] 健康状态写入失败: " + (error && error.message ? error.message : error));
+    return false;
+  }
+}
+
+function persistMonitorHeartbeat(session, { force = false, phase = "running" } = {}) {
+  const now = Date.now();
+  if (!force && now - Number(session.lastHeartbeatAt || 0) < MONITOR_HEARTBEAT_INTERVAL_MS) return false;
+  const payload = {
+    schemaVersion: 1,
+    pid: process.pid,
+    startedAt: MONITOR_STARTED_AT,
+    heartbeatAt: new Date(now).toISOString(),
+    heartbeatSeq: Number(session.heartbeatSeq || 0) + 1,
+    phase,
+    scriptPath: fileURLToPath(import.meta.url),
+    codexHome: RUNTIME_PATHS.codexHome,
+    stateDir: LOCAL_STATE_DIR,
+    lockFile: MONITOR_LOCK_FILE,
+    guardLockFile: MONITOR_GUARD_LOCK_FILE,
+    resolvedFrom: RUNTIME_PATHS.resolvedFrom,
+  };
+  try {
+    fs.mkdirSync(path.dirname(MONITOR_HEARTBEAT_FILE), { recursive: true });
+    const tempFile = MONITOR_HEARTBEAT_FILE + "." + process.pid + ".tmp";
+    fs.writeFileSync(tempFile, JSON.stringify(payload), "utf8");
+    try {
+      fs.renameSync(tempFile, MONITOR_HEARTBEAT_FILE);
+    } catch {
+      fs.copyFileSync(tempFile, MONITOR_HEARTBEAT_FILE);
+      fs.rmSync(tempFile, { force: true });
+    }
+    session.heartbeatSeq = payload.heartbeatSeq;
+    session.lastHeartbeatAt = now;
+    return true;
+  } catch (error) {
+    monitorLog("心跳写入失败: " + (error && error.message ? error.message : error));
     return false;
   }
 }
@@ -3006,8 +3506,7 @@ function healthForError(error, args, previousHealth) {
 // 新建对话在侧边栏里是 local:client-new-thread:<uuid> 占位 ID，而会话文件用的是真实 ID。
 // 遇到占位 ID 时，把「占位 ID 首次出现之后新建的会话文件」学习为该对话的真实 ID，
 // 并持久化到本地，避免监控进程重启后丢失映射。
-const CLIENT_MAP_DIR = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-const CLIENT_MAP_FILE = path.join(CLIENT_MAP_DIR, STATE_DIR_NAME, "client-thread-map.json");
+const CLIENT_MAP_FILE = path.join(LOCAL_STATE_DIR, "client-thread-map.json");
 const CLIENT_STATE_MAX_ENTRIES = 500;
 const CLIENT_STATE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
@@ -3015,6 +3514,9 @@ const CLIENT_NEW_THREAD_PREFIX = "client-new-thread:";
 const CLIENT_UUID_RE = /^client-new-thread:([0-9a-f-]+)$/i;
 // 会话文件创建时间可能比「占位对话被激活」的时刻略早，这里给 1 秒容差
 const CLIENT_FILE_CREATE_SLACK_MS = 1000;
+// 已有的持久映射必须至少有一个分片是在占位会话激活前后创建的。仅凭文件存在
+// 会把数周前的旧会话误认为当前新对话。
+const CLIENT_MAP_START_TOLERANCE_MS = 5 * 60 * 1000;
 
 // 读取本地映射；文件缺失、损坏或字段类型不对时退回空状态（不影响统计）
 function readClientStateFile(file) {
@@ -3080,51 +3582,72 @@ function clientThreadUuid(id) {
   return matched ? matched[1] : id;
 }
 
-// 占位对话首次出现之后才创建的会话文件，就是它的真实 ID（用创建时间做判据）。
-function findNewestClientFileSince(ts, excludeThreadId) {
+// rollout 文件名使用本地时间，可稳定得到会话开始时间；文件 birthtime/ctime 在
+// Windows、复制和恢复场景下并不总是可靠。
+function rolloutTimestampMs(file) {
+  const matched = ROLLOUT_RE.exec(path.basename(file));
+  if (!matched) return null;
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})$/.exec(matched[1]);
+  if (!parts) return null;
+  const [, year, month, day, hour, minute, second] = parts.map(Number);
+  return new Date(year, month - 1, day, hour, minute, second).getTime();
+}
+
+function findClientFileCandidatesSince(
+  ts,
+  { excludeThreadId = "", claimedSet = null, files = findRolloutFiles() } = {},
+) {
   const earliestAllowed = ts - CLIENT_FILE_CREATE_SLACK_MS;
-  let newest = null;
-  let newestMtime = -1;
-  for (const file of findRolloutFiles()) {
-    if (excludeThreadId && threadIdOf(file) === excludeThreadId) continue;
+  const byThread = new Map();
+  for (const file of files) {
+    const threadId = threadIdOf(file);
+    if (!threadId || (excludeThreadId && threadId === excludeThreadId)) continue;
+    if (claimedSet && claimedSet.has(threadId)) continue;
+    const startedAt = rolloutTimestampMs(file);
+    if (!Number.isFinite(startedAt) || startedAt < earliestAllowed) continue;
     let info;
     try {
       info = fs.statSync(file);
     } catch {
       continue;
     }
-    const createdAt = info.birthtimeMs > 0 ? info.birthtimeMs : info.ctimeMs;
-    if (createdAt < earliestAllowed) continue;
-    if (info.mtimeMs > newestMtime) {
-      newestMtime = info.mtimeMs;
-      newest = file;
-    }
+    const previous = byThread.get(threadId);
+    if (!previous || info.mtimeMs > previous.mtimeMs)
+      byThread.set(threadId, { threadId, startedAt, mtimeMs: info.mtimeMs });
   }
-  return newest ? threadIdOf(newest) : null;
+  return [...byThread.values()].sort((left, right) => right.mtimeMs - left.mtimeMs || right.startedAt - left.startedAt);
 }
 
-// 兜底：文件创建时间早于激活时间（老版本遗留的占位对话），
-// 改用「最新且尚未被其它占位对话认领」的会话文件。
-function findNewestUnclaimedFile(excludeThreadId, claimedSet) {
-  let newest = null;
-  let newestMtime = -1;
-  for (const file of findRolloutFiles()) {
-    const id = threadIdOf(file);
-    if (!id) continue;
-    if (excludeThreadId && id === excludeThreadId) continue;
-    if (claimedSet && claimedSet.has(id)) continue;
-    let mtime;
-    try {
-      mtime = fs.statSync(file).mtimeMs;
-    } catch {
-      continue;
-    }
-    if (mtime > newestMtime) {
-      newestMtime = mtime;
-      newest = file;
+function findNewestClientFileSince(ts, excludeThreadId, claimedSet = null, files = findRolloutFiles()) {
+  const candidates = findClientFileCandidatesSince(ts, { excludeThreadId, claimedSet, files });
+  return candidates.length ? candidates[0].threadId : null;
+}
+
+function threadHasFreshSegmentSince(threadId, activatedAt, files = findRolloutFiles()) {
+  if (!threadId || !Number.isFinite(activatedAt)) return false;
+  const earliestAllowed = activatedAt - CLIENT_MAP_START_TOLERANCE_MS;
+  for (const file of files) {
+    if (threadIdOf(file) !== threadId) continue;
+    const startedAt = rolloutTimestampMs(file);
+    if (Number.isFinite(startedAt) && startedAt >= earliestAllowed) return true;
+  }
+  return false;
+}
+
+function sanitizeClientMappings(rollouts = findRolloutFiles()) {
+  const existingThreads = new Set(rollouts.map(threadIdOf).filter(Boolean));
+  let removed = 0;
+  for (const [placeholder, threadId] of Object.entries(clientState.clientMap)) {
+    const activatedAt = Number(clientState.activatedAt[placeholder]);
+    const exists = existingThreads.has(threadId);
+    const fresh = !Number.isFinite(activatedAt) || threadHasFreshSegmentSince(threadId, activatedAt, rollouts);
+    if (!exists || !fresh) {
+      delete clientState.clientMap[placeholder];
+      removed += 1;
     }
   }
-  return newest ? threadIdOf(newest) : null;
+  if (removed) saveClientState();
+  return removed;
 }
 
 // 页面里是否有真实会话内容（空白新对话没有 conversation surface）。
@@ -3150,15 +3673,21 @@ async function readWindowWant(port, targetSelector) {
     // 因此这里用 JSON.stringify 包一层再在本地解析；否则会被拦下、被 catch 吞成 null。
     const raw = await cdpEval(
       port,
-      'JSON.stringify({ w: document.documentElement.getAttribute("data-tui-window") || "", s: document.documentElement.getAttribute("data-tui-security") || "" })',
+      'JSON.stringify({ w: document.documentElement.getAttribute("data-tui-window") || "", r: document.documentElement.getAttribute("data-tui-range") || "", s: document.documentElement.getAttribute("data-tui-security") || "" })',
       targetSelector,
     );
-    const value = JSON.parse(raw == null || raw === "" ? '{"w":"","s":""}' : raw);
+    const value = JSON.parse(raw == null || raw === "" ? '{"w":"","r":"","s":""}' : raw);
     const parts = String((value && value.w) || "").split(":");
     const turns = Number.parseInt(parts[0], 10);
     const requests = Number.parseInt(parts[1], 10);
     if (!Number.isFinite(turns) || !Number.isFinite(requests)) return null;
-    return { turns, requests, security: String((value && value.s) || "") };
+    const range = String((value && value.r) || "");
+    return {
+      turns,
+      requests,
+      range: HISTORY_RANGE_KEYS.includes(range) ? range : "",
+      security: String((value && value.s) || ""),
+    };
   } catch {
     return null;
   }
@@ -3183,6 +3712,9 @@ function parseArgs(argv) {
     portRetryMs: 0,
     portDiscoveryState: "",
     instanceStatus: false,
+    allowMultiMonitor: process.env.TUI_ALLOW_MULTI_MONITOR === "1",
+    stateDir: RUNTIME_PATHS.stateDir,
+    lockFile: RUNTIME_PATHS.lockFile,
     target: envTarget || DEFAULT_TARGET_SELECTOR,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -3193,6 +3725,11 @@ function parseArgs(argv) {
     else if (a === "--watch") args.watch = true;
     else if (a === "--cdp") args.cdp = true;
     else if (a === "--instance-status") args.instanceStatus = true;
+    else if (a === "--allow-multi-monitor") args.allowMultiMonitor = true;
+    else if (a === "--state-dir" && argv[i + 1]) args.stateDir = String(argv[++i]).trim();
+    else if (a.startsWith("--state-dir=")) args.stateDir = a.slice("--state-dir=".length).trim();
+    else if (a === "--lock-file" && argv[i + 1]) args.lockFile = String(argv[++i]).trim();
+    else if (a.startsWith("--lock-file=")) args.lockFile = a.slice("--lock-file=".length).trim();
     else if (a === "--target" && argv[i + 1]) args.target = String(argv[i + 1]).trim() || DEFAULT_TARGET_SELECTOR;
     else if (a === "--port") {
       const raw = String(argv[i + 1] || "")
@@ -3265,6 +3802,10 @@ function assertCdpRuntimeAvailable() {
 // ---------------------------------------------------------------------------
 
 const WATCH_TICK_MS = 1000;
+// 页面在切换、恢复和新建对话时会短暂暴露多个候选 ID。必须稳定持续一段时间
+// 且存在对应 rollout 文件才切换，避免每 1–2 秒在多个会话间来回推送。
+const THREAD_SWITCH_CONFIRM_MS = 2500;
+const THREAD_CANDIDATE_LOG_COOLDOWN_MS = 60000;
 
 function createWatchSession(args) {
   return {
@@ -3275,7 +3816,16 @@ function createWatchSession(args) {
     lastWindowKey: "",
     // 上次推送时使用的会话 ID（仅存于监控进程内存，不进负载）
     pushedThreadId: "",
+    lastPushedThreadIdentity: "",
     lastRealThreadId: "",
+    confirmedThreadIdentity: "",
+    confirmedThread: null,
+    pendingThreadIdentity: "",
+    pendingThread: null,
+    pendingThreadSince: 0,
+    threadIdentityInvalid: false,
+    lastThreadCandidateLogKey: "",
+    lastThreadCandidateLogAt: 0,
     lastStats: null,
     lastPayload: null,
     lastPayloadJson: "",
@@ -3310,12 +3860,115 @@ function createWatchSession(args) {
     snapshotPushed: false,
     lastLocateLogKey: "", // 定位失败日志去重键
     lastSuspectKey: "", // 疑似「命名变化」文件预警的去重键
+    heartbeatSeq: 0,
+    lastHeartbeatAt: 0,
   };
+}
+
+function threadIdentityFor(rawThread, thread) {
+  if (thread === NEW_THREAD || rawThread === NEW_THREAD) return "blank";
+  if (thread) return "thread:" + thread;
+  if (isClientNewThread(rawThread)) return "pending:" + clientThreadUuid(rawThread);
+  if (!rawThread) return "unknown";
+  return "missing:" + rawThread;
+}
+
+function threadLogLabel(identity) {
+  if (!identity || identity === "blank" || identity === "unknown" || identity === "none") return identity || "none";
+  return crypto.createHash("sha256").update(String(identity)).digest("hex").slice(0, 8);
+}
+
+function logThreadCandidate(session, key, message) {
+  const now = Date.now();
+  if (
+    session.lastThreadCandidateLogKey === key &&
+    now - Number(session.lastThreadCandidateLogAt || 0) < THREAD_CANDIDATE_LOG_COOLDOWN_MS
+  ) {
+    return;
+  }
+  session.lastThreadCandidateLogKey = key;
+  session.lastThreadCandidateLogAt = now;
+  monitorLog(message);
+}
+
+function threadCandidateCanSwitch(session, rawThread, thread) {
+  if (thread === NEW_THREAD || rawThread === NEW_THREAD) return true;
+  if (thread) return locateThreadFiles(watchRolloutFiles(session), thread).length > 0;
+  // 未学习完成的 client-new-thread 是合法空白状态，但不会沿用旧会话数据。
+  return isClientNewThread(rawThread);
+}
+
+function watchRolloutFiles(session) {
+  return Array.isArray(session && session.rolloutFilesOverride) ? session.rolloutFilesOverride : findRolloutFiles();
+}
+
+function confirmWatchThread(session, rawThread, thread) {
+  const identity = threadIdentityFor(rawThread, thread);
+  const now = Date.now();
+  if (identity === session.confirmedThreadIdentity) {
+    session.pendingThreadIdentity = "";
+    session.pendingThread = null;
+    session.pendingThreadSince = 0;
+    session.threadIdentityInvalid = false;
+    return { thread: session.confirmedThread, identity, stable: true, switched: false };
+  }
+
+  if (!threadCandidateCanSwitch(session, rawThread, thread)) {
+    session.pendingThreadIdentity = "";
+    session.pendingThread = null;
+    session.pendingThreadSince = 0;
+    session.threadIdentityInvalid = true;
+    logThreadCandidate(
+      session,
+      "invalid:" + identity,
+      "会话候选没有对应 rollout 文件，暂不切换：" + threadLogLabel(identity),
+    );
+    return {
+      thread: session.confirmedThreadIdentity ? session.confirmedThread : null,
+      identity: session.confirmedThreadIdentity || "unknown",
+      stable: !!session.confirmedThreadIdentity,
+      switched: false,
+    };
+  }
+
+  if (session.pendingThreadIdentity !== identity) {
+    session.pendingThreadIdentity = identity;
+    session.pendingThread = thread;
+    session.pendingThreadSince = now;
+    session.threadIdentityInvalid = false;
+    logThreadCandidate(
+      session,
+      "pending:" + identity,
+      "会话候选待确认（" + THREAD_SWITCH_CONFIRM_MS + "ms）：" + threadLogLabel(identity),
+    );
+  }
+  if (now - session.pendingThreadSince < THREAD_SWITCH_CONFIRM_MS) {
+    return {
+      thread: session.confirmedThreadIdentity ? session.confirmedThread : null,
+      identity: session.confirmedThreadIdentity || "unknown",
+      stable: !!session.confirmedThreadIdentity,
+      switched: false,
+    };
+  }
+
+  const previous = session.confirmedThreadIdentity;
+  session.confirmedThreadIdentity = identity;
+  session.confirmedThread = thread || null;
+  session.pendingThreadIdentity = "";
+  session.pendingThread = null;
+  session.pendingThreadSince = 0;
+  session.threadIdentityInvalid = false;
+  logThreadCandidate(
+    session,
+    "confirmed:" + identity,
+    "会话身份已确认：" + threadLogLabel(previous || "none") + " → " + threadLogLabel(identity),
+  );
+  return { thread: thread || null, identity, stable: true, switched: previous !== identity };
 }
 
 // 把页面上的对话 ID 落成「真实会话文件的 threadId」。
 // 占位对话（client-new-thread:<uuid>）需要先学习；学不到就返回 null（界面显示 0）。
-async function resolveWatchThread(args, session, rawThread) {
+function resolveWatchThread(session, rawThread) {
   if (!isClientNewThread(rawThread)) return { thread: rawThread };
 
   const placeholder = clientThreadUuid(rawThread);
@@ -3325,24 +3978,41 @@ async function resolveWatchThread(args, session, rawThread) {
   }
 
   const learned = clientState.clientMap[placeholder];
-  if (learned) return { thread: learned };
+  if (learned) {
+    const learnedExists = findRolloutFiles().some((file) => threadIdOf(file) === learned);
+    const learnedIsFresh = threadHasFreshSegmentSince(learned, Number(clientState.activatedAt[placeholder]));
+    if (learnedExists && learnedIsFresh) return { thread: learned };
+    delete clientState.clientMap[placeholder];
+    saveClientState();
+    if (session.lastSuspectKey !== "map-invalid:" + placeholder) {
+      session.lastSuspectKey = "map-invalid:" + placeholder;
+      monitorLog("占位会话映射失效，已丢弃：placeholder=" + threadLogLabel("placeholder:" + placeholder));
+    }
+  }
 
-  // 排除上一个真实对话的文件，避免刚离开旧对话的瞬间误关联。
-  const candidate = findNewestClientFileSince(clientState.activatedAt[placeholder], session.lastRealThreadId);
-  if (candidate) {
+  // 只接受文件名时间落在 placeholder 激活之后的新会话文件，并且必须唯一。
+  // 多候选时不猜测，等待 Codex 给出真实 ID；宁可为空，也不能串到另一会话。
+  const claimed = new Set(Object.values(clientState.clientMap));
+  const candidates = findClientFileCandidatesSince(clientState.activatedAt[placeholder], {
+    excludeThreadId: session.lastRealThreadId,
+    claimedSet: claimed,
+  });
+  if (candidates.length === 1) {
+    const candidate = candidates[0].threadId;
     clientState.clientMap[placeholder] = candidate;
     saveClientState();
     return { thread: candidate };
   }
-
-  // 兜底：修复前已存在、已有内容的占位对话，其文件创建时间早于激活时间。
-  if (await hasConversationContent(args.port, args.target)) {
-    const claimed = new Set(Object.values(clientState.clientMap));
-    const fallback = findNewestUnclaimedFile(session.lastRealThreadId, claimed);
-    if (fallback) {
-      clientState.clientMap[placeholder] = fallback;
-      saveClientState();
-      return { thread: fallback };
+  if (candidates.length > 1) {
+    const ambiguityKey = "map-ambiguous:" + placeholder + ":" + candidates.map((item) => item.threadId).join(",");
+    if (session.lastSuspectKey !== ambiguityKey) {
+      session.lastSuspectKey = ambiguityKey;
+      monitorLog(
+        "占位会话存在多个候选，暂不映射：placeholder=" +
+          threadLogLabel("placeholder:" + placeholder) +
+          " candidates=" +
+          candidates.length,
+      );
     }
   }
 
@@ -3357,9 +4027,11 @@ async function resolveWatchThread(args, session, rawThread) {
 // （背景：2026-09-19 实测「分片」导致监控持续读取已停更的旧分片、数字停滞 4 小时。）
 function readWatchStats(session, thread) {
   // 没有真实对话（空白新对话、占位对话未学习、页面尚未加载完）时统一显示 0
-  if (!thread || thread === NEW_THREAD) return { file: null, parsed: null, stats: emptyStats(null, null) };
+  if (!thread || thread === NEW_THREAD) {
+    return { file: null, parsed: null, stats: emptyStats(null, null), sourceChanged: false };
+  }
 
-  const allFiles = findRolloutFiles();
+  const allFiles = watchRolloutFiles(session);
   const files = locateThreadFiles(allFiles, thread);
   if (!files.length) {
     // 诊断：定位失败只记一次日志（面板状态由 15 秒 stale 兜底），并附目录最新文件样本，
@@ -3378,7 +4050,7 @@ function readWatchStats(session, thread) {
           (samples || "（无）"),
       );
     }
-    return { file: null, parsed: null, stats: emptyStats(thread, null) };
+    return { file: null, parsed: null, stats: emptyStats(thread, null), sourceChanged: false };
   }
   if (session.lastLocateLogKey) session.lastLocateLogKey = "";
 
@@ -3424,7 +4096,7 @@ function readWatchStats(session, thread) {
     session.lastSegmentParts.length === parts.length &&
     session.lastSegmentParts.every((prev, index) => prev.file === files[index] && prev.part === parts[index]);
   if (unchanged && session.lastStats) {
-    return { file: latestFile, parsed: session.lastMerged, stats: session.lastStats };
+    return { file: latestFile, parsed: session.lastMerged, stats: session.lastStats, sourceChanged: false };
   }
 
   session.lastSegmentParts = parts.map((part, index) => ({ file: files[index], part }));
@@ -3433,7 +4105,7 @@ function readWatchStats(session, thread) {
     // 对话存在但还没有数据 -> 显示 0
     session.lastMerged = null;
     session.lastStats = null;
-    return { file: latestFile, parsed: null, stats: emptyStats(thread, latestFile) };
+    return { file: latestFile, parsed: null, stats: emptyStats(thread, latestFile), sourceChanged: true };
   }
 
   const watchStats = buildStats(merged, { retainRequests: false, includeArchiveRecords: true });
@@ -3441,15 +4113,17 @@ function readWatchStats(session, thread) {
   session.lastStats = watchStats;
   session.lastPayload = null;
   session.lastPayloadJson = "";
-  return { file: latestFile, parsed: merged, stats: watchStats };
+  return { file: latestFile, parsed: merged, stats: watchStats, sourceChanged: true };
 }
 
 function nextWatchHealth(args, session, parsed, rawThread, connectionState) {
-  const dataFresh = !!parsed;
+  const dataFresh = !!parsed && !session.threadIdentityInvalid;
   const nowMs = Date.now();
   if (dataFresh) session.lastGoodPushAt = nowMs;
   // 有历史成功推送、但当前拿不到数据超过阈值 → stale-data（区别于「从未拿到数据」）
-  const stale = !dataFresh && session.lastGoodPushAt > 0 && nowMs - session.lastGoodPushAt > STALE_DATA_AFTER_MS;
+  const stale =
+    session.threadIdentityInvalid ||
+    (!dataFresh && session.lastGoodPushAt > 0 && nowMs - session.lastGoodPushAt > STALE_DATA_AFTER_MS);
   // 数据停滞两级告警：解析持续「成功」，但源文件长时间没有新增写入。
   //   一级（>5 分钟）：只写日志 —— 早期诊断信号，不动面板（空闲会话属正常现象）；
   //   二级（>15 分钟）：健康度降级为 stale-data —— 面板直接可见。
@@ -3523,12 +4197,35 @@ function buildWatchKey(file, stats, currentTurn, lastRequest) {
     stats.sessionOutput,
     stats.contextUsed,
     stats.turns.length,
+    stats.turnTotalCount || stats.turns.length,
+    stats.sessionCacheHitRate == null ? "" : stats.sessionCacheHitRate,
+    stats.sessionTps == null ? "" : stats.sessionTps,
+    stats.compactTps == null ? "" : stats.compactTps,
+    stats.compactSpeedSampleCount || 0,
+    stats.compactSpeedConfidence || "",
+    stats.compactSpeedWindow || "",
+    stats.effectiveTps == null ? "" : stats.effectiveTps,
+    stats.effectiveSampleCount || 0,
+    stats.effectiveWindow || "",
+    stats.speedTimingConfidence || "",
+    stats.lastRequestTps == null ? "" : stats.lastRequestTps,
+    stats.turnTps == null ? "" : stats.turnTps,
+    stats.turnWallTps == null ? "" : stats.turnWallTps,
+    stats.turnEffectiveTps == null ? "" : stats.turnEffectiveTps,
+    stats.genEstimateTps == null ? "" : stats.genEstimateTps,
     currentTurn ? currentTurn.total : "",
     currentTurn ? currentTurn.input : "",
     currentTurn ? currentTurn.cached : "",
     currentTurn ? currentTurn.output : "",
+    currentTurn && Number.isFinite(currentTurn.input) && currentTurn.input > 0 && Number.isFinite(currentTurn.cached)
+      ? currentTurn.cached / currentTurn.input
+      : "",
+    currentTurn ? currentTurn.requestCount : "",
     currentTurn ? currentTurn.requests.length : "",
     lastRequest ? lastRequest.ts : "",
+    lastRequest ? lastRequest.input : "",
+    lastRequest ? lastRequest.cached : "",
+    lastRequest ? lastRequest.output : "",
     lastRequest ? lastRequest.lastTotal : "",
     stats.modelSwitchCount || 0,
     stats.cumulativeResetCount || 0,
@@ -3562,16 +4259,16 @@ function logStatsAnomalies(session, stats) {
 }
 
 async function publishWatchRound(args, session, context) {
-  const { file, stats, rawThread, connection, connectionState } = context;
+  const { file, stats, rawThread, sourceChanged, connection, connectionState } = context;
   if (!stats) return;
 
   if (context.thread && context.thread !== NEW_THREAD && stats.threadId) session.lastRealThreadId = stats.threadId;
 
   // 会话切换检测：解析出的会话与「上次推送时用的会话」不同 → 这一份负载带上 sessionChanged 一次。
   // 只下发布尔信号，不下发任何会话标识（线程 ID / 路径都不出监控进程）。
-  const resolvedThreadId = stats.threadId || "";
-  const sessionChanged = !!resolvedThreadId && !!session.pushedThreadId && session.pushedThreadId !== resolvedThreadId;
-  if (resolvedThreadId) session.pushedThreadId = resolvedThreadId;
+  const resolvedThreadId = stats.threadId || (context.thread && context.thread !== NEW_THREAD ? context.thread : "");
+  const threadIdentity = context.threadIdentity || (resolvedThreadId ? "thread:" + resolvedThreadId : "unknown");
+  const sessionChanged = !!session.lastPushedThreadIdentity && session.lastPushedThreadIdentity !== threadIdentity;
 
   const currentTurn = stats.turns.length ? stats.turns[stats.turns.length - 1] : null;
   const lastRequest =
@@ -3601,7 +4298,7 @@ async function publishWatchRound(args, session, context) {
   persistMonitorHealth(session.health);
 
   const key = buildWatchKey(file, stats, currentTurn, lastRequest);
-  const changed = key !== session.lastKey;
+  const changed = key !== session.lastKey || sourceChanged === true;
   const connectionUrl = (connection && connection.url) || "";
   const connectionChanged = args.cdp && connectionUrl !== session.lastCdpConnectionUrl;
   // 生成中（task_started 尚未 task_complete）心跳 1 秒，其余 5 秒；窗口变化仍会立即推送。
@@ -3615,7 +4312,11 @@ async function publishWatchRound(args, session, context) {
     (context.wantWindow.turns > TURN_WINDOW_CLOSED || context.wantWindow.requests > REQUEST_WINDOW_CLOSED);
   const heartbeat = args.cdp && !expandedWindow && Date.now() - session.lastPushAt > activeInterval;
   const healthChanged = healthKeyOf(session.health) !== session.lastHealthKey;
-  const windowKey = context.wantWindow ? context.wantWindow.turns + ":" + context.wantWindow.requests : "";
+  const requestedRange =
+    context.wantWindow && HISTORY_RANGE_KEYS.includes(context.wantWindow.range) ? context.wantWindow.range : "";
+  const windowKey = context.wantWindow
+    ? context.wantWindow.turns + ":" + context.wantWindow.requests + ":" + requestedRange
+    : "";
   const windowChanged = windowKey !== session.lastWindowKey;
 
   if (!(changed || heartbeat || connectionChanged || healthChanged || windowChanged || sessionChanged)) return;
@@ -3623,15 +4324,27 @@ async function publishWatchRound(args, session, context) {
   if (changed) session.lastKey = key;
   if (windowChanged) session.lastWindowKey = windowKey;
 
+  let rangeSummary = null;
+  if (requestedRange) {
+    if (windowChanged || changed || !session.lastRangeSummary || session.lastRangeSummary.range !== requestedRange) {
+      session.lastRangeSummary = usageHistoryArchive.aggregateRange(requestedRange);
+    }
+    rangeSummary = session.lastRangeSummary;
+  } else {
+    session.lastRangeSummary = null;
+  }
+
   if (args.cdp) {
     // 固定心跳也要重建负载以刷新 updatedAt；页面只在数据键变化时重绘，不会抖动
     if (changed || healthChanged || connectionChanged || heartbeat || windowChanged || !session.lastPayload) {
-      session.lastPayload = payloadFor(stats, session.health, context.wantWindow, sessionChanged);
+      session.lastPayload = payloadFor(stats, session.health, context.wantWindow, sessionChanged, false, rangeSummary);
       session.lastPayloadJson = JSON.stringify(session.lastPayload);
     }
     await cdpPush(args.port, session.lastPayload, args.target);
     session.lastPushAt = Date.now();
     session.lastCdpConnectionUrl = connectionUrl;
+    session.lastPushedThreadIdentity = threadIdentity;
+    session.pushedThreadId = resolvedThreadId;
     if (connection) connection.pageChanged = false;
     session.lastError = "";
     if (changed || healthChanged) {
@@ -3640,6 +4353,8 @@ async function publishWatchRound(args, session, context) {
     logStatsAnomalies(session, stats);
   } else if (changed) {
     monitorLog("会话累计 " + compactNumber(stats.sessionTotal) + " tokens / " + stats.requestCount + " 次请求");
+    session.lastPushedThreadIdentity = threadIdentity;
+    session.pushedThreadId = resolvedThreadId;
   }
 
   session.lastHealthKey = healthKeyOf(session.health);
@@ -3732,7 +4447,9 @@ async function runWatchRound(args, session) {
       monitorLog("CDP 负载验签告警已清除（页面计数重置为 " + rejected + "）");
     }
   }
-  const { thread } = await resolveWatchThread(args, session, rawThread);
+  const resolvedThread = resolveWatchThread(session, rawThread);
+  const candidate = confirmWatchThread(session, rawThread, resolvedThread.thread);
+  const thread = candidate.thread;
   if (args.cdp && thread && thread !== NEW_THREAD) {
     const threadHash = sessionSnapshotHash(thread);
     if (session.snapshotThreadHash !== threadHash) {
@@ -3749,13 +4466,16 @@ async function runWatchRound(args, session) {
       }
     }
   }
-  const { file, parsed, stats } = readWatchStats(session, thread);
+  const { file, parsed, stats, sourceChanged } = readWatchStats(session, thread);
   await publishWatchRound(args, session, {
     thread,
     file,
     parsed,
     stats,
+    sourceChanged,
     rawThread,
+    threadIdentity: candidate.identity,
+    threadStable: candidate.stable,
     connection,
     connectionState,
     wantWindow,
@@ -3764,16 +4484,38 @@ async function runWatchRound(args, session) {
 
 async function runWatchLoop(args) {
   // 多来源启动（计划任务、兜底巡检、手动）时只允许一份实例存活
-  if (!(await acquireSingleInstanceLock())) {
+  if (!(await acquireSingleInstanceLock(args))) {
     monitorLog("已有监控实例在运行，本进程退出（PID " + process.pid + "）。");
     process.exit(0);
   }
+  process.on("exit", () => {
+    for (const file of ownedLockFiles) {
+      const lock = readLockFile(file);
+      if (lock && lock.pid === process.pid) {
+        try {
+          fs.rmSync(file, { force: true });
+        } catch {}
+      }
+    }
+  });
   const session = createWatchSession(args);
+  persistMonitorHeartbeat(session, { force: true, phase: "starting" });
   persistMonitorHealth(session.health);
   pruneMonitorLogs();
+  const removedMappings = sanitizeClientMappings();
   monitorLog(
-    "监控启动 (PID " + process.pid + ")，轮询 1s" + (args.cdp ? "，CDP 推送模式" : "") + "，日志目录 " + LOG_DIR,
+    "监控启动 (PID " +
+      process.pid +
+      ")，轮询 1s" +
+      (args.cdp ? "，CDP 推送模式" : "") +
+      "，路径来源 " +
+      RUNTIME_PATHS.resolvedFrom +
+      "，状态目录 " +
+      LOCAL_STATE_DIR +
+      "，日志目录 " +
+      LOG_DIR,
   );
+  if (removedMappings > 0) monitorLog("已清理 " + removedMappings + " 条失效/跨会话占位映射");
   const startupEnvironment = environmentSnapshot();
   monitorLog(
     "运行环境: nodeSupported=" +
@@ -3801,6 +4543,7 @@ async function runWatchLoop(args) {
     } catch (error) {
       await handleWatchError(args, session, error);
     }
+    persistMonitorHeartbeat(session);
     await new Promise((resolve) => setTimeout(resolve, WATCH_TICK_MS));
   }
 }
@@ -3809,7 +4552,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   currentTargetSelector = args.target;
   if (args.instanceStatus) {
-    process.exitCode = await printMonitorInstanceState();
+    process.exitCode = await printMonitorInstanceState(args);
     return;
   }
   if (args.cdp) await resolveCdpPort(args, { force: true });
@@ -3863,18 +4606,31 @@ if (!process.env.TUI_TOKENS_AS_MODULE) {
 
 export {
   SESSIONS_DIR,
+  RUNTIME_PATHS,
+  MONITOR_LOCK_FILE,
+  MONITOR_GUARD_LOCK_FILE,
+  MONITOR_HEARTBEAT_FILE,
   CLIENT_MAP_FILE,
   parseCdpPortsFromCommandLines,
   parseCodexProcessSnapshot,
   portDiscoveryRetryMs,
   monitorInstanceState,
+  acquireSingleInstanceLock,
+  persistMonitorHeartbeat,
   parseEstablishedCdpClients,
   clientState,
   saveClientState,
   isClientNewThread,
   clientThreadUuid,
+  rolloutTimestampMs,
+  findClientFileCandidatesSince,
   findNewestClientFileSince,
-  findNewestUnclaimedFile,
+  threadHasFreshSegmentSince,
+  sanitizeClientMappings,
+  threadIdentityFor,
+  confirmWatchThread,
+  createWatchSession,
+  readWatchStats,
   hasConversationContent,
   findRolloutFiles,
   threadIdOf,
@@ -3891,6 +4647,7 @@ export {
   parseFile,
   buildStats,
   payloadFor,
+  signPayloadWithAuth,
   snapshotStatsFrom,
   monitorHealthFor,
   environmentSnapshot,

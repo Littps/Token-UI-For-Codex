@@ -1,8 +1,14 @@
 export const PROTOCOL_NAME = "tokens-ui-for-codex";
-// v3 起只接受签名负载：无 auth、坏 MAC、过期时间戳、nonce 重放与 seq 倒退均拒绝。
-// 旧监控（v2）会因 supportedSchemaVersions 不含 3 而明确失败，安装器负责先停旧进程。
-export const PROTOCOL_SCHEMA_VERSION = 3;
+// v4 起只接受 auth v2：正文、版本、时间戳、nonce、keyId 与 seq 全部进入 HMAC。
+// 旧监控会因 supportedSchemaVersions 不含 4 而明确失败，安装器负责先停旧进程。
+export const PROTOCOL_SCHEMA_VERSION = 4;
 export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([PROTOCOL_SCHEMA_VERSION]);
+export const AUTH_VERSION = 2;
+export const AUTH_DOMAIN = "tokens-ui-for-codex/auth-v2";
+export const AUTH_KEY_BYTES = 32;
+export const AUTH_KEY_ID_PATTERN = /^[0-9a-f]{32}$/;
+export const AUTH_NONCE_PATTERN = /^[0-9a-f]{32}$/;
+export const AUTH_MAC_PATTERN = /^[0-9a-f]{64}$/;
 
 export const PROTOCOL_CAPABILITIES = Object.freeze([
   "session-total",
@@ -17,7 +23,11 @@ export const PROTOCOL_CAPABILITIES = Object.freeze([
   "health-snapshot",
   "current-turn-request-count",
   "signed-payload",
+  "auth-v2",
   "robust-speed",
+  "timing-v1",
+  "history-range-v1",
+  "context-breakdown-estimated-v1",
 ]);
 
 export const HEALTH_STATUSES = Object.freeze([
@@ -53,6 +63,51 @@ function isNullableNonNegativeNumber(value) {
 
 function isNullableString(value) {
   return value == null || typeof value === "string";
+}
+
+export function canonicalJson(value, stack = new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("canonicalJson does not support non-finite numbers");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    if (stack.has(value)) throw new TypeError("canonicalJson does not support cyclic arrays");
+    stack.add(value);
+    const serialized = "[" + value.map((item) => canonicalJson(item, stack)).join(",") + "]";
+    stack.delete(value);
+    return serialized;
+  }
+  if (value && typeof value === "object") {
+    if (stack.has(value)) throw new TypeError("canonicalJson does not support cyclic objects");
+    stack.add(value);
+    const serialized =
+      "{" +
+      Object.keys(value)
+        .sort()
+        .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key], stack))
+        .join(",") +
+      "}";
+    stack.delete(value);
+    return serialized;
+  }
+  throw new TypeError("canonicalJson does not support " + typeof value);
+}
+
+export function authSigningText(body, authCore) {
+  return (
+    AUTH_DOMAIN +
+    "\n" +
+    canonicalJson(body) +
+    "\n" +
+    canonicalJson({
+      v: authCore.v,
+      keyId: authCore.keyId,
+      ts: authCore.ts,
+      nonce: authCore.nonce,
+      seq: authCore.seq,
+    })
+  );
 }
 
 export function makeHealth(overrides = {}) {
@@ -132,6 +187,74 @@ function validateTurn(turn, index) {
   for (const key of ["cached", "uncached"]) {
     if (!isNullableNonNegativeNumber(turn[key])) errors.push("turn." + key + " is invalid");
   }
+  for (const key of ["wallMs", "toolWallMs", "ttftMs", "timingCoverage"]) {
+    if (turn[key] != null && !isNullableNonNegativeNumber(turn[key])) errors.push("turn." + key + " is invalid");
+  }
+  if (turn.toolCallCount != null && !isNonNegativeNumber(turn.toolCallCount)) {
+    errors.push("turn.toolCallCount is invalid");
+  }
+  if (turn.timingQuality != null && !["high", "medium", "low"].includes(turn.timingQuality)) {
+    errors.push("turn.timingQuality is invalid");
+  }
+  if (turn.input != null && turn.cached != null && turn.cached > turn.input) errors.push("turn.cached exceeds input");
+  return errors;
+}
+
+function validateContextBreakdown(value) {
+  if (value == null) return [];
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return ["contextBreakdown must be null or an object"];
+  }
+  const errors = [];
+  if (value.estimated !== true) errors.push("contextBreakdown.estimated must be true");
+  if (!Number.isInteger(value.estimatorVersion) || value.estimatorVersion < 1) {
+    errors.push("contextBreakdown.estimatorVersion is invalid");
+  }
+  for (const key of ["systemPromptTokens", "toolDefinitionTokens", "conversationTokens", "otherTokens"]) {
+    if (value[key] != null && (!Number.isSafeInteger(value[key]) || value[key] < 0)) {
+      errors.push("contextBreakdown." + key + " is invalid");
+    }
+  }
+  return errors;
+}
+
+function validateRangeSummary(summary) {
+  if (summary == null) return [];
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return ["rangeSummary must be null or an object"];
+  }
+  const errors = [];
+  if (!["today", "3d", "7d", "30d", "all"].includes(summary.range)) {
+    errors.push("rangeSummary.range is invalid");
+  }
+  if (typeof summary.available !== "boolean") errors.push("rangeSummary.available must be boolean");
+  if (typeof summary.cacheComplete !== "boolean") errors.push("rangeSummary.cacheComplete must be boolean");
+  for (const key of [
+    "retentionDays",
+    "sessionCount",
+    "turnCount",
+    "requestCount",
+    "input",
+    "cached",
+    "output",
+    "total",
+    "toolCallCount",
+    "timingSampleCount",
+    "ttftSampleCount",
+  ]) {
+    if (!isNonNegativeNumber(summary[key])) errors.push("rangeSummary." + key + " is invalid");
+  }
+  for (const key of ["ttftAvgMs", "effectiveMs", "effectiveTps"]) {
+    if (!isNullableNonNegativeNumber(summary[key])) errors.push("rangeSummary." + key + " is invalid");
+  }
+  for (const key of ["wallMs", "toolWallMs"]) {
+    if (!isNullableNonNegativeNumber(summary[key])) errors.push("rangeSummary." + key + " is invalid");
+  }
+  for (const key of ["cutoffAt", "generatedAt", "availableFrom", "availableThrough"]) {
+    if (summary[key] != null && (typeof summary[key] !== "string" || !Number.isFinite(Date.parse(summary[key])))) {
+      errors.push("rangeSummary." + key + " is invalid");
+    }
+  }
   return errors;
 }
 
@@ -144,18 +267,21 @@ function validateRequest(request, index) {
   for (const key of ["input", "cached", "uncached", "output", "total"]) {
     if (!isNullableNonNegativeNumber(request[key])) errors.push("request." + key + " is invalid");
   }
+  if (request.input != null && request.cached != null && request.cached > request.input) {
+    errors.push("request.cached exceeds input");
+  }
   return errors;
 }
 
 function validateAuth(auth) {
   const errors = [];
   if (!auth || typeof auth !== "object" || Array.isArray(auth)) return ["auth must be an object"];
-  if (auth.v !== 1) errors.push("auth.v is invalid");
-  if (!isFiniteNumber(auth.ts) || auth.ts < 0) errors.push("auth.ts is invalid");
-  if (typeof auth.nonce !== "string" || auth.nonce.length < 16 || auth.nonce.length > 64)
-    errors.push("auth.nonce is invalid");
-  if (!Number.isInteger(auth.seq) || auth.seq < 1) errors.push("auth.seq is invalid");
-  if (typeof auth.mac !== "string" || !/^[0-9a-f]{64}$/.test(auth.mac)) errors.push("auth.mac is invalid");
+  if (auth.v !== AUTH_VERSION) errors.push("auth.v is invalid");
+  if (!Number.isSafeInteger(auth.ts) || auth.ts < 0) errors.push("auth.ts is invalid");
+  if (typeof auth.keyId !== "string" || !AUTH_KEY_ID_PATTERN.test(auth.keyId)) errors.push("auth.keyId is invalid");
+  if (typeof auth.nonce !== "string" || !AUTH_NONCE_PATTERN.test(auth.nonce)) errors.push("auth.nonce is invalid");
+  if (!Number.isSafeInteger(auth.seq) || auth.seq < 1) errors.push("auth.seq is invalid");
+  if (typeof auth.mac !== "string" || !AUTH_MAC_PATTERN.test(auth.mac)) errors.push("auth.mac is invalid");
   return errors;
 }
 
@@ -177,6 +303,8 @@ export function validatePayload(payload, { allowLegacy = true, requireAuth = fal
   if (requireAuth) errors.push(...validateAuth(payload.auth));
   if (!Array.isArray(payload.capabilities) || payload.capabilities.some((item) => typeof item !== "string")) {
     errors.push("capabilities must be an array of strings");
+  } else if (!payload.capabilities.includes("auth-v2")) {
+    errors.push("capabilities must include auth-v2");
   }
   for (const key of [
     "requestCount",
@@ -204,9 +332,15 @@ export function validatePayload(payload, { allowLegacy = true, requireAuth = fal
     "sessionInput",
     "sessionCached",
     "sessionOutput",
+    "sessionCacheHitRate",
     "turnCached",
+    "turnCacheHitRate",
     "turnTps",
     "turnWallTps",
+    "turnWallMs",
+    "turnToolWallMs",
+    "turnTtftMs",
+    "turnTimingCoverage",
     "sessionTps",
     "lastRequestTps",
     "genEstimateTps",
@@ -219,16 +353,46 @@ export function validatePayload(payload, { allowLegacy = true, requireAuth = fal
   for (const key of ["effectiveSampleCount", "effectiveWindow"]) {
     if (!isNonNegativeNumber(payload[key])) errors.push(key + " must be a non-negative number");
   }
+  for (const key of ["sessionWallMs", "sessionToolWallMs", "sessionTtftAvgMs"]) {
+    if (payload[key] != null && !isNullableNonNegativeNumber(payload[key]))
+      errors.push(key + " must be null or a non-negative number");
+  }
+  for (const key of ["sessionToolCallCount", "sessionTimingSampleCount"]) {
+    if (payload[key] != null && !isNonNegativeNumber(payload[key])) errors.push(key + " must be a non-negative number");
+  }
+  if (payload.turnToolCallCount != null && !isNonNegativeNumber(payload.turnToolCallCount)) {
+    errors.push("turnToolCallCount must be a non-negative number");
+  }
+  if (payload.turnTimingQuality != null && !["high", "medium", "low"].includes(payload.turnTimingQuality)) {
+    errors.push("turnTimingQuality is invalid");
+  }
+  errors.push(...validateContextBreakdown(payload.contextBreakdown));
+  errors.push(...validateRangeSummary(payload.rangeSummary));
+  if (payload.contextBreakdown && Number.isFinite(payload.contextUsed)) {
+    const breakdown = payload.contextBreakdown;
+    const breakdownTotal =
+      (breakdown.systemPromptTokens || 0) +
+      (breakdown.toolDefinitionTokens || 0) +
+      (breakdown.conversationTokens || 0) +
+      (breakdown.otherTokens || 0);
+    if (breakdownTotal !== Math.floor(payload.contextUsed)) {
+      errors.push("contextBreakdown total must equal floor(contextUsed)");
+    }
+  }
+  for (const key of ["sessionCacheHitRate", "turnCacheHitRate"]) {
+    if (payload[key] != null && (!isNonNegativeNumber(payload[key]) || payload[key] > 1)) {
+      errors.push(key + " must be null or between 0 and 1");
+    }
+  }
   if (payload.speedTimingConfidence != null && !["high", "medium", "low"].includes(payload.speedTimingConfidence)) {
     errors.push("speedTimingConfidence is invalid");
   }
   if (payload.compactSpeedConfidence != null && !["high", "medium", "low"].includes(payload.compactSpeedConfidence)) {
     errors.push("compactSpeedConfidence is invalid");
   }
-  for (const key of ["turnsTruncated", "requestDetailsTruncated", "sessionChanged"]) {
+  for (const key of ["turnsTruncated", "requestDetailsTruncated", "sessionChanged", "snapshot"]) {
     if (typeof payload[key] !== "boolean") errors.push(key + " must be boolean");
   }
-  if (payload.snapshot != null && typeof payload.snapshot !== "boolean") errors.push("snapshot must be boolean");
   if (!Array.isArray(payload.turns)) errors.push("turns must be an array");
   if (!Array.isArray(payload.requestDetails)) errors.push("requestDetails must be an array");
   if (Array.isArray(payload.turns)) {
@@ -239,8 +403,26 @@ export function validatePayload(payload, { allowLegacy = true, requireAuth = fal
     if (payload.requestDetails.length > 500) errors.push("requestDetails exceeds the 500-row limit");
     payload.requestDetails.forEach((request, index) => errors.push(...validateRequest(request, index)));
   }
-  if (typeof payload.updatedAt !== "string" || !payload.updatedAt) errors.push("updatedAt must be a non-empty string");
-  if (payload.health != null) errors.push(...validateHealth(payload.health));
+  if (Array.isArray(payload.turns) && payload.turnTotalCount < payload.turns.length) {
+    errors.push("turnTotalCount is smaller than turns.length");
+  }
+  if (Array.isArray(payload.requestDetails) && payload.requestDetailTotal < payload.requestDetails.length) {
+    errors.push("requestDetailTotal is smaller than requestDetails.length");
+  }
+  if (payload.currentTurnIndex > payload.turnTotalCount) {
+    errors.push("currentTurnIndex exceeds turnTotalCount");
+  }
+  for (const [label, input, cached] of [
+    ["session", payload.sessionInput, payload.sessionCached],
+    ["turn", payload.turnInput, payload.turnCached],
+  ]) {
+    if (input != null && cached != null && cached > input) errors.push(label + ".cached exceeds input");
+  }
+  if (typeof payload.updatedAt !== "string" || !Number.isFinite(Date.parse(payload.updatedAt))) {
+    errors.push("updatedAt must be a valid ISO timestamp");
+  }
+  if (!payload.health) errors.push("health is required");
+  else errors.push(...validateHealth(payload.health));
   if (!allowLegacy && payload.schemaVersion !== PROTOCOL_SCHEMA_VERSION) errors.push("legacy payloads are disabled");
   return { ok: errors.length === 0, errors };
 }

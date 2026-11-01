@@ -33,10 +33,10 @@ Codex rollout JSONL
   │    └─ 按窗口裁剪请求/轮次
   │
   └─ signPayload
+       ├─ auth v2 domain separation
        ├─ HMAC-SHA256
-       ├─ timestamp
-       ├─ nonce
-       └─ seq
+       ├─ keyId + timestamp
+       └─ nonce + seq
 ```
 
 页面：
@@ -45,6 +45,7 @@ Codex rollout JSONL
 CDP payload
   → clone
   → verify auth
+  → commit monotonic auth state
   → adoptData
   → compact metrics
   → details incremental update
@@ -88,7 +89,7 @@ CDP payload
 - 跟随宿主主题
 - 打开/关闭详情
 - 按窗口渲染请求和轮次
-- 验签 schema v3
+- 验签 schema v4 / auth v2
 - 悬浮冻结
 - 自适应磨砂玻璃
 - MutationObserver 重挂载保护
@@ -162,6 +163,9 @@ CDP payload
 - echo/replay/unique 一对一认领
 - 混合格式当前轮 thread delta
 - 当前提问请求数独立字段
+- 会话候选稳定 2.5 秒且 rollout 存在后才切换
+- 新对话 placeholder 只接受唯一新文件，不再猜旧文件
+- React Fiber 兜底只读取明确会话字段
 
 ### 页面刷新
 
@@ -171,14 +175,16 @@ CDP payload
 - 主题观察只监听 `<html>`
 - 悬浮冻结和恢复
 - 紧凑条优先读取 `compactTps`；样本不足显示 `--T/s`
+- rollout 解析变化时立即推送，详情展开期间不依赖心跳
 
 ### 协议与安全
 
-- schema v3 签名-only
-- boot payload 验签
+- schema v4 / auth v2 签名-only
+- 临时密钥在一次同步事件内交接并清理
 - 深拷贝后再异步验证
 - nonce 防重放
 - seq 单调
+- 完整 auth 信封纳入 MAC
 - 安全拒绝计数
 - CDP 客户端审计
 
@@ -199,18 +205,20 @@ CDP payload
 ```powershell
 npm run check
 npm test
+npm run test:auth-ui
 node scripts\golden-baseline.mjs --check
 node scripts\verify-live.mjs
 npm run test:live
-node scripts\verify-sync.mjs --deploy "<部署根>"
+node scripts\verify-sync.mjs --deploy "<部署根>" --zip "<安装包>"
 ```
 
 当前结果：
 
-- 单元测试：66/66
-- Golden：0 不一致
-- verify-live：15/15
-- Playwright：12 通过 / 2 安全跳过
+- 单元测试：87/87
+- 本地隔离页 auth UI：5/5
+- 固定合成快照：0 不一致；真实本机 Golden corpus 未随源码发布
+- verify-live：29 项，部署当前源码后实跑
+- 实机 Playwright：19 个用例；当前 17 通过 / 2 安全跳过
 - 连续重启：5 轮
 - 分页：5 轮
 - 主题：20 轮
@@ -224,4 +232,4 @@ node scripts\verify-sync.mjs --deploy "<部署根>"
 - 不允许键盘监听回归
 - 不允许页面负载携带消息正文或路径
 - 时序类修改必须多轮实机
-- 交付前必须校验四个生效副本
+- 交付前必须校验五副本与 ZIP 哈希

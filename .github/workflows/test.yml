@@ -24,6 +24,8 @@ jobs:
         run: npm run check
       - name: Unit tests
         run: npm test
+      - name: Auth UI tests
+        run: npm run test:auth-ui
 
   powershell:
     runs-on: windows-latest
@@ -33,7 +35,7 @@ jobs:
       - name: PowerShell 5.1 parse + UTF-8 BOM check
         shell: powershell
         run: |
-          foreach ($file in @('find-codex.ps1', 'install.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1')) {
+          foreach ($file in @('find-codex.ps1', 'monitor-watchdog.ps1', 'install.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1', 'scripts/build-package.ps1', 'scripts/build-source-package.ps1', 'scripts/verify-watchdog.ps1')) {
             if (-not (Test-Path -LiteralPath $file)) { throw "PowerShell file missing: $file" }
             $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $file))
             if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
@@ -47,9 +49,13 @@ jobs:
       - name: PowerShell 7 parse check
         shell: pwsh
         run: |
-          foreach ($file in @('find-codex.ps1', 'install.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1')) {
+          foreach ($file in @('find-codex.ps1', 'monitor-watchdog.ps1', 'install.ps1', 'install-autostart.ps1', 'uninstall-autostart.ps1', 'scripts/build-package.ps1', 'scripts/build-source-package.ps1', 'scripts/verify-watchdog.ps1')) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $file), [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) { throw "PowerShell 7 parse failed: $file :: $($errors[0].Message)" }
           }
+
+      - name: Watchdog process tests
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-watchdog.ps1

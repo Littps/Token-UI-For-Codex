@@ -15,7 +15,7 @@
 - `requestCount`、`sessionTotal`、当前轮累计和缓存命中口径不变。
 - 轮次来源优先级不变：`turn_context` → `turn_id` → `user_message` → 单轮。
 - modern / legacy 混合、回声、replay、unique、重置、截断、乱序和分片行为不变。
-- 页面协议 schema v3、签名负载和隐私字段不变。
+- 页面协议升级到 schema v4 / auth v2；已发布 1.0.2 标签仍保持 schema v3。
 - 请求和轮次的对外上限仍为 500。
 - `retainRequests=false` 时最近 500 条明细的顺序和语义不变。
 

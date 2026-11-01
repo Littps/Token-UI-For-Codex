@@ -151,6 +151,7 @@ function runCli(args) {
   delete childEnv.TUI_TOKENS_AS_MODULE;
   childEnv.CODEX_HOME = snapshotRoot; // 指向冻结语料
   childEnv.LOCALAPPDATA = snapshotStateDir; // 状态隔离，不碰真实 client-thread-map.json
+  childEnv.TUI_STATE_DIR = snapshotStateDir;
   childEnv.APPDATA = snapshotStateDir;
   try {
     const stdout = execFileSync(process.execPath, [statsScript, ...args], {

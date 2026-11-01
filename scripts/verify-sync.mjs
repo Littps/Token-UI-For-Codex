@@ -1,6 +1,7 @@
 // 五处副本一致性校验：源码 / 部署 / 插件 cache / Codex++ user_scripts / 打包 zip。
 // 任一不一致打印差异并以非 0 退出，供发布流程与 CI 使用。
-// 用法：node scripts/verify-sync.mjs [--deploy <目录>] [--zip <包>]
+// 严格用法：node scripts/verify-sync.mjs --deploy <目录> --zip <包>
+// 开发诊断：追加 --allow-partial 可只比较当前存在的副本
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -11,13 +12,30 @@ import zlib from "node:zlib";
 const argv = process.argv.slice(2);
 let deployRoot = process.env.TUI_DEPLOY_ROOT || "";
 let zipPath = process.env.TUI_ZIP_PATH || "";
+let allowPartial = false;
+const argumentErrors = [];
 for (let index = 0; index < argv.length; index += 1) {
-  if (argv[index] === "--deploy" && argv[index + 1]) deployRoot = argv[index + 1];
-  else if (argv[index] === "--zip" && argv[index + 1]) zipPath = argv[index + 1];
+  if (argv[index] === "--deploy") {
+    if (argv[index + 1] && !argv[index + 1].startsWith("--")) deployRoot = argv[++index];
+    else argumentErrors.push("--deploy requires a directory");
+  } else if (argv[index] === "--zip") {
+    if (argv[index + 1] && !argv[index + 1].startsWith("--")) zipPath = argv[++index];
+    else argumentErrors.push("--zip requires a file");
+  } else if (argv[index] === "--allow-partial") {
+    allowPartial = true;
+  } else {
+    argumentErrors.push("unknown argument: " + argv[index]);
+  }
 }
+const strict = !allowPartial;
 
 const sourceRoot = path.join(import.meta.dirname, "..");
-const pluginCacheRoot = path.join(os.homedir(), ".codex", "plugins", "cache", "tokens-ui-for-codex-local");
+const pluginCacheRoot = path.join(
+  process.env.TUI_CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+  "plugins",
+  "cache",
+  "tokens-ui-for-codex-local",
+);
 const userScriptsRoot = path.join(
   process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"),
   "Codex++",
@@ -56,22 +74,61 @@ function newestPluginDir(root) {
       }
     }
     if (!candidates.length) return null;
-    candidates.sort();
-    return candidates[candidates.length - 1];
+    candidates.sort((left, right) => {
+      const leftMtime = fs.statSync(left).mtimeMs;
+      const rightMtime = fs.statSync(right).mtimeMs;
+      return rightMtime - leftMtime || right.localeCompare(left);
+    });
+    return candidates[0];
   } catch {}
   return null;
 }
 
 const pluginCacheDir = newestPluginDir(pluginCacheRoot);
 const deployPluginDir = deployRoot ? path.join(deployRoot, "plugins", "tokens-ui-for-codex") : null;
+const userScriptPath = path.join(userScriptsRoot, "tokens-ui-for-codex-panel.js");
+const errors = [...argumentErrors];
+
+if (!pluginCacheDir && strict) errors.push("plugin cache copy is missing: " + pluginCacheRoot);
+if (!deployRoot) {
+  if (strict) errors.push("--deploy is required in strict mode");
+} else if (!deployPluginDir || !fs.existsSync(deployPluginDir)) {
+  if (strict) errors.push("deployment copy is missing: " + String(deployPluginDir));
+}
+if (!fs.existsSync(userScriptPath) && strict) errors.push("Codex++ user script is missing: " + userScriptPath);
+if (!zipPath) {
+  if (strict) errors.push("--zip is required in strict mode");
+} else if (!fs.existsSync(zipPath)) errors.push("package zip is missing: " + zipPath);
+
+if (strict && errors.length) {
+  console.log(
+    JSON.stringify(
+      {
+        sourceRoot,
+        deployPluginDir,
+        pluginCacheDir,
+        userScriptsRoot,
+        zipPath: zipPath || null,
+        errors,
+        results: [],
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(1);
+}
 
 // 注意：launch-silent.vbs 由安装脚本按本机路径生成，各副本内容必然不同，因此不纳入一致性比对。
 const CHECKED_FILES = [
   "token-stats.mjs",
+  "runtime-paths.mjs",
+  "monitor-watchdog.ps1",
   "speed-stats.mjs",
   "history-archive.mjs",
   "tokens-ui-for-codex-panel.js",
   "protocol.mjs",
+  "schemas/payload-v4.schema.json",
   "find-codex.ps1",
   "install.ps1",
   "install-autostart.ps1",
@@ -93,11 +150,11 @@ for (const file of CHECKED_FILES) {
     row[copy.name] = copy.root ? sha256(path.join(copy.root, file)) : null;
   }
   // Codex++ 只保存用户脚本
-  row["user_scripts"] = file === "tokens-ui-for-codex-panel.js" ? sha256(path.join(userScriptsRoot, file)) : "n/a";
-  const values = [row["源码"], row["部署"], row["插件cache"], row["user_scripts"]].filter(
-    (value) => value && value !== "n/a",
-  );
-  row.consistent = values.length > 0 && values.every((value) => value === values[0]);
+  row["user_scripts"] = file === "tokens-ui-for-codex-panel.js" ? sha256(userScriptPath) : "n/a";
+  const values = [row["源码"], row["部署"], row["插件cache"], row["user_scripts"]].filter((value) => value !== "n/a");
+  const present = values.filter(Boolean);
+  const missing = values.some((value) => !value);
+  row.consistent = present.length > 0 && present.every((value) => value === present[0]) && !(strict && missing);
   if (!row.consistent) mismatches += 1;
   results.push(row);
 }
@@ -112,7 +169,9 @@ if (zipPath && fs.existsSync(zipPath)) {
       break;
     }
   }
-  if (eocd >= 0) {
+  if (eocd < 0) {
+    errors.push("package zip has no end-of-central-directory record: " + zipPath);
+  } else {
     const entryCount = buffer.readUInt16LE(eocd + 10);
     let offset = buffer.readUInt32LE(eocd + 16);
     const zipEntries = new Map();
@@ -152,6 +211,7 @@ console.log(
       pluginCacheDir,
       userScriptsRoot,
       zipPath: zipPath || null,
+      errors,
       mismatches,
       results,
     },
@@ -160,4 +220,4 @@ console.log(
   ),
 );
 
-if (mismatches > 0) process.exitCode = 1;
+if (mismatches > 0 || errors.length > 0) process.exitCode = 1;

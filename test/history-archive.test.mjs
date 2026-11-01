@@ -131,3 +131,117 @@ test("历史归档：超过 60 天的文件会自动清理", () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("历史归档：按今日、3 日、7 日、30 日和全部范围汇总结构化轮次", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-history-range-"));
+  try {
+    const archive = new UsageHistoryArchive(root);
+    const now = new Date();
+    now.setHours(18, 0, 0, 0);
+    const atDaysAgo = (days) => {
+      const value = new Date(now);
+      value.setDate(value.getDate() - days);
+      return value.toISOString();
+    };
+    const writeSession = (index, turns) => {
+      const dir = path.join(root, "sessions", String(index).padStart(32, "0"));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "turns.json"), JSON.stringify({ v: 1, turns }), "utf8");
+    };
+    writeSession(1, [
+      {
+        start: atDaysAgo(0),
+        requests: 2,
+        input: 100,
+        cached: 80,
+        output: 20,
+        total: 120,
+        wallMs: 5000,
+        toolWallMs: 1000,
+        toolCallCount: 3,
+        ttftMs: 500,
+      },
+    ]);
+    writeSession(2, [
+      {
+        start: atDaysAgo(3),
+        requests: 1,
+        input: 200,
+        cached: 150,
+        output: 30,
+        total: 230,
+        wallMs: 7000,
+        toolWallMs: 2000,
+        toolCallCount: 1,
+        ttftMs: 700,
+      },
+      {
+        start: atDaysAgo(10),
+        requests: 1,
+        input: 300,
+        cached: 250,
+        output: 40,
+        total: 340,
+        wallMs: 9000,
+        toolWallMs: 3000,
+        toolCallCount: 2,
+        ttftMs: 900,
+      },
+    ]);
+    writeSession(3, [
+      {
+        start: atDaysAgo(40),
+        requests: 1,
+        input: 400,
+        cached: 350,
+        output: 50,
+        total: 450,
+        wallMs: 11000,
+        toolWallMs: 4000,
+        toolCallCount: 4,
+        ttftMs: 1100,
+      },
+    ]);
+    writeSession(4, [
+      {
+        start: atDaysAgo(2),
+        requests: 1,
+        input: 110,
+        cached: 90,
+        output: 11,
+        total: 121,
+        wallMs: 4000,
+        toolWallMs: 500,
+        toolCallCount: 1,
+        ttftMs: 400,
+      },
+    ]);
+
+    const today = archive.aggregateRange("today", now.getTime());
+    assert.equal(today.requestCount, 2);
+    assert.equal(today.total, 120);
+    assert.equal(today.sessionCount, 1);
+    const threeDays = archive.aggregateRange("3d", now.getTime());
+    assert.equal(threeDays.requestCount, 3);
+    assert.equal(threeDays.total, 241);
+    assert.equal(threeDays.sessionCount, 2);
+    assert.equal(threeDays.timingSampleCount, 2);
+    const sevenDays = archive.aggregateRange("7d", now.getTime());
+    assert.equal(sevenDays.requestCount, 4);
+    assert.equal(sevenDays.total, 471);
+    assert.equal(sevenDays.sessionCount, 3);
+    const thirtyDays = archive.aggregateRange("30d", now.getTime());
+    assert.equal(thirtyDays.requestCount, 5);
+    assert.equal(thirtyDays.total, 811);
+    assert.equal(thirtyDays.sessionCount, 3);
+    const all = archive.aggregateRange("all", now.getTime());
+    assert.equal(all.requestCount, 6);
+    assert.equal(all.total, 1261);
+    assert.equal(all.sessionCount, 4);
+    assert.equal(all.cacheComplete, true);
+    assert.equal(all.ttftSampleCount, 5);
+    assert.equal(all.toolCallCount, 11);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

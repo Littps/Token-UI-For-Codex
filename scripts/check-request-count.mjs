@@ -35,6 +35,24 @@ const modernPerRequestSum = parsed.usageRecords.reduce(
   (sum, record) => sum + (Number.isFinite(record.total) ? record.total : 0),
   0,
 );
+const firstObservable = [
+  ...parsed.usageRecords.map((record) => ({
+    ts: record.ts || "",
+    threadTotal: record.threadUsage ? record.threadUsage.total : null,
+    requestTotal: record.total,
+  })),
+  ...parsed.counts.map((record) => ({
+    ts: record.ts || "",
+    threadTotal: record.total,
+    requestTotal: record.lastTotal,
+  })),
+]
+  .filter((item) => Number.isFinite(item.threadTotal) && Number.isFinite(item.requestTotal))
+  .sort((a, b) => a.ts.localeCompare(b.ts))[0];
+const baselineBeforeObservedWindow = firstObservable
+  ? Math.max(0, firstObservable.threadTotal - firstObservable.requestTotal)
+  : 0;
+const expectedSessionTotal = baselineBeforeObservedWindow + modernPerRequestSum;
 
 // 原始事件计数（未去重前的真实条数）
 let usageRecordLines = 0;
@@ -76,8 +94,10 @@ console.log(
       statsRequestCount: result.requestCount,
       sessionTotal: result.sessionTotal,
       prefixSum: {
+        baselineBeforeObservedWindow,
         modernPerRequestSum,
-        sessionTotalMinusSum: result.sessionTotal - modernPerRequestSum,
+        expectedSessionTotal,
+        sessionTotalMinusExpected: result.sessionTotal - expectedSessionTotal,
       },
       echoStats: result.echoStats,
       replayStats: result.replayStats,
@@ -91,7 +111,7 @@ console.log(
           result.legacyStats.deduped + result.uniqueStats.selfDuplicate === result.legacyStats.raw,
         requestCountEqualsModernPlusUnique:
           result.requestCount === parsed.usageRecords.length + result.uniqueStats.count,
-        sessionTotalMatchesPrefixSum: result.sessionTotal === modernPerRequestSum,
+        sessionTotalMatchesBaselinePlusPrefixSum: result.sessionTotal === expectedSessionTotal,
         trueConflictsZero: result.formatConflictCount === 0,
         overThresholdRatioWithinOnePercent:
           result.echoStats.total > 0 ? result.echoStats.overThreshold / result.echoStats.total <= 0.01 : false,

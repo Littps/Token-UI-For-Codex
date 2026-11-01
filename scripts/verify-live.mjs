@@ -114,8 +114,14 @@ try {
       supportedSchemaVersions: protocol ? protocol.supportedSchemaVersions : null,
       payloadProtocolName: payload && payload.protocolName,
       payloadSchemaVersion: payload && payload.schemaVersion,
+      payloadCapabilities: payload && payload.capabilities,
       payloadAuthRequired: payload && payload.authRequired,
+      payloadAuthVersion: payload && payload.auth && payload.auth.v,
+      payloadKeyId: payload && payload.auth && payload.auth.keyId,
+      payloadNonce: payload && payload.auth && payload.auth.nonce,
+      payloadSeq: payload && payload.auth && payload.auth.seq,
       payloadHasMac: !!(payload && payload.auth && /^[0-9a-f]{64}$/.test(payload.auth.mac)),
+      transientKeyAbsent: !('__tuiForCodexAuthBootstrap' in window) && !('__tuiForCodexAuthKey' in window),
       payloadHealthStatus: payload && payload.health && payload.health.status,
       panelCount: document.querySelectorAll('#tui-native').length,
       styleCount: document.querySelectorAll('#tui-native-style').length,
@@ -129,17 +135,38 @@ try {
 
   record("协议已注册", snapshot.protocolName === "tokens-ui-for-codex", snapshot.protocolName);
   record(
-    "支持 schema v3",
-    Array.isArray(snapshot.supportedSchemaVersions) && snapshot.supportedSchemaVersions.includes(3),
+    "支持 schema v4",
+    Array.isArray(snapshot.supportedSchemaVersions) && snapshot.supportedSchemaVersions.includes(4),
     snapshot.supportedSchemaVersions,
   );
   record("统计条唯一", snapshot.panelCount === 1, snapshot.panelCount);
   record("样式表唯一", snapshot.styleCount === 1, snapshot.styleCount);
   record("统计条位于上下文圆圈左侧", snapshot.panelLeftOfRing, { panel: snapshot.panelRect, ring: snapshot.ringRect });
   record("负载协议名匹配", snapshot.payloadProtocolName === "tokens-ui-for-codex", snapshot.payloadProtocolName);
-  record("负载 schema v3", snapshot.payloadSchemaVersion === 3, snapshot.payloadSchemaVersion);
+  record("负载 schema v4", snapshot.payloadSchemaVersion === 4, snapshot.payloadSchemaVersion);
+  record(
+    "timing-v1 能力已注册",
+    Array.isArray(snapshot.payloadCapabilities) && snapshot.payloadCapabilities.includes("timing-v1"),
+    snapshot.payloadCapabilities,
+  );
+  record(
+    "history-range-v1 能力已注册",
+    Array.isArray(snapshot.payloadCapabilities) && snapshot.payloadCapabilities.includes("history-range-v1"),
+    snapshot.payloadCapabilities,
+  );
+  record(
+    "上下文估算能力已注册",
+    Array.isArray(snapshot.payloadCapabilities) &&
+      snapshot.payloadCapabilities.includes("context-breakdown-estimated-v1"),
+    snapshot.payloadCapabilities,
+  );
   record("负载要求签名", snapshot.payloadAuthRequired === true, snapshot.payloadAuthRequired);
+  record("负载认证版本 v2", snapshot.payloadAuthVersion === 2, snapshot.payloadAuthVersion);
+  record("负载 keyId 有效", /^[0-9a-f]{32}$/.test(snapshot.payloadKeyId || ""), snapshot.payloadKeyId);
+  record("负载 nonce 有效", /^[0-9a-f]{32}$/.test(snapshot.payloadNonce || ""), snapshot.payloadNonce);
+  record("负载 seq 有效", Number.isSafeInteger(snapshot.payloadSeq) && snapshot.payloadSeq >= 1, snapshot.payloadSeq);
   record("负载携带 HMAC", snapshot.payloadHasMac === true, snapshot.payloadHasMac);
+  record("临时密钥已清理", snapshot.transientKeyAbsent === true, snapshot.transientKeyAbsent);
   record(
     "运行状态健康",
     ["healthy", "waiting-for-data", "starting"].includes(snapshot.payloadHealthStatus),
@@ -155,21 +182,43 @@ try {
     return 'clicked';
   })()`,
   );
+  await new Promise((resolve) => setTimeout(resolve, 1600));
   const openRaw = await evaluate(
     ws,
     `(() => {
+    const payload = window.__tuiForCodex || null;
     const dialog = document.getElementById('tui-detail-dialog');
     const titles = dialog ? [...dialog.querySelectorAll('.tui-dialog-section-title')].map((node) => node.textContent) : [];
     const sessionSection = dialog ? dialog.querySelector('.tui-dialog-section') : null;
     const sessionLabels = sessionSection
       ? [...sessionSection.querySelectorAll('.tui-dialog-card-label')].map((node) => node.textContent)
       : [];
+    const timingSections = dialog ? [...dialog.querySelectorAll('.tui-dialog-section')].slice(0, 2) : [];
+    const timingLabels = timingSections.map((section) =>
+      [...section.querySelectorAll('.tui-dialog-timing-label')].map((node) => node.textContent.trim()),
+    );
+    const contextSection = dialog
+      ? [...dialog.querySelectorAll('.tui-dialog-section')].find(
+          (section) => section.querySelector('.tui-dialog-section-title')?.textContent === '上下文使用',
+        )
+      : null;
+    const rangeSelect = dialog ? dialog.querySelector('.tui-range-select') : null;
+    const healthDot = dialog ? dialog.querySelector('.tui-dialog-health-dot') : null;
     return JSON.stringify({
       open: !!dialog && dialog.getAttribute('data-open') === 'true',
       sections: dialog ? dialog.querySelectorAll('.tui-dialog-section').length : 0,
       role: dialog ? dialog.getAttribute('role') : null,
       titles,
       sessionLabels,
+      timingLabels,
+      contextLegendCount: contextSection ? contextSection.querySelectorAll('.tui-context-legend-row').length : 0,
+      contextText: contextSection ? contextSection.textContent : '',
+      rangeValue: rangeSelect ? rangeSelect.value : null,
+      rangeOptions: rangeSelect ? [...rangeSelect.options].map((option) => option.value) : [],
+      rangeSummary: payload && payload.rangeSummary ? payload.rangeSummary.range : null,
+      healthDotTitle: healthDot ? healthDot.getAttribute('title') : null,
+      healthDotAria: healthDot ? healthDot.getAttribute('aria-label') : null,
+      healthDotTabIndex: healthDot ? healthDot.getAttribute('tabindex') : null,
     });
   })()`,
   );
@@ -180,13 +229,50 @@ try {
   record(
     "分区顺序正确",
     Array.isArray(openState.titles) &&
-      openState.titles.slice(0, 4).join(",") === "会话累计,当前提问统计,上下文使用,运行状态",
+      openState.titles.slice(0, 4).join(",") === "统计信息,当前提问统计,上下文使用,监控操作",
     openState.titles,
   );
   record(
-    "会话累计含请求数量",
+    "统计信息含请求数量",
     Array.isArray(openState.sessionLabels) && openState.sessionLabels.includes("请求"),
     openState.sessionLabels,
+  );
+  record(
+    "会话与当前轮时间带存在",
+    JSON.stringify(openState.timingLabels) ===
+      JSON.stringify([
+        ["累计处理用时", "工具累计", "平均 TTFT"],
+        ["本轮总用时", "工具用时", "TTFT"],
+      ]),
+    openState.timingLabels,
+  );
+  record("上下文分类图例完整", openState.contextLegendCount === 4, openState.contextLegendCount);
+  record(
+    "统计范围控件可用",
+    JSON.stringify(openState.rangeOptions) === JSON.stringify(["today", "3d", "7d", "30d", "all"]),
+    openState.rangeOptions,
+  );
+  record("统计范围按需汇总", openState.rangeValue === openState.rangeSummary, {
+    selected: openState.rangeValue,
+    summary: openState.rangeSummary,
+  });
+  record(
+    "健康灯错误提示可访问",
+    typeof openState.healthDotTitle === "string" &&
+      openState.healthDotTitle.includes("运行状态") &&
+      openState.healthDotTitle.includes("错误码") &&
+      typeof openState.healthDotAria === "string" &&
+      openState.healthDotTabIndex === "0",
+    {
+      title: openState.healthDotTitle,
+      aria: openState.healthDotAria,
+      tabIndex: openState.healthDotTabIndex,
+    },
+  );
+  record(
+    "上下文数字不使用 K/M/B 缩写",
+    !/\d(?:\.\d+)?[KMB]\b/i.test(openState.contextText || ""),
+    openState.contextText,
   );
 
   // 键盘监听已按设计移除（Esc 不关闭弹层），因此这里不再派发 Esc，也不再有对应断言
@@ -194,12 +280,13 @@ try {
   // 收尾仍走设计好的「点击外部关闭」路径，避免把弹层打开状态留给使用者；这里不产生断言。
   await evaluate(
     ws,
-    `(() => {
+    `(async () => {
     if (!document.getElementById('tui-detail-dialog')) return 'no-dialog';
     document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
     if (document.getElementById('tui-detail-dialog')) {
       document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
     }
+    await new Promise((resolve) => setTimeout(resolve, 250));
     return document.getElementById('tui-detail-dialog') ? 'still-open' : 'closed';
   })()`,
   );

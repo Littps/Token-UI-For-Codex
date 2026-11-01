@@ -1,8 +1,8 @@
 // Tokens UI For Codex —— Codex++ 用户脚本（统计条 + 详情弹层）
-// 作者：Littps · 许可：MIT · 协议：tokens-ui-for-codex（签名 schema v3）
+// 作者：Littps · 许可：MIT · 协议：tokens-ui-for-codex（签名 schema v4）
 //
 // 作用：把紧凑的 Token 统计条挂到输入区右下的「上下文用量圆圈」左侧，并提供左键单击打开的详情弹层。
-// 依赖：本地监控进程 `node token-stats.mjs --watch --cdp`（经本地 CDP 推送签名 schema v3 负载）。
+// 依赖：本地监控进程 `node token-stats.mjs --watch --cdp`（经本地 CDP 推送签名 schema v4 负载）。
 // 边界：不修改 Codex 的 React bundle、不注册任何键盘监听、不读取或展示用户消息正文。
 // 安装：把本文件放入 %APPDATA%\Codex++\user_scripts\ ，并在 Codex++ 中启用用户脚本。
 (() => {
@@ -11,7 +11,12 @@
   // The widget is inserted beside Codex's native context ring. It deliberately
   // avoids patching React internals or showing a floating panel.
   const PROTOCOL_NAME = "tokens-ui-for-codex";
-  const PROTOCOL_SCHEMA_VERSION = 3;
+  const PROTOCOL_SCHEMA_VERSION = 4;
+  const AUTH_VERSION = 2;
+  const AUTH_DOMAIN = "tokens-ui-for-codex/auth-v2";
+  const AUTH_KEY_ID_PATTERN = /^[0-9a-f]{32}$/;
+  const AUTH_NONCE_PATTERN = /^[0-9a-f]{32}$/;
+  const AUTH_MAC_PATTERN = /^[0-9a-f]{64}$/;
   const PROTOCOL_CAPABILITIES = [
     "session-total",
     "current-prompt-total",
@@ -25,17 +30,21 @@
     "health-snapshot",
     "current-turn-request-count",
     "signed-payload",
+    "auth-v2",
     "robust-speed",
+    "timing-v1",
+    "history-range-v1",
+    "context-breakdown-estimated-v1",
   ];
+  const INSTALL_FLAG = "__tuiForCodexNativeUiInstalled";
+  if (window[INSTALL_FLAG]) return;
+  window[INSTALL_FLAG] = true;
   window.__tuiForCodexProtocol = {
     protocolName: PROTOCOL_NAME,
     protocolVersion: PROTOCOL_SCHEMA_VERSION,
     supportedSchemaVersions: [PROTOCOL_SCHEMA_VERSION],
     capabilities: PROTOCOL_CAPABILITIES.slice(),
   };
-  const INSTALL_FLAG = "__tuiForCodexNativeUiInstalled";
-  if (window[INSTALL_FLAG]) return;
-  window[INSTALL_FLAG] = true;
 
   const ROOT_ID = "tui-native";
   const STYLE_ID = "tui-native-style";
@@ -54,6 +63,17 @@
   const REQUEST_WINDOW_CLOSED = 0;
   const REQUEST_WINDOW_OPEN = 10;
   const REQUEST_WINDOW_STEP = 20;
+  const RANGE_STORAGE_KEY = "tokens-ui-for-codex.stats-range";
+  const RANGE_CACHE_STORAGE_KEY = "tokens-ui-for-codex.range-cache.v1";
+  const RANGE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  const RANGE_VALUES = ["today", "3d", "7d", "30d", "all"];
+  const RANGE_LABELS = {
+    today: "今日",
+    "3d": "近 3 天",
+    "7d": "近 7 日",
+    "30d": "近 30 日",
+    all: "全部",
+  };
 
   const state = {
     data: null,
@@ -65,6 +85,7 @@
     themeObserver: null,
     mountQueued: false,
     dialog: null,
+    dialogClosingTimer: 0,
     previousFocus: null,
     protocolError: "",
     // 悬浮冻结（方案甲）：指针停留在统计条上时，冻结对统计条的一切写入
@@ -72,25 +93,102 @@
     // 当前声明的推送窗口（弹层关闭 -> 极简；打开 -> 展开）
     windowTurns: TURN_WINDOW_CLOSED,
     windowRequests: REQUEST_WINDOW_CLOSED,
+    range: "all",
+    rangeRequestActive: false,
+    rangeCache: new Map(),
+    lastExpandedData: null,
+    lastExpandedAt: 0,
+    detailRenderFromCache: false,
+    rangeRenderFromCache: false,
     // 由监控下发（方案乙）；未收到前用 Infinity，保证不误伤
     turnsLimit: Infinity,
     requestsLimit: Infinity,
     // 折叠态陈旧检测：最近一次收到推送的时间（空闲心跳 5s / 运行中 1s；展开态不心跳）
     lastPayloadAt: 0,
     monitorStale: false,
+    payloadDataStale: false,
     themeTimer: 0,
     // 上一份负载的会话总量，用于识别「切换了会话」（总量回退）
     lastSessionTotal: null,
     lastRenderSignature: "",
   };
 
+  try {
+    const savedRange = localStorage.getItem(RANGE_STORAGE_KEY);
+    if (RANGE_VALUES.includes(savedRange)) state.range = savedRange;
+  } catch {}
+  loadRangeCache();
+
   // 把当前窗口写进 <html>，等监控下一次巡检读到（最长 1 秒）后按需推送。
   function publishWindow() {
     try {
       document.documentElement.setAttribute("data-tui-window", state.windowTurns + ":" + state.windowRequests);
+      document.documentElement.setAttribute("data-tui-range", state.rangeRequestActive ? state.range : "");
     } catch (e) {}
   }
   publishWindow();
+
+  function cloneCacheValue(value) {
+    try {
+      return structuredClone(value);
+    } catch {
+      return JSON.parse(JSON.stringify(value));
+    }
+  }
+
+  function loadRangeCache() {
+    try {
+      const raw = localStorage.getItem(RANGE_CACHE_STORAGE_KEY);
+      if (!raw) return;
+      const snapshot = JSON.parse(raw);
+      if (!snapshot || snapshot.v !== 1 || snapshot.schemaVersion !== PROTOCOL_SCHEMA_VERSION) return;
+      const now = Date.now();
+      for (const range of RANGE_VALUES) {
+        const entry = snapshot.ranges && snapshot.ranges[range];
+        if (!entry || validateRangeSummaryPayload(entry.summary)) continue;
+        if (entry.summary.range !== range) continue;
+        const savedAtMs = Date.parse(entry.savedAt);
+        if (!Number.isFinite(savedAtMs) || now - savedAtMs > RANGE_CACHE_MAX_AGE_MS) continue;
+        state.rangeCache.set(range, { summary: cloneCacheValue(entry.summary), savedAt: entry.savedAt });
+      }
+    } catch {}
+  }
+
+  function persistRangeCache() {
+    try {
+      const ranges = {};
+      for (const [range, entry] of state.rangeCache) {
+        ranges[range] = { summary: entry.summary, savedAt: entry.savedAt };
+      }
+      localStorage.setItem(
+        RANGE_CACHE_STORAGE_KEY,
+        JSON.stringify({ v: 1, schemaVersion: PROTOCOL_SCHEMA_VERSION, ranges }),
+      );
+    } catch {}
+  }
+
+  function rememberRangeSummary(summary) {
+    if (validateRangeSummaryPayload(summary)) return;
+    const previous = state.rangeCache.get(summary.range);
+    if (previous && JSON.stringify(previous.summary) === JSON.stringify(summary)) return;
+    state.rangeCache.set(summary.range, {
+      summary: cloneCacheValue(summary),
+      savedAt: new Date().toISOString(),
+    });
+    persistRangeCache();
+  }
+
+  function cachedRangeSummary(range) {
+    const entry = state.rangeCache.get(range);
+    if (!entry) return null;
+    const savedAtMs = Date.parse(entry.savedAt);
+    if (!Number.isFinite(savedAtMs) || Date.now() - savedAtMs > RANGE_CACHE_MAX_AGE_MS) {
+      state.rangeCache.delete(range);
+      persistRangeCache();
+      return null;
+    }
+    return entry;
+  }
 
   function fmtShort(value) {
     if (value == null) return "--";
@@ -107,6 +205,21 @@
     const n = Number(value);
     if (!Number.isFinite(n)) return "--";
     return n.toLocaleString("en-US");
+  }
+
+  function fmtDurationMs(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return "--";
+    if (n < 1000) return `${Math.round(n)}ms`;
+    if (n < 60000) return `${(n / 1000).toFixed(1)}s`;
+    if (n < 3600000) {
+      const minutes = Math.floor(n / 60000);
+      const seconds = Math.floor((n % 60000) / 1000);
+      return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+    }
+    const hours = Math.floor(n / 3600000);
+    const minutes = Math.floor((n % 3600000) / 60000);
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
   }
 
   function numberOrNull(value) {
@@ -134,12 +247,103 @@
     return value == null || isNonNegativeNumber(value);
   }
 
+  function isValidCachePair(input, cached) {
+    return (
+      input == null || cached == null || (isNonNegativeNumber(input) && isNonNegativeNumber(cached) && cached <= input)
+    );
+  }
+
+  function validateHealthPayload(health) {
+    if (!health || typeof health !== "object" || Array.isArray(health)) return "健康状态无效";
+    const statuses = [
+      "starting",
+      "healthy",
+      "waiting-for-cdp",
+      "waiting-for-page",
+      "waiting-for-data",
+      "target-selection-required",
+      "protocol-mismatch",
+      "stale-data",
+      "recovering",
+      "failed",
+    ];
+    if (!statuses.includes(health.status)) return "健康状态值无效";
+    if (!["idle", "retrying", "recovered", "failed"].includes(health.recoveryState)) {
+      return "恢复状态值无效";
+    }
+    if (health.platform !== "windows") return "健康平台值无效";
+    for (const key of [
+      "platformSupported",
+      "nodeSupported",
+      "cdpReachable",
+      "pageAttached",
+      "dataFresh",
+      "monitorRunning",
+    ]) {
+      if (typeof health[key] !== "boolean") return `健康字段 ${key} 无效`;
+    }
+    if (!["auto", "focused", "manual"].includes(health.targetMode)) return "目标模式无效";
+    if (!["unknown", "single", "focused", "visible", "manual", "required"].includes(health.targetSelection)) {
+      return "目标选择状态无效";
+    }
+    if (!Number.isSafeInteger(health.targetCount) || health.targetCount < 0) return "目标数量无效";
+    for (const key of ["lastSuccessAt", "lastErrorAt", "lastErrorCode"]) {
+      if (health[key] != null && typeof health[key] !== "string") return `健康字段 ${key} 无效`;
+    }
+    if (health.autostartInstalled != null && typeof health.autostartInstalled !== "boolean") {
+      return "自启状态无效";
+    }
+    if (!["unknown", "missing", "ready", "invalid"].includes(health.installationState)) {
+      return "安装状态无效";
+    }
+    return "";
+  }
+
+  function validateRangeSummaryPayload(summary) {
+    if (!summary || typeof summary !== "object" || Array.isArray(summary)) return "rangeSummary 字段无效";
+    if (!RANGE_VALUES.includes(summary.range)) return "rangeSummary.range 字段无效";
+    for (const key of ["available", "cacheComplete"]) {
+      if (typeof summary[key] !== "boolean") return `rangeSummary.${key} 字段无效`;
+    }
+    for (const key of [
+      "retentionDays",
+      "sessionCount",
+      "turnCount",
+      "requestCount",
+      "input",
+      "cached",
+      "output",
+      "total",
+      "toolCallCount",
+      "timingSampleCount",
+      "ttftSampleCount",
+    ]) {
+      if (!isNonNegativeNumber(summary[key])) return `rangeSummary.${key} 字段无效`;
+    }
+    for (const key of ["ttftAvgMs", "effectiveMs", "effectiveTps"]) {
+      if (!isNullableNonNegativeNumber(summary[key])) return `rangeSummary.${key} 字段无效`;
+    }
+    for (const key of ["wallMs", "toolWallMs"]) {
+      if (!isNullableNonNegativeNumber(summary[key])) return `rangeSummary.${key} 字段无效`;
+    }
+    for (const key of ["cutoffAt", "generatedAt", "availableFrom", "availableThrough"]) {
+      if (summary[key] != null && (typeof summary[key] !== "string" || !Number.isFinite(Date.parse(summary[key])))) {
+        return `rangeSummary.${key} 字段无效`;
+      }
+    }
+    return "";
+  }
+
   function validateIncomingPayload(data) {
     if (!data || typeof data !== "object" || Array.isArray(data)) return { ok: false, error: "负载不是对象" };
     if (data.protocolName !== PROTOCOL_NAME) return { ok: false, error: "统计协议名称不匹配" };
     if (data.schemaVersion !== PROTOCOL_SCHEMA_VERSION) return { ok: false, error: "统计协议版本不匹配" };
     if (data.authRequired !== true) return { ok: false, error: "统计协议要求签名负载" };
-    if (!Array.isArray(data.capabilities) || !data.capabilities.includes("health-snapshot"))
+    if (
+      !Array.isArray(data.capabilities) ||
+      !data.capabilities.includes("health-snapshot") ||
+      !data.capabilities.includes("auth-v2")
+    )
       return { ok: false, error: "统计协议能力不匹配" };
     for (const key of [
       "requestCount",
@@ -168,6 +372,10 @@
       "turnCached",
       "turnTps",
       "turnWallTps",
+      "turnWallMs",
+      "turnToolWallMs",
+      "turnTtftMs",
+      "turnTimingCoverage",
       "sessionTps",
       "lastRequestTps",
       "genEstimateTps",
@@ -180,13 +388,59 @@
     for (const key of ["effectiveSampleCount", "effectiveWindow"]) {
       if (data[key] != null && !isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
     }
+    for (const key of ["sessionWallMs", "sessionToolWallMs", "sessionTtftAvgMs"]) {
+      if (data[key] != null && !isNullableNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
+    }
+    for (const key of ["sessionToolCallCount", "sessionTimingSampleCount"]) {
+      if (data[key] != null && !isNonNegativeNumber(data[key])) return { ok: false, error: `${key} 字段无效` };
+    }
+    if (data.turnToolCallCount != null && !isNonNegativeNumber(data.turnToolCallCount)) {
+      return { ok: false, error: "turnToolCallCount 字段无效" };
+    }
+    if (data.turnTimingQuality != null && !["high", "medium", "low"].includes(data.turnTimingQuality)) {
+      return { ok: false, error: "turnTimingQuality 字段无效" };
+    }
+    if (data.contextBreakdown != null) {
+      const breakdown = data.contextBreakdown;
+      if (!breakdown || typeof breakdown !== "object" || Array.isArray(breakdown)) {
+        return { ok: false, error: "contextBreakdown 字段无效" };
+      }
+      if (breakdown.estimated !== true || !Number.isInteger(breakdown.estimatorVersion)) {
+        return { ok: false, error: "contextBreakdown 元数据无效" };
+      }
+      for (const key of ["systemPromptTokens", "toolDefinitionTokens", "conversationTokens", "otherTokens"]) {
+        if (breakdown[key] != null && (!Number.isSafeInteger(breakdown[key]) || breakdown[key] < 0)) {
+          return { ok: false, error: `contextBreakdown.${key} 无效` };
+        }
+      }
+      const breakdownTotal =
+        (breakdown.systemPromptTokens || 0) +
+        (breakdown.toolDefinitionTokens || 0) +
+        (breakdown.conversationTokens || 0) +
+        (breakdown.otherTokens || 0);
+      if (Number.isFinite(data.contextUsed) && breakdownTotal !== Math.floor(data.contextUsed)) {
+        return { ok: false, error: "contextBreakdown 总和与 contextUsed 不一致" };
+      }
+    }
+    if (data.rangeSummary != null) {
+      const error = validateRangeSummaryPayload(data.rangeSummary);
+      if (error) return { ok: false, error };
+    }
     if (data.speedTimingConfidence != null && !["high", "medium", "low"].includes(data.speedTimingConfidence)) {
       return { ok: false, error: "speedTimingConfidence 字段无效" };
     }
     if (data.compactSpeedConfidence != null && !["high", "medium", "low"].includes(data.compactSpeedConfidence)) {
       return { ok: false, error: "compactSpeedConfidence 字段无效" };
     }
-    if (data.snapshot != null && typeof data.snapshot !== "boolean") return { ok: false, error: "snapshot 字段无效" };
+    for (const key of ["turnsTruncated", "requestDetailsTruncated", "sessionChanged", "snapshot"]) {
+      if (typeof data[key] !== "boolean") return { ok: false, error: `${key} 字段无效` };
+    }
+    if (!Number.isSafeInteger(data.turnsLimit) || data.turnsLimit < 0 || data.turnsLimit > 500) {
+      return { ok: false, error: "turnsLimit 字段无效" };
+    }
+    if (!Number.isSafeInteger(data.requestsLimit) || data.requestsLimit < 0 || data.requestsLimit > 500) {
+      return { ok: false, error: "requestsLimit 字段无效" };
+    }
     // 这两个上限原本写成「等于监控侧上限」，形成隐藏耦合：
     // 一旦监控侧放宽上限而面板未同步，面板会拒收整个负载 → 统计条什么数字都不显示，极难排查。
     // 因此这里只拦「荒谬值」（防御异常/恶意负载），正常超限由监控侧负责截断。
@@ -210,6 +464,19 @@
       for (const key of ["cached", "uncached"]) {
         if (!isNullableNonNegativeNumber(turn[key])) return { ok: false, error: `轮次摘要 ${key} 字段无效` };
       }
+      for (const key of ["wallMs", "toolWallMs", "ttftMs", "timingCoverage"]) {
+        if (turn[key] != null && !isNullableNonNegativeNumber(turn[key]))
+          return { ok: false, error: `轮次摘要 ${key} 字段无效` };
+      }
+      if (turn.toolCallCount != null && !isNonNegativeNumber(turn.toolCallCount)) {
+        return { ok: false, error: "轮次摘要 toolCallCount 字段无效" };
+      }
+      if (turn.timingQuality != null && !["high", "medium", "low"].includes(turn.timingQuality)) {
+        return { ok: false, error: "轮次摘要 timingQuality 字段无效" };
+      }
+      if (!isValidCachePair(turn.input, turn.cached)) {
+        return { ok: false, error: "轮次摘要缓存值超过输入" };
+      }
     }
     for (const request of data.requestDetails) {
       if (!request || !Number.isInteger(request.index) || request.index < 1 || typeof request.time !== "string") {
@@ -218,10 +485,83 @@
       for (const key of ["input", "cached", "uncached", "output", "total"]) {
         if (!isNullableNonNegativeNumber(request[key])) return { ok: false, error: `请求明细 ${key} 字段无效` };
       }
+      if (!isValidCachePair(request.input, request.cached)) {
+        return { ok: false, error: "请求明细缓存值超过输入" };
+      }
     }
-    if (typeof data.updatedAt !== "string" || !data.updatedAt) return { ok: false, error: "更新时间无效" };
-    if (data.health && typeof data.health !== "object") return { ok: false, error: "健康状态无效" };
+    if (!isValidCachePair(data.sessionInput, data.sessionCached)) {
+      return { ok: false, error: "会话缓存值超过输入" };
+    }
+    if (!isValidCachePair(data.turnInput, data.turnCached)) {
+      return { ok: false, error: "当前轮缓存值超过输入" };
+    }
+    if (data.requestDetailTotal < data.requestDetails.length) {
+      return { ok: false, error: "请求明细总数小于已加载条数" };
+    }
+    if (data.turnTotalCount < data.turns.length) {
+      return { ok: false, error: "轮次总数小于已加载轮数" };
+    }
+    if (data.currentTurnIndex > data.turnTotalCount) {
+      return { ok: false, error: "当前轮序号超过轮次总数" };
+    }
+    if (typeof data.updatedAt !== "string" || !Number.isFinite(Date.parse(data.updatedAt))) {
+      return { ok: false, error: "更新时间无效" };
+    }
+    const healthError = validateHealthPayload(data.health);
+    if (healthError) return { ok: false, error: healthError };
     return { ok: true, error: "" };
+  }
+
+  function payloadCoversCurrentWindow(data) {
+    if (!data) return false;
+    const wantedTurns = Math.min(state.windowTurns, data.turnTotalCount);
+    const wantedRequests = Math.min(state.windowRequests, data.currentTurnRequestCount);
+    return data.turns.length >= wantedTurns && data.requestDetails.length >= wantedRequests;
+  }
+
+  function hasExpandedDetailPayload(data) {
+    return !!data && (data.turns.length > TURN_WINDOW_CLOSED || data.requestDetails.length > 0);
+  }
+
+  function effectiveRangeSummary(data) {
+    if (data && data.rangeSummary && data.rangeSummary.range === state.range && !state.detailRenderFromCache) {
+      state.rangeRenderFromCache = false;
+      return { summary: data.rangeSummary, savedAt: null };
+    }
+    const cached = cachedRangeSummary(state.range);
+    if (data && data.rangeSummary && data.rangeSummary.range === state.range && state.detailRenderFromCache) {
+      state.rangeRenderFromCache = true;
+      return {
+        summary: data.rangeSummary,
+        savedAt: (cached && cached.savedAt) || data.updatedAt || new Date().toISOString(),
+      };
+    }
+    state.rangeRenderFromCache = !!cached;
+    return cached;
+  }
+
+  function detailDataForRender() {
+    const current = state.data;
+    if (!current) {
+      state.detailRenderFromCache = false;
+      return null;
+    }
+    if (payloadCoversCurrentWindow(current) && !current.snapshot) {
+      state.detailRenderFromCache = false;
+      return current;
+    }
+    if (state.lastExpandedData && Date.now() - state.lastExpandedAt <= RANGE_CACHE_MAX_AGE_MS) {
+      state.detailRenderFromCache = true;
+      return {
+        ...state.lastExpandedData,
+        health: current.health,
+        updatedAt: current.updatedAt,
+      };
+    }
+    state.lastExpandedData = null;
+    state.lastExpandedAt = 0;
+    state.detailRenderFromCache = false;
+    return current;
   }
 
   function adoptData(nextData) {
@@ -229,12 +569,25 @@
       state.data = null;
       state.protocolError = "";
       state.dataKey = "";
+      state.payloadDataStale = false;
       return;
     }
     const validation = validateIncomingPayload(nextData);
     state.protocolError = validation.ok ? "" : validation.error;
     state.data = validation.ok ? nextData : null;
     state.dataKey = validation.ok ? dataKeyOf(nextData) : "";
+    state.payloadDataStale = validation.ok && !nextData.snapshot && Date.now() - Date.parse(nextData.updatedAt) > 90000;
+    if (!validation.ok) return;
+    if (nextData.sessionChanged === true) {
+      state.lastExpandedData = null;
+      state.lastExpandedAt = 0;
+      state.detailRenderFromCache = false;
+    }
+    if (nextData.rangeSummary) rememberRangeSummary(nextData.rangeSummary);
+    if (!nextData.snapshot && hasExpandedDetailPayload(nextData)) {
+      state.lastExpandedData = nextData;
+      state.lastExpandedAt = Date.now();
+    }
   }
 
   function healthLabel(health) {
@@ -252,6 +605,86 @@
       failed: "监控异常",
     };
     return labels[status] || "状态未知";
+  }
+
+  function healthErrorDetails(code) {
+    const details = {
+      CDP_UNREACHABLE: {
+        reason: "无法连接 Codex 调试端口",
+        action: "确认 Codex 正在运行，并检查 Codex++ 的 CDP 设置",
+      },
+      CDP_PAGE_NOT_FOUND: {
+        reason: "调试端口可用，但没有找到 Codex 页面",
+        action: "重新打开 Codex 主窗口，必要时重启 Codex",
+      },
+      CDP_PAGE_NOT_READY: {
+        reason: "Codex++ Token UI 尚未加载到当前页面",
+        action: "确认 Codex++ 用户脚本已启用，然后重新加载页面",
+      },
+      CDP_TARGET_NOT_FOUND: {
+        reason: "指定的 Codex 窗口目标不存在",
+        action: "在详情面板中重新选择窗口或恢复自动选择",
+      },
+      CDP_TARGET_SELECTION_REQUIRED: {
+        reason: "检测到多个 Codex 窗口，无法自动确定目标",
+        action: "切回需要统计的 Codex 窗口，或使用目标选择入口",
+      },
+      CDP_PROTOCOL_MISMATCH: {
+        reason: "页面与监控的统计协议版本不一致",
+        action: "重新运行安装器，并重新加载 Codex 页面",
+      },
+      CDP_EXPRESSION_BLOCKED: {
+        reason: "监控尝试读取未获授权的 CDP 页面表达式",
+        action: "重新运行安装器，并检查安全软件是否修改了页面",
+      },
+      PAYLOAD_INVALID: {
+        reason: "统计负载未通过完整性或字段校验",
+        action: "重新安装插件；若仍出现，请检查本地 watch 日志",
+      },
+      MONITOR_ERROR: {
+        reason: "监控发生未分类异常",
+        action: "检查本地健康快照和 watch 日志",
+      },
+    };
+    return details[code] || { reason: "其他（" + code + "）", action: "检查本地 watch 日志定位详细原因" };
+  }
+
+  function tooltipTime(value) {
+    if (!value) return "无";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString();
+  }
+
+  function healthTooltip(data) {
+    const health = data && data.health ? data.health : null;
+    const localErrorCode = state.protocolError ? "CLIENT_PROTOCOL_INVALID" : null;
+    const code = localErrorCode || (health && health.lastErrorCode) || null;
+    const localDetails = state.protocolError
+      ? {
+          reason: "本地负载校验失败：" + state.protocolError,
+          action: "重新加载 Codex++ 用户脚本和监控进程",
+        }
+      : null;
+    const details = localDetails || (code ? healthErrorDetails(code) : null);
+    const status = data ? healthLabel(health) : state.protocolError ? "协议错误" : "等待监控数据";
+    const recoveryLabels = {
+      idle: "待命",
+      retrying: "重试中",
+      recovered: "已恢复",
+      failed: "恢复失败",
+    };
+    const lines = ["运行状态：" + status, "错误码：" + (code || "无"), "原因：" + (details ? details.reason : status)];
+    if (health) {
+      lines.push("恢复状态：" + (recoveryLabels[health.recoveryState] || health.recoveryState || "未知"));
+      lines.push("CDP 通道：" + (health.cdpReachable ? "可用" : "不可用"));
+      lines.push("页面附着：" + (health.pageAttached ? "已连接" : "未连接"));
+      lines.push("数据新鲜度：" + (health.dataFresh ? "新鲜" : "暂不可用"));
+      if (code) lines.push("错误时间：" + tooltipTime(health.lastErrorAt));
+      lines.push("最近成功：" + tooltipTime(health.lastSuccessAt));
+    }
+    if (details) lines.push("建议：" + details.action);
+    return lines.join("\n");
   }
 
   function percent(value, total) {
@@ -298,6 +731,19 @@
       data.sessionCached,
       data.sessionOutput,
       data.contextUsed,
+      data.contextBreakdown && JSON.stringify(data.contextBreakdown),
+      data.sessionWallMs,
+      data.sessionToolWallMs,
+      data.sessionToolCallCount,
+      data.sessionTtftAvgMs,
+      data.sessionTimingSampleCount,
+      data.rangeSummary && JSON.stringify(data.rangeSummary),
+      data.turnWallMs,
+      data.turnToolWallMs,
+      data.turnToolCallCount,
+      data.turnTtftMs,
+      data.turnTimingCoverage,
+      data.turnTimingQuality,
       data.currentTurnIndex,
       data.turnTotal,
       data.turnInput,
@@ -368,6 +814,19 @@
   --tui-glass-border: rgba(255, 255, 255, .14);
   --tui-glass-highlight: rgba(255, 255, 255, .10);
   color-scheme: dark;
+}
+/* 性能较强设备使用更通透的强磨砂；采样掉帧时由脚本降级。 */
+#${DIALOG_ID}.tui-glass-strong {
+  --tui-glass-bg: rgba(255, 255, 255, .59);
+  --tui-glass-border: rgba(255, 255, 255, .68);
+  --tui-glass-highlight: rgba(255, 255, 255, .78);
+  --tui-glass-blur: 22px;
+}
+#${DIALOG_ID}.tui-glass-strong[data-tui-theme="dark"] {
+  --tui-glass-bg: rgba(22, 22, 25, .51);
+  --tui-glass-border: rgba(255, 255, 255, .18);
+  --tui-glass-highlight: rgba(255, 255, 255, .13);
+  --tui-glass-blur: 24px;
 }
 #${ROOT_ID} {
   display: inline-flex;
@@ -457,7 +916,13 @@
   font-size: 12px;
   line-height: 1.4;
 }
+#${DIALOG_ID} [hidden] { display: none !important; }
 #${DIALOG_ID}[data-open="true"] { display: flex; animation: tui-dialog-in 140ms ease-out; }
+#${DIALOG_ID}[data-open="closing"] {
+  display: flex;
+  pointer-events: none;
+  animation: tui-dialog-out 110ms ease-in forwards;
+}
 /* 细噪点：静态 SVG（feTurbulence），只做一次合成，不参与模糊计算 */
 #${DIALOG_ID}::before {
   content: "";
@@ -482,8 +947,13 @@
   from { opacity: 0; transform: scale(.98); }
   to { opacity: 1; transform: scale(1); }
 }
+@keyframes tui-dialog-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to { opacity: 0; transform: scale(.985) translateY(-2px); }
+}
 @media (prefers-reduced-motion: reduce) {
-  #${DIALOG_ID}[data-open="true"] { animation: none; }
+  #${DIALOG_ID}[data-open="true"],
+  #${DIALOG_ID}[data-open="closing"] { animation: none; }
 }
 @media (prefers-reduced-transparency: reduce) {
   #${DIALOG_ID} { background: var(--tui-surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
@@ -503,9 +973,18 @@
 #${DIALOG_ID} .tui-dialog-title { font-size: 14px; font-weight: 650; }
       #${DIALOG_ID} .tui-dialog-title-row { display: flex; align-items: center; gap: 8px; }
       #${DIALOG_ID} .tui-dialog-health-dot {
+        position: relative;
         width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
         background: var(--color-warning, #d39e00);
         box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent);
+        cursor: help;
+      }
+      #${DIALOG_ID} .tui-dialog-health-dot::before {
+        content: ""; position: absolute; inset: -5px; border-radius: 50%;
+      }
+      #${DIALOG_ID} .tui-dialog-health-dot:focus-visible {
+        outline: 2px solid var(--color-accent, #6e7bf2);
+        outline-offset: 3px;
       }
       #${DIALOG_ID} .tui-dialog-health-dot--green { background: #2fb344; }
       #${DIALOG_ID} .tui-dialog-health-dot--yellow { background: #d39e00; }
@@ -554,10 +1033,58 @@
   letter-spacing: .02em;
   text-transform: uppercase;
 }
+#${DIALOG_ID} .tui-range-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--tui-text-dim);
+  font-size: 11px;
+}
+#${DIALOG_ID} .tui-range-select {
+  min-width: 92px;
+  padding: 4px 24px 4px 8px;
+  color: var(--tui-text);
+  background: var(--tui-surface-2);
+  border: 1px solid var(--tui-border);
+  border-radius: 7px;
+  font: inherit;
+  cursor: pointer;
+}
+#${DIALOG_ID} .tui-range-select:focus-visible {
+  outline: 2px solid var(--color-accent, var(--color-primary, #6ea8fe));
+  outline-offset: 1px;
+}
 #${DIALOG_ID} .tui-dialog-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+#${DIALOG_ID} .tui-dialog-timing {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 7px;
+  padding: 7px 9px;
+  color: var(--tui-text-dim);
+  background: color-mix(in srgb, var(--tui-surface-2) 72%, transparent);
+  border-top: 1px solid var(--color-border, var(--border-color, rgba(127, 127, 127, .14)));
+  border-radius: 7px;
+  font-size: 10px;
+  line-height: 1.25;
+}
+#${DIALOG_ID} .tui-dialog-timing-item {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#${DIALOG_ID} .tui-dialog-timing-label { opacity: .72; }
+#${DIALOG_ID} .tui-dialog-timing-value {
+  color: var(--tui-text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 #${DIALOG_ID} .tui-dialog-security {
   margin-top: 8px;
@@ -647,11 +1174,48 @@
   border-radius: 999px;
 }
 #${DIALOG_ID} .tui-dialog-context-fill {
+  display: flex;
+  gap: 1px;
   width: 0;
   height: 100%;
   background: var(--color-accent, var(--color-primary, #6ea8fe));
   border-radius: inherit;
   transition: width .16s ease;
+}
+#${DIALOG_ID} .tui-context-segment {
+  min-width: 0;
+  height: 100%;
+}
+#${DIALOG_ID} .tui-context-segment--system { background: #a3a3a3; }
+#${DIALOG_ID} .tui-context-segment--tools { background: #a78bfa; }
+#${DIALOG_ID} .tui-context-segment--messages { background: #6ea8fe; }
+#${DIALOG_ID} .tui-context-segment--other { background: rgba(127, 127, 127, .56); }
+#${DIALOG_ID} .tui-dialog-context-legend {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+#${DIALOG_ID} .tui-context-legend-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  color: var(--tui-text-dim);
+  font-size: 10px;
+}
+#${DIALOG_ID} .tui-context-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+#${DIALOG_ID} .tui-context-swatch--system { background: #a3a3a3; }
+#${DIALOG_ID} .tui-context-swatch--tools { background: #a78bfa; }
+#${DIALOG_ID} .tui-context-swatch--messages { background: #6ea8fe; }
+#${DIALOG_ID} .tui-context-swatch--other { background: rgba(127, 127, 127, .56); }
+#${DIALOG_ID} .tui-context-legend-value {
+  color: var(--tui-text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 550;
 }
 #${DIALOG_ID} .tui-dialog-list {
   overflow: hidden;
@@ -785,6 +1349,78 @@
     const grid = textNode("div", "tui-dialog-grid");
     for (const item of items) grid.append(dialogCard(item[0], item[1], item[2]));
     return grid;
+  }
+
+  function dialogTimingStrip(items) {
+    const node = textNode("div", "tui-dialog-timing");
+    const values = {};
+    for (const item of items) {
+      const row = textNode("div", "tui-dialog-timing-item");
+      const label = textNode("span", "tui-dialog-timing-label", item.label + " ");
+      const value = textNode("span", "tui-dialog-timing-value", "--");
+      value.title = item.title || "";
+      row.append(label, value);
+      node.append(row);
+      values[item.key] = value;
+    }
+    return { node, values };
+  }
+
+  function dialogRangeControl() {
+    const wrap = textNode("div", "tui-dialog-range");
+    const row = textNode("div", "tui-range-row");
+    const label = textNode("span", "", "时间范围");
+    const select = textNode("select", "tui-range-select");
+    select.setAttribute("aria-label", "统计时间范围");
+    for (const [value, text] of [
+      ["today", "今日"],
+      ["3d", "近 3 天"],
+      ["7d", "近 7 日"],
+      ["30d", "近 30 日"],
+      ["all", "全部"],
+    ]) {
+      const option = textNode("option", "", text);
+      option.value = value;
+      select.append(option);
+    }
+    select.value = state.range;
+    const status = textNode("div", "tui-dialog-range-status", "");
+    status.style.cssText = "margin:-3px 0 7px;color:var(--tui-text-dim);font-size:10px;text-align:right;";
+    select.addEventListener("change", () => {
+      if (!RANGE_VALUES.includes(select.value)) return;
+      state.range = select.value;
+      state.rangeRequestActive = true;
+      try {
+        localStorage.setItem(RANGE_STORAGE_KEY, state.range);
+      } catch {}
+      status.textContent = "按需加载中…";
+      publishWindow();
+      renderDetails();
+    });
+    select.addEventListener("click", (event) => event.stopPropagation());
+    row.append(label, select);
+    wrap.append(row, status);
+    return { wrap, select, status };
+  }
+
+  function dialogContextLegend() {
+    const node = textNode("div", "tui-dialog-context-legend");
+    const rows = {};
+    for (const item of [
+      ["system", "系统/开发指令"],
+      ["tools", "工具定义"],
+      ["messages", "对话消息"],
+      ["other", "其他/模板"],
+    ]) {
+      const row = textNode("div", "tui-context-legend-row");
+      const swatch = textNode("span", `tui-context-swatch tui-context-swatch--${item[0]}`);
+      const label = textNode("span", "", item[1]);
+      const value = textNode("span", "tui-context-legend-value", "--");
+      row.append(swatch, label, value);
+      node.append(row);
+      rows[item[0]] = { row, value };
+    }
+    return { node, rows };
   }
 
   // ---------------------------------------------------------------------------
@@ -957,7 +1593,22 @@
       output: sessionCells[5],
     };
     parts.session.tps.title = speedSampleTitle(data);
-    parts.sections.push(dialogSection("会话累计", sessionGrid));
+    const sessionBody = textNode("div", "tui-dialog-section-body");
+    const sessionTiming = dialogTimingStrip([
+      {
+        key: "wall",
+        label: "累计处理用时",
+        title: "仅累计有完整计时轮次的总耗时，不包含会话空闲时间",
+      },
+      { key: "tools", label: "工具累计", title: "按各轮工具执行时间区间并集累计，避免并行工具重复计时" },
+      { key: "ttft", label: "平均 TTFT", title: "对存在 time_to_first_token_ms 的轮次取算术平均值" },
+    ]);
+    const rangeControl = dialogRangeControl();
+    sessionBody.append(rangeControl.wrap, sessionGrid, sessionTiming.node);
+    parts.session.timing = sessionTiming.values;
+    parts.session.timingNode = sessionTiming.node;
+    parts.session.rangeControl = rangeControl;
+    parts.sections.push(dialogSection("统计信息", sessionBody));
 
     // 当前提问统计
     const turnGrid = dialogGrid([
@@ -978,14 +1629,23 @@
       output: turnCells[5],
     };
     parts.turn.tps.title = speedSampleTitle(data);
-    parts.sections.push(dialogSection("当前提问统计", turnGrid));
+    const turnBody = textNode("div", "tui-dialog-section-body");
+    const turnTiming = dialogTimingStrip([
+      { key: "wall", label: "本轮总用时", title: "当前轮 task_complete 的总耗时" },
+      { key: "tools", label: "工具用时", title: "当前轮并行工具区间并集" },
+      { key: "ttft", label: "TTFT", title: "当前轮 time_to_first_token_ms" },
+    ]);
+    turnBody.append(turnGrid, turnTiming.node);
+    parts.turn.timing = turnTiming.values;
+    parts.turn.timingNode = turnTiming.node;
+    parts.sections.push(dialogSection("当前提问统计", turnBody));
 
     // 上下文使用
-    const contextValue = textNode("span", "tui-dialog-context-value", tokenText(m.contextUsed));
+    const contextValue = textNode("span", "tui-dialog-context-value", fmtInt(m.contextUsed));
     const contextLimit = textNode(
       "span",
       "tui-dialog-muted",
-      m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`,
+      m.modelContextWindow == null ? "上下文上限未知" : `上限 ${fmtInt(m.modelContextWindow)}`,
     );
     const contextTop = textNode("div", "tui-dialog-context-top");
     contextTop.append(contextValue, contextLimit);
@@ -994,30 +1654,23 @@
     contextFill.style.width = contextPercent == null ? "0%" : `${contextPercent}%`;
     const contextBar = textNode("div", "tui-dialog-context-bar");
     contextBar.append(contextFill);
+    const contextLegend = dialogContextLegend();
+    const contextEstimateNote = textNode("div", "tui-dialog-muted", "本地估算，不代表服务端计费分类");
+    contextEstimateNote.style.marginTop = "7px";
+    contextEstimateNote.style.opacity = ".78";
     const contextBox = textNode("div", "tui-dialog-context");
-    contextBox.append(contextTop, contextBar);
-    parts.context = { value: contextValue, limit: contextLimit, fill: contextFill };
+    contextBox.append(contextTop, contextBar, contextLegend.node, contextEstimateNote);
+    parts.context = {
+      value: contextValue,
+      limit: contextLimit,
+      fill: contextFill,
+      legend: contextLegend,
+      estimateNote: contextEstimateNote,
+      breakdownKey: "",
+    };
     parts.sections.push(dialogSection("上下文使用", contextBox));
 
-    // 运行状态（6 格；窗口选择/恢复已移除，多窗口与异常信息统一由「状态」格表达）
-    const health = data.health || {};
-    const healthGrid = dialogGrid([
-      ["状态", healthLabel(health)],
-      ["监控", health.monitorRunning === false ? "未运行" : "运行中"],
-      ["页面连接", health.pageAttached ? "已连接" : "等待连接"],
-      ["数据", health.dataFresh ? "最新" : "等待更新"],
-      ["模型切换", fmtInt(data.modelSwitchCount) + " 次"],
-      ["累计重置", fmtInt(data.cumulativeResetCount) + " 次"],
-    ]);
-    const healthCells = [...healthGrid.querySelectorAll(".tui-dialog-card-value")];
-    parts.health = {
-      status: healthCells[0],
-      monitor: healthCells[1],
-      page: healthCells[2],
-      data: healthCells[3],
-      modelSwitches: healthCells[4],
-      resets: healthCells[5],
-    };
+    // 运行状态详情暂停展示。保留手动启动与 CDP 安全告警，等待后续重新设计。
     const healthBox = textNode("div", "tui-dialog-health");
     const securityBox = textNode("div", "tui-dialog-security");
     securityBox.hidden = true;
@@ -1033,9 +1686,9 @@
       securityMore.textContent = securityList.hidden ? "详情" : "收起";
     });
     securityBox.append(securityText, securityMore, securityList);
-    healthBox.append(healthGrid, dialogStartButton(), securityBox);
+    healthBox.append(dialogStartButton(), securityBox);
     parts.security = { box: securityBox, text: securityText, list: securityList, more: securityMore, key: "" };
-    parts.sections.push(dialogSection("运行状态", healthBox));
+    parts.sections.push(dialogSection("监控操作", healthBox));
 
     // 当前提问请求明细（列表内容由 applyListUpdate 填充）
     const requestSection = textNode("div", "tui-dialog-section");
@@ -1074,24 +1727,36 @@
   }
 
   // 手动启动按钮：复制一条可粘贴到 Win+R 的启动命令（打开确认终端，按 Y 才执行）。
-  // 说明：Electron 渲染进程会拦截 tokens-ui-for-codex:// 协议导航（实测 anchor/window.open 均无效），
-  // 因此这里采用"复制命令 + 明确指引"的可靠方案；开始菜单入口同样可用。
+  // 优先尝试本地确认协议；Electron 若拦截协议导航，则同时复制 Win+R 备用命令。
+  // 页面不会静默启动进程，最终仍由 start-monitor.ps1 检查实例并要求用户输入 Y。
   function dialogStartButton() {
     const wrap = textNode("div", "tui-dialog-start");
-    const button = textNode("button", "tui-dialog-action", "启动监控");
+    const button = textNode("button", "tui-dialog-action", "启动/检查监控");
     button.type = "button";
     button.style.cssText =
       "display:block;width:100%;margin-top:8px;padding:8px 10px;font:inherit;font-size:12px;text-align:center;cursor:pointer;color:inherit;background:var(--tui-surface-2,rgba(127,127,127,.10));border:1px solid var(--tui-border,rgba(127,127,127,.28));border-radius:8px;";
     const hint = textNode(
       "div",
       "tui-dialog-start-hint",
-      "点击复制启动命令 → Win+R 粘贴回车 → 按 Y 启动（自动关闭终端）",
+      "点击请求本地确认窗口；若宿主拦截，可用复制的 Win+R 备用命令",
     );
     hint.style.cssText = "margin-top:6px;font-size:11px;line-height:1.5;text-align:center;opacity:.7;";
     // Win+R 不是 cmd.exe，不能使用 cmd 内建命令 start。
     // explorer.exe 是系统可执行文件，能稳定打开安装器创建的开始菜单快捷方式。
     const command =
       'explorer.exe "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Tokens UI For Codex - 启动监控.lnk"';
+    const requestProtocol = () => {
+      try {
+        const frame = document.createElement("iframe");
+        frame.style.display = "none";
+        frame.src = "tokens-ui-for-codex://start";
+        document.body.appendChild(frame);
+        setTimeout(() => frame.remove(), 1500);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const copyCommand = async () => {
       try {
         await navigator.clipboard.writeText(command);
@@ -1113,12 +1778,21 @@
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      button.disabled = true;
+      const protocolRequested = requestProtocol();
       copyCommand().then((ok) => {
-        hint.textContent = ok
-          ? "已复制：按 Win+R → Ctrl+V → 回车；按 Y 启动并自动关闭终端"
-          : "复制失败：请在开始菜单运行「Tokens UI For Codex - 启动监控」";
+        if (ok) {
+          hint.textContent = protocolRequested
+            ? "已请求打开确认窗口；若未出现，请按 Win+R → Ctrl+V → 回车，再按 Y"
+            : "已复制备用命令：按 Win+R → Ctrl+V → 回车，再按 Y";
+        } else {
+          hint.textContent = protocolRequested
+            ? "已请求打开确认窗口；若未出现，请从开始菜单启动"
+            : "无法打开确认窗口或复制命令，请从开始菜单启动";
+        }
         setTimeout(() => {
-          hint.textContent = "点击复制启动命令 → Win+R 粘贴回车 → 按 Y 启动（自动关闭终端）";
+          hint.textContent = "点击请求本地确认窗口；若宿主拦截，可用复制的 Win+R 备用命令";
+          button.disabled = false;
         }, 6000);
       });
     });
@@ -1167,17 +1841,63 @@
   // 增量更新：只改文本/宽度，不重建节点。返回 true 表示列表发生了结构重建。
   function updateDetailsParts(parts, data) {
     const m = detailMetrics(data);
+    const rangeCapable = Array.isArray(data.capabilities) && data.capabilities.includes("history-range-v1");
+    const rangeState = rangeCapable ? effectiveRangeSummary(data) : null;
+    const rangeSummary = rangeState ? rangeState.summary : null;
+    if (parts.session.rangeControl) {
+      parts.session.rangeControl.select.value = state.range;
+      parts.session.rangeControl.select.disabled = !rangeCapable;
+      const rangeLabel = RANGE_LABELS[state.range] || "全部";
+      if (!rangeCapable) {
+        parts.session.rangeControl.status.textContent = "当前监控不支持范围统计";
+      } else if (!rangeSummary) {
+        parts.session.rangeControl.status.textContent = "按需加载中…";
+      } else if (!rangeSummary.available) {
+        parts.session.rangeControl.status.textContent = `${rangeLabel} · 暂无本地历史`;
+      } else {
+        const cachedPrefix = rangeState.savedAt
+          ? `缓存于 ${new Date(rangeState.savedAt).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            })} · 刷新中 · `
+          : "";
+        parts.session.rangeControl.status.textContent =
+          cachedPrefix +
+          `${rangeLabel} · ${fmtInt(rangeSummary.sessionCount)} 个会话 / ` +
+          `${fmtInt(rangeSummary.turnCount)} 轮 · 最多保留 ${fmtInt(rangeSummary.retentionDays)} 天`;
+      }
+    }
 
-    setCellText(parts.session.total, tokenText(data.sessionTotal));
-    setCellText(parts.session.requests, fmtInt(data.requestCount));
-    updatePairCell(parts.session.pair, m.sessionInput, m.sessionCached);
-    setCellText(
-      parts.session.tps,
-      data.effectiveTps == null ? "-- Tokens/s" : data.effectiveTps.toFixed(1) + " Tokens/s",
-    );
-    parts.session.tps.title = speedSampleTitle(data);
-    setCellText(parts.session.uncached, tokenText(m.sessionUncached));
-    setCellText(parts.session.output, tokenText(data.sessionOutput));
+    if (rangeCapable && !rangeSummary) {
+      setCellText(parts.session.total, "--");
+      setCellText(parts.session.requests, "--");
+      updatePairCell(parts.session.pair, null, null);
+      setCellText(parts.session.tps, "-- Tokens/s");
+      parts.session.tps.title = "范围统计按需加载中";
+      setCellText(parts.session.uncached, "--");
+      setCellText(parts.session.output, "--");
+    } else {
+      const sessionTotal = rangeSummary ? rangeSummary.total : data.sessionTotal;
+      const sessionRequests = rangeSummary ? rangeSummary.requestCount : data.requestCount;
+      const sessionInput = rangeSummary ? rangeSummary.input : m.sessionInput;
+      const sessionCached = rangeSummary ? (rangeSummary.cacheComplete ? rangeSummary.cached : null) : m.sessionCached;
+      const sessionUncached =
+        sessionInput != null && sessionCached != null ? Math.max(0, sessionInput - sessionCached) : null;
+      const sessionTps = rangeSummary ? rangeSummary.effectiveTps : data.effectiveTps;
+      setCellText(parts.session.total, tokenText(sessionTotal));
+      parts.session.total.title = rangeSummary
+        ? "本地归档仅汇总可定位轮次，不等于完整线程累计；完整线程累计见紧凑条“会话”格"
+        : "完整线程累计（reset-aware 归一化）";
+      setCellText(parts.session.requests, fmtInt(sessionRequests));
+      updatePairCell(parts.session.pair, sessionInput, sessionCached);
+      setCellText(parts.session.tps, sessionTps == null ? "-- Tokens/s" : `${sessionTps.toFixed(1)} Tokens/s`);
+      parts.session.tps.title = rangeSummary
+        ? "范围有效速度 = 范围输出 token ÷ 范围有效耗时；工具执行时间已剔除"
+        : speedSampleTitle(data);
+      setCellText(parts.session.uncached, tokenText(sessionUncached));
+      setCellText(parts.session.output, tokenText(rangeSummary ? rangeSummary.output : data.sessionOutput));
+    }
 
     setCellText(parts.turn.total, tokenText(m.turnTotal));
     setCellText(parts.turn.requests, fmtInt(m.currentRequestCount));
@@ -1190,22 +1910,127 @@
     setCellText(parts.turn.uncached, tokenText(m.turnUncached));
     setCellText(parts.turn.output, tokenText(m.turnOutput));
 
-    setCellText(parts.context.value, tokenText(m.contextUsed));
+    const sessionTimingData =
+      rangeCapable && !rangeSummary
+        ? { wallMs: null, toolWallMs: null, ttftAvgMs: null, toolCallCount: 0, ttftSampleCount: 0 }
+        : rangeSummary
+          ? {
+              wallMs: rangeSummary.wallMs,
+              toolWallMs: rangeSummary.toolWallMs,
+              ttftAvgMs: rangeSummary.ttftAvgMs,
+              toolCallCount: rangeSummary.toolCallCount,
+              ttftSampleCount: rangeSummary.ttftSampleCount,
+              timingSampleCount: rangeSummary.timingSampleCount,
+              turnCount: rangeSummary.turnCount,
+            }
+          : {
+              wallMs: data.sessionWallMs,
+              toolWallMs: data.sessionToolWallMs,
+              ttftAvgMs: data.sessionTtftAvgMs,
+              toolCallCount: data.sessionToolCallCount,
+              ttftSampleCount: data.sessionTimingSampleCount,
+              timingSampleCount: data.sessionTimingSampleCount,
+              turnCount: data.currentTurnIndex || data.turnTotalCount || 0,
+            };
+    const sessionTimingValues = [sessionTimingData.wallMs, sessionTimingData.toolWallMs, sessionTimingData.ttftAvgMs];
+    parts.session.timingNode.hidden = !sessionTimingValues.some(
+      (value) => value != null && Number.isFinite(Number(value)),
+    );
+    setCellText(parts.session.timing.wall, fmtDurationMs(sessionTimingData.wallMs));
+    setCellText(parts.session.timing.tools, fmtDurationMs(sessionTimingData.toolWallMs));
+    setCellText(parts.session.timing.ttft, fmtDurationMs(sessionTimingData.ttftAvgMs));
+    parts.session.timing.tools.title =
+      Number.isFinite(sessionTimingData.toolCallCount) && sessionTimingData.toolCallCount > 0
+        ? `范围工具调用 ${fmtInt(sessionTimingData.toolCallCount)} 次；并行工具按区间并集计时`
+        : "范围工具用时";
+    parts.session.timing.wall.title =
+      rangeSummary && Number.isFinite(sessionTimingData.timingSampleCount)
+        ? `范围处理用时；有完整计时的轮次 ${fmtInt(sessionTimingData.timingSampleCount)} / ${fmtInt(
+            sessionTimingData.turnCount,
+          )}`
+        : "范围处理用时";
+    parts.session.timing.ttft.title =
+      Number.isFinite(sessionTimingData.ttftSampleCount) && sessionTimingData.ttftSampleCount > 0
+        ? `TTFT 有效样本 ${fmtInt(sessionTimingData.ttftSampleCount)} 轮`
+        : "暂无 TTFT 样本";
+
+    const currentTurn = currentTurnOf(data) || {};
+    const currentTiming = {
+      wallMs: data.turnWallMs != null ? data.turnWallMs : currentTurn.wallMs,
+      toolWallMs: data.turnToolWallMs != null ? data.turnToolWallMs : currentTurn.toolWallMs,
+      toolCallCount: data.turnToolCallCount != null ? data.turnToolCallCount : currentTurn.toolCallCount,
+      ttftMs: data.turnTtftMs != null ? data.turnTtftMs : currentTurn.ttftMs,
+      timingQuality: data.turnTimingQuality || currentTurn.timingQuality,
+    };
+    const turnTimingValues = [currentTiming.wallMs, currentTiming.toolWallMs, currentTiming.ttftMs];
+    parts.turn.timingNode.hidden = !turnTimingValues.some((value) => value != null && Number.isFinite(Number(value)));
+    setCellText(parts.turn.timing.wall, fmtDurationMs(currentTiming.wallMs));
+    setCellText(parts.turn.timing.tools, fmtDurationMs(currentTiming.toolWallMs));
+    setCellText(parts.turn.timing.ttft, fmtDurationMs(currentTiming.ttftMs));
+    parts.turn.timing.tools.title =
+      Number.isFinite(currentTiming.toolCallCount) && currentTiming.toolCallCount > 0
+        ? `本轮工具调用 ${fmtInt(currentTiming.toolCallCount)} 次；并行工具按区间并集计时`
+        : "本轮工具用时";
+    parts.turn.timing.wall.title =
+      currentTiming.timingQuality === "high" ? "来自完整 task_complete 计时" : "计时覆盖不完整，可能为回退估算";
+
+    setCellText(parts.context.value, fmtInt(m.contextUsed));
     setCellText(
       parts.context.limit,
-      m.modelContextWindow == null ? "上下文上限未知" : `上限 ${tokenText(m.modelContextWindow)}`,
+      m.modelContextWindow == null ? "上下文上限未知" : `上限 ${fmtInt(m.modelContextWindow)}`,
     );
     const contextPercent = percent(m.contextUsed, m.modelContextWindow);
     const contextWidth = contextPercent == null ? "0%" : `${contextPercent}%`;
     if (parts.context.fill.style.width !== contextWidth) parts.context.fill.style.width = contextWidth;
+    const rawBreakdown = data.contextBreakdown;
+    const rawOtherRatio =
+      rawBreakdown && Number(m.contextUsed) > 0 && rawBreakdown.otherTokens != null
+        ? Number(rawBreakdown.otherTokens) / Number(m.contextUsed)
+        : 1;
+    const breakdown = rawBreakdown && rawOtherRatio <= 0.6 ? rawBreakdown : null;
+    const breakdownParts = breakdown
+      ? [
+          ["system", "systemPromptTokens"],
+          ["tools", "toolDefinitionTokens"],
+          ["messages", "conversationTokens"],
+          ["other", "otherTokens"],
+        ]
+      : [];
+    const breakdownKey = breakdown
+      ? breakdownParts.map((entry) => `${entry[0]}:${breakdown[entry[1]]}`).join("|")
+      : rawBreakdown
+        ? "insufficient-coverage"
+        : "";
+    if (parts.context.breakdownKey !== breakdownKey) {
+      parts.context.breakdownKey = breakdownKey;
+      parts.context.fill.replaceChildren();
+      if (breakdown && Number.isFinite(Number(m.contextUsed)) && Number(m.contextUsed) > 0) {
+        const fragment = document.createDocumentFragment();
+        for (const [key, field] of breakdownParts) {
+          const value = Number(breakdown[field]) || 0;
+          if (value <= 0) continue;
+          const segment = textNode("span", `tui-context-segment tui-context-segment--${key}`);
+          segment.style.flex = `0 0 ${(value / Number(m.contextUsed)) * 100}%`;
+          segment.setAttribute("aria-label", `${key} ${fmtInt(value)} tokens`);
+          fragment.append(segment);
+        }
+        parts.context.fill.append(fragment);
+      }
+    }
+    parts.context.fill.style.background = breakdown ? "transparent" : "";
+    parts.context.legend.node.hidden = !breakdown;
+    parts.context.estimateNote.hidden = !rawBreakdown;
+    if (rawBreakdown && !breakdown) {
+      parts.context.estimateNote.textContent = "本地分类覆盖不足，仅显示精确已用量和上限";
+    } else if (breakdown) {
+      for (const [key, field] of breakdownParts) {
+        parts.context.legend.rows[key].value.textContent =
+          breakdown[field] == null ? "--" : `≈ ${fmtInt(breakdown[field])}`;
+      }
+      parts.context.estimateNote.textContent = "本地估算，不代表服务端计费分类";
+    }
 
     const health = data.health || {};
-    setCellText(parts.health.status, healthLabel(health));
-    setCellText(parts.health.monitor, health.monitorRunning === false ? "未运行" : "运行中");
-    setCellText(parts.health.page, health.pageAttached ? "已连接" : "等待连接");
-    setCellText(parts.health.data, health.dataFresh ? "最新" : "等待更新");
-    setCellText(parts.health.modelSwitches, fmtInt(data.modelSwitchCount) + " 次");
-    setCellText(parts.health.resets, fmtInt(data.cumulativeResetCount) + " 次");
     const audit = health.cdpClients;
     const unknownClients = audit && Array.isArray(audit.unknown) ? audit.unknown : [];
     const injection = health.injectionAlert;
@@ -1317,6 +2142,7 @@
     if (["failed", "protocol-mismatch", "target-selection-required"].includes(status)) return "red";
     if (
       state.monitorStale ||
+      state.payloadDataStale ||
       status === "stale-data" ||
       status === "recovering" ||
       (typeof status === "string" && status.startsWith("waiting-"))
@@ -1328,14 +2154,19 @@
   function updateHealthDot(dot, data) {
     if (!dot) return;
     const tone = healthTone(data);
+    const tooltip = healthTooltip(data);
     dot.className = "tui-dialog-health-dot tui-dialog-health-dot--" + tone;
-    dot.title = "运行状态：" + (data ? healthLabel(data.health) : "等待监控数据");
+    dot.title = tooltip;
+    dot.setAttribute("aria-label", tooltip.replace(/\n/g, "；"));
   }
 
   function formatSubtitle(data) {
     if (!data) return state.protocolError ? "协议不匹配 · 请重新加载 Codex++ 用户脚本" : "等待监控数据";
     const service = serviceBadgeText();
-    const prefix = data.snapshot ? "上次数据 · " : "";
+    const cacheLabels = [];
+    if (state.detailRenderFromCache) cacheLabels.push("详情缓存");
+    if (state.rangeRenderFromCache) cacheLabels.push("范围缓存");
+    const prefix = cacheLabels.length ? cacheLabels.join(" + ") + " · 刷新中 · " : data.snapshot ? "上次数据 · " : "";
     return `${prefix}${healthLabel(data.health)} · ${formatUpdatedAt(data.updatedAt)}${service ? " · " + service : ""}`;
   }
 
@@ -1395,7 +2226,12 @@
     if (!state.dialog || !state.dialog.__tuiBody) return false;
     const dialog = state.dialog;
     const body = dialog.__tuiBody;
-    const data = state.data;
+    const data = detailDataForRender();
+    if (Array.isArray(data && data.capabilities) && data.capabilities.includes("history-range-v1")) {
+      effectiveRangeSummary(data);
+    } else {
+      state.rangeRenderFromCache = false;
+    }
     if (dialog.__tuiSubtitle) setCellText(dialog.__tuiSubtitle, formatSubtitle(data));
     updateHealthDot(dialog.__tuiStatusDot, data);
     dialog.__tuiRenderedDataKey = dataKeyOf(data);
@@ -1437,7 +2273,8 @@
     const heading = textNode("div");
     const titleRow = textNode("div", "tui-dialog-title-row");
     const healthDot = textNode("span", "tui-dialog-health-dot tui-dialog-health-dot--yellow");
-    healthDot.setAttribute("aria-hidden", "true");
+    healthDot.setAttribute("role", "status");
+    healthDot.setAttribute("tabindex", "0");
     const title = textNode("div", "tui-dialog-title", "Token 用量详情");
     const subtitle = textNode("div", "tui-dialog-subtitle", "原生统计条 · 仅展示本地脱敏统计");
     titleRow.append(healthDot, title);
@@ -1497,17 +2334,57 @@
         return;
       }
       const avg = elapsed / Math.max(1, frames);
-      if (avg > 20) dialog.classList.add("tui-glass-lite");
+      if (avg > 20) {
+        dialog.classList.remove("tui-glass-strong");
+        dialog.classList.add("tui-glass-lite");
+      } else if (avg > 17.5) {
+        dialog.classList.remove("tui-glass-strong");
+      }
     };
     requestAnimationFrame(tick);
   }
 
+  function canUseStrongGlass() {
+    try {
+      if (window.matchMedia && window.matchMedia("(prefers-reduced-transparency: reduce)").matches) return false;
+    } catch {}
+    const cores = Number(navigator.hardwareConcurrency || 0);
+    const memory = Number(navigator.deviceMemory || 0);
+    if (cores > 0 && cores < 8) return false;
+    if (memory > 0 && memory < 8) return false;
+    return cores >= 8 || memory >= 8;
+  }
+
+  function finishDialogClose(dialog, restoreFocus) {
+    if (!dialog) return;
+    if (state.dialogClosingTimer) {
+      clearTimeout(state.dialogClosingTimer);
+      state.dialogClosingTimer = 0;
+    }
+    dialog.__tuiClosing = false;
+    if (dialog.parentElement) dialog.remove();
+    if (state.dialog === dialog) state.dialog = null;
+    const focusTarget = state.previousFocus && state.previousFocus.isConnected ? state.previousFocus : state.root;
+    state.previousFocus = null;
+    if (restoreFocus && state.root && focusTarget && typeof focusTarget.focus === "function") {
+      try {
+        focusTarget.focus({ preventScroll: true });
+      } catch {
+        focusTarget.focus();
+      }
+    }
+  }
+
   function openDetails() {
     if (!document.body) return;
+    if (state.dialog && state.dialog.getAttribute("data-open") === "closing") {
+      finishDialogClose(state.dialog, false);
+    }
     if (state.dialog && state.dialog.getAttribute("data-open") === "true") return;
     // 打开即声明「展开窗口」；监控最多 1 秒后按新窗口回推，第一眼会先看到已缓存的精简数据。
     state.windowTurns = Math.max(state.windowTurns, TURN_WINDOW_OPEN);
     state.windowRequests = Math.max(state.windowRequests, REQUEST_WINDOW_OPEN);
+    state.rangeRequestActive = true;
     publishWindow();
     if (!state.dialog) {
       state.previousFocus = document.activeElement;
@@ -1515,6 +2392,7 @@
       document.body.appendChild(state.dialog);
       applyTheme();
     }
+    if (canUseStrongGlass()) state.dialog.classList.add("tui-glass-strong");
     state.dialog.setAttribute("data-open", "true");
     state.dialog.style.visibility = "hidden";
     state.root && state.root.setAttribute("aria-expanded", "true");
@@ -1539,9 +2417,11 @@
 
   function closeDetails({ restoreFocus = true } = {}) {
     if (!state.dialog) return;
+    if (state.dialog.__tuiClosing) return;
     // 关闭后回到极简负载（5 轮 / 0 条明细），下一次「加载更多」的起点也重置。
     state.windowTurns = TURN_WINDOW_CLOSED;
     state.windowRequests = REQUEST_WINDOW_CLOSED;
+    state.rangeRequestActive = false;
     publishWindow();
     // 关闭后给监控一个重新推送的宽限期（窗口变化会在 ~1s 内触发推送），
     // 避免把"展开期间没有心跳"误判成监控停止。
@@ -1552,20 +2432,29 @@
     window.removeEventListener("resize", positionDialog);
     window.removeEventListener("scroll", positionDialog, true);
     const dialog = state.dialog;
-    const focusTarget = state.previousFocus && state.previousFocus.isConnected ? state.previousFocus : state.root;
-    state.dialog = null;
-    if (dialog.parentElement) dialog.remove();
     if (state.root) {
       state.root.setAttribute("aria-expanded", "false");
-      if (restoreFocus && focusTarget && typeof focusTarget.focus === "function") {
-        try {
-          focusTarget.focus({ preventScroll: true });
-        } catch {
-          focusTarget.focus();
-        }
-      }
     }
-    state.previousFocus = null;
+    dialog.__tuiClosing = true;
+    dialog.setAttribute("data-open", "closing");
+    let reducedMotion = false;
+    try {
+      reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch {}
+    if (reducedMotion) {
+      finishDialogClose(dialog, restoreFocus);
+      return;
+    }
+    const onAnimationEnd = (event) => {
+      if (event.target !== dialog) return;
+      dialog.removeEventListener("animationend", onAnimationEnd);
+      finishDialogClose(dialog, restoreFocus);
+    };
+    dialog.addEventListener("animationend", onAnimationEnd);
+    state.dialogClosingTimer = setTimeout(() => {
+      dialog.removeEventListener("animationend", onAnimationEnd);
+      finishDialogClose(dialog, restoreFocus);
+    }, 180);
   }
 
   // ---- 主题判定 ----
@@ -1934,82 +2823,204 @@
     window.addEventListener("resize", updateDensity, { passive: true });
   }
 
-  // ---- 负载验签（HMAC + nonce + 时间窗 + seq）---------------------------
-  // schema v3 是严格的签名-only 协议：boot 负载也必须验签。
-  // 监控用会话级密钥签名，密钥经 CDP 注入；任何缺 auth、坏 MAC、过期、
-  // nonce 重放或 seq 倒退的负载都不会进入 adoptData()。
+  // ---- 负载验签（auth v2）------------------------------------------------
+  // 正文、认证版本、keyId、时间戳、nonce 与 seq 全部进入 HMAC。
+  // 密钥只在一次同步事件派发期间暴露；本脚本同步复制后立即删除全局入口。
   const seenNonces = new Set();
   let rejectedPayloads = 0;
-  let lastAuthKey = "";
+  let currentAuthKeyId = "";
+  let currentAuthKey = null;
   let lastAuthSeq = 0;
   let dataEventSeq = 0;
-  const hmacKeyCache = new Map();
+  let securityWriteAt = 0;
+  let securityWriteTimer = 0;
+  let lastSecurityReason = "";
+  try {
+    delete window.__tuiForCodexAuthKey;
+    delete window.__tuiForCodexAuthBootstrap;
+  } catch {}
 
-  function canonicalJson(value) {
-    if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+  function canonicalJson(value, stack = new Set()) {
+    if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) throw new TypeError("canonicalJson does not support non-finite numbers");
+      return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+      if (stack.has(value)) throw new TypeError("canonicalJson does not support cyclic arrays");
+      stack.add(value);
+      const serialized = "[" + value.map((item) => canonicalJson(item, stack)).join(",") + "]";
+      stack.delete(value);
+      return serialized;
+    }
     if (value && typeof value === "object") {
-      return (
+      if (stack.has(value)) throw new TypeError("canonicalJson does not support cyclic objects");
+      stack.add(value);
+      const serialized =
         "{" +
         Object.keys(value)
           .sort()
-          .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key]))
+          .map((key) => JSON.stringify(key) + ":" + canonicalJson(value[key], stack))
           .join(",") +
-        "}"
-      );
+        "}";
+      stack.delete(value);
+      return serialized;
     }
-    return JSON.stringify(value);
+    throw new TypeError("canonicalJson does not support " + typeof value);
+  }
+
+  function authSigningText(body, auth) {
+    return (
+      AUTH_DOMAIN +
+      "\n" +
+      canonicalJson(body) +
+      "\n" +
+      canonicalJson({
+        v: auth.v,
+        keyId: auth.keyId,
+        ts: auth.ts,
+        nonce: auth.nonce,
+        seq: auth.seq,
+      })
+    );
+  }
+
+  function hexToBytes(value) {
+    if (typeof value !== "string" || value.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(value)) {
+      throw new TypeError("invalid hex value");
+    }
+    const bytes = new Uint8Array(value.length / 2);
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+    }
+    return bytes;
+  }
+
+  async function importAuthKey(hexKey) {
+    return crypto.subtle.importKey("raw", hexToBytes(hexKey), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   }
 
   async function hmacHex(key, text) {
-    let imported = hmacKeyCache.get(key);
-    if (!imported) {
-      imported = await crypto.subtle.importKey(
-        "raw",
-        new TextEncoder().encode(key),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"],
-      );
-      hmacKeyCache.set(key, imported);
-    }
-    const signature = await crypto.subtle.sign("HMAC", imported, new TextEncoder().encode(text));
+    const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(text));
     return [...new Uint8Array(signature)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
-  async function verifyPayloadAuth(data) {
+  function captureAuthBootstrap() {
+    const bootstrap = window.__tuiForCodexAuthBootstrap;
+    try {
+      delete window.__tuiForCodexAuthBootstrap;
+    } catch {}
+    return bootstrap && typeof bootstrap === "object" && !Array.isArray(bootstrap)
+      ? { key: bootstrap.key, keyId: bootstrap.keyId }
+      : null;
+  }
+
+  async function resolveAuthKey(auth, bootstrap) {
+    if (currentAuthKey && currentAuthKeyId === auth.keyId) return currentAuthKey;
+    if (
+      bootstrap &&
+      bootstrap.keyId === auth.keyId &&
+      typeof bootstrap.key === "string" &&
+      /^[0-9a-f]{64}$/i.test(bootstrap.key)
+    ) {
+      return importAuthKey(bootstrap.key);
+    }
+    return null;
+  }
+
+  function flushSecurityState() {
+    securityWriteTimer = 0;
+    securityWriteAt = Date.now();
+    document.documentElement.setAttribute("data-tui-security", String(rejectedPayloads));
+    document.documentElement.setAttribute("data-tui-security-reason", lastSecurityReason || "invalid");
+  }
+
+  function rejectAuth(reason) {
+    rejectedPayloads += 1;
+    lastSecurityReason = String(reason || "invalid");
+    const remaining = 60 - (Date.now() - securityWriteAt);
+    if (remaining <= 0) {
+      if (securityWriteTimer) clearTimeout(securityWriteTimer);
+      flushSecurityState();
+    } else if (!securityWriteTimer) {
+      securityWriteTimer = setTimeout(flushSecurityState, remaining);
+    }
+    return { ok: false, reason };
+  }
+
+  async function verifyPayloadAuth(data, bootstrap = null) {
     if (!data || typeof data !== "object") return { ok: false, reason: "no-data" };
+    if (data.protocolName !== PROTOCOL_NAME) return { ok: false, reason: "protocol" };
+    if (data.schemaVersion !== PROTOCOL_SCHEMA_VERSION) return { ok: false, reason: "schema" };
     if (data.authRequired !== true) return { ok: false, reason: "auth-required" };
     const auth = data.auth;
     if (!auth || typeof auth !== "object") return { ok: false, reason: "unsigned" };
-    if (auth.v !== 1) return { ok: false, reason: "auth-version" };
-    const key = window.__tuiForCodexAuthKey;
-    if (typeof key !== "string" || !key) return { ok: false, reason: "no-key" };
-    // 监控重启会轮换密钥：新会话开始时清零上次会话的拒绝计数，
-    // 否则 data-tui-security 会一直把旧告警带回来。
-    if (key !== lastAuthKey) {
-      lastAuthKey = key;
-      rejectedPayloads = 0;
-      seenNonces.clear();
-      lastAuthSeq = 0;
-      document.documentElement.setAttribute("data-tui-security", "0");
+    if (auth.v !== AUTH_VERSION) return { ok: false, reason: "auth-version" };
+    if (typeof auth.keyId !== "string" || !AUTH_KEY_ID_PATTERN.test(auth.keyId)) {
+      return { ok: false, reason: "key-id" };
     }
     const ts = Number(auth.ts);
-    if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > 30000) return { ok: false, reason: "stale" };
-    if (!Number.isInteger(auth.seq) || auth.seq < 1 || auth.seq <= lastAuthSeq)
+    if (!Number.isSafeInteger(ts) || Math.abs(Date.now() - ts) > 30000) return { ok: false, reason: "stale" };
+    if (typeof auth.nonce !== "string" || !AUTH_NONCE_PATTERN.test(auth.nonce)) {
+      return { ok: false, reason: "nonce" };
+    }
+    if (!Number.isSafeInteger(auth.seq) || auth.seq < 1) return { ok: false, reason: "sequence" };
+    if (typeof auth.mac !== "string" || !AUTH_MAC_PATTERN.test(auth.mac)) return { ok: false, reason: "mac" };
+    const keyChanged = auth.keyId !== currentAuthKeyId;
+    if (!keyChanged && auth.seq <= lastAuthSeq) {
       return { ok: false, reason: "sequence" };
-    if (!auth.nonce || seenNonces.has(auth.nonce)) return { ok: false, reason: "replay" };
+    }
+    if (!keyChanged && seenNonces.has(auth.nonce)) return { ok: false, reason: "replay" };
+    let key;
+    try {
+      key = await resolveAuthKey(auth, bootstrap);
+    } catch {
+      return { ok: false, reason: "key" };
+    }
+    if (!key) return { ok: false, reason: "no-key" };
     const body = { ...data };
     delete body.auth;
-    const expected = await hmacHex(key, canonicalJson(body) + "|" + ts + "|" + auth.nonce);
-    if (typeof auth.mac !== "string" || expected.length !== auth.mac.length) return { ok: false, reason: "mac" };
+    let expected;
+    try {
+      expected = await hmacHex(key, authSigningText(body, auth));
+    } catch {
+      return { ok: false, reason: "mac" };
+    }
     let diff = 0;
     for (let index = 0; index < expected.length; index += 1) {
       diff |= expected.charCodeAt(index) ^ auth.mac.charCodeAt(index);
     }
     if (diff !== 0) return { ok: false, reason: "mac" };
-    seenNonces.add(auth.nonce);
+    return {
+      ok: true,
+      keyId: auth.keyId,
+      key,
+      nonce: auth.nonce,
+      seq: auth.seq,
+    };
+  }
+
+  function commitAuthVerification(verdict) {
+    const keyChanged = verdict.keyId !== currentAuthKeyId;
+    if (!keyChanged && (verdict.seq <= lastAuthSeq || seenNonces.has(verdict.nonce))) {
+      return { ok: false, reason: verdict.seq <= lastAuthSeq ? "sequence" : "replay" };
+    }
+    if (keyChanged) {
+      currentAuthKeyId = verdict.keyId;
+      currentAuthKey = verdict.key;
+      rejectedPayloads = 0;
+      seenNonces.clear();
+      lastAuthSeq = 0;
+      if (securityWriteTimer) clearTimeout(securityWriteTimer);
+      securityWriteTimer = 0;
+      securityWriteAt = Date.now();
+      lastSecurityReason = "";
+      document.documentElement.setAttribute("data-tui-security", "0");
+      document.documentElement.removeAttribute("data-tui-security-reason");
+    }
+    seenNonces.add(verdict.nonce);
     if (seenNonces.size > 512) seenNonces.delete(seenNonces.values().next().value);
-    lastAuthSeq = auth.seq;
+    lastAuthSeq = verdict.seq;
     return { ok: true };
   }
 
@@ -2022,45 +3033,41 @@
     }
   }
 
-  // 数据事件：监控进程写入 window.__tuiForCodex 后派发 tokens-ui-for-codex。
-  const handleDataEvent = async () => {
+  // 数据事件：监控进程写入临时密钥与负载后同步派发 tokens-ui-for-codex。
+  // 这里必须在任何 await 之前捕获并删除密钥入口，避免长期暴露。
+  const handleDataEvent = () => {
+    const bootstrap = captureAuthBootstrap();
     const seq = ++dataEventSeq;
     // 先深拷贝再做异步 WebCrypto 验签；验证与应用必须是同一份不可变快照。
     const nextData = clonePayload(window.__tuiForCodex || null);
-    const verdict = await verifyPayloadAuth(nextData);
-    if (seq !== dataEventSeq) return;
-    if (!verdict.ok) {
-      rejectedPayloads += 1;
-      document.documentElement.setAttribute("data-tui-security", String(rejectedPayloads));
-      return;
-    }
-    adoptData(nextData);
-    // 收到任何推送（含 1s/5s 心跳）即刷新"监控存活"时间
-    state.lastPayloadAt = Date.now();
-    state.monitorStale = false;
-    // 每次数据事件都渲染：内部全部是增量更新（实测 <1ms，最低成本已做 !== 检查）。
-    // 不再用 dataKey 门控 —— 它曾漏掉 sessionTps / lastRequestTps / health 等字段，
-    // 导致「速度或健康状态变化但界面不刷新」（P4）；去掉字段清单依赖后，
-    // 未来新增字段也不会再漏，代价只是空闲时每 5 秒一次的空跑。
-    render();
-    if (!state.root || !state.root.isConnected) queueMount();
+    verifyPayloadAuth(nextData, bootstrap)
+      .then((verdict) => {
+        if (seq !== dataEventSeq) return;
+        if (!verdict.ok) {
+          rejectAuth(verdict.reason || "invalid");
+          return;
+        }
+        const committed = commitAuthVerification(verdict);
+        if (!committed.ok) {
+          rejectAuth(committed.reason || "verification-race");
+          return;
+        }
+        adoptData(nextData);
+        // 收到任何推送（含 1s/5s 心跳）即刷新"监控存活"时间
+        state.lastPayloadAt = Date.now();
+        state.monitorStale = false;
+        // 每次数据事件都渲染：内部全部是增量更新（实测 <1ms，最低成本已做 !== 检查）。
+        // 不再用 dataKey 门控 —— 它曾漏掉 sessionTps / lastRequestTps / health 等字段，
+        // 导致「速度或健康状态变化但界面不刷新」（P4）；去掉字段清单依赖后，
+        // 未来新增字段也不会再漏，代价只是空闲时每 5 秒一次的空跑。
+        render();
+        if (!state.root || !state.root.isConnected) queueMount();
+      })
+      .catch(() => {
+        if (seq === dataEventSeq) rejectAuth("verification-error");
+      });
   };
   window.addEventListener(DATA_EVENT, handleDataEvent);
-
-  const bootPayload = clonePayload(window.__tuiForCodex || null);
-  if (bootPayload) {
-    const bootSeq = ++dataEventSeq;
-    verifyPayloadAuth(bootPayload).then((verdict) => {
-      if (bootSeq !== dataEventSeq) return;
-      if (!verdict.ok) {
-        rejectedPayloads += 1;
-        document.documentElement.setAttribute("data-tui-security", String(rejectedPayloads));
-        return;
-      }
-      adoptData(bootPayload);
-      state.lastPayloadAt = Date.now();
-    });
-  }
 
   const start = () => {
     installObservers();

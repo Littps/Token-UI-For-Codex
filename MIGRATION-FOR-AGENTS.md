@@ -18,6 +18,10 @@
 
 无需单独安装 Node：Codex 桌面版自带运行时可由 `find-codex.ps1` 自动发现。
 
+当前原组件模式会常驻一个 PowerShell watchdog 和一个 Node 监控。本机代表值为
+watchdog 约 90–120 MB、Node 约 140–160 MB，合计约 230–280 MB，空闲 CPU 通常接近 0%。
+这是观测值，不是跨设备固定值。详见 `docs/context-and-resources.md`。
+
 ## 2. 应迁移什么
 
 推荐迁移完整部署目录：
@@ -36,7 +40,7 @@ Tokens UI For Codex/
 源码包没有 `plugins/` 时，安装器会生成：
 
 ```text
-%LOCALAPPDATA%\tokens-ui-for-codex\install-stage\
+<CODEX_HOME>\tokens-ui-for-codex\install-stage\
 ```
 
 ## 3. 不应迁移什么
@@ -44,7 +48,7 @@ Tokens UI For Codex/
 以下内容属于旧机器状态，不复制：
 
 ```text
-%LOCALAPPDATA%\tokens-ui-for-codex\
+%LOCALAPPDATA%\tokens-ui-for-codex\（仅旧版本迁移来源）
 ```
 
 尤其是：
@@ -131,18 +135,27 @@ node "<包根>\plugins\tokens-ui-for-codex\scripts\verify-live.mjs"
 期望：
 
 - `panelCount=1`
-- `payloadSchema=3`
+- `payloadSchema=4`
+- `payloadAuthVersion=2`
+- capabilities 包含 `timing-v1` 与 `context-breakdown-estimated-v1`
+- 临时认证入口不存在
 - `installedFlag=true`
 - `ringCount>=1`
 - `failed=0`（verify-live）
 
+上下文分类是本地估算，详细边界见 `docs/context-estimation.md`，不得将 `≈` 值
+描述为服务端官方 token 分类。
+
+上下文已用量取最后一次请求 total，并受模型上限约束。分类数据只保留数值权重，
+不包含消息正文。
+
 ### 全部副本
 
 ```powershell
-node "<包根>\plugins\tokens-ui-for-codex\scripts\verify-sync.mjs" --deploy "<包根>"
+node "<包根>\plugins\tokens-ui-for-codex\scripts\verify-sync.mjs" --deploy "<包根>" --zip "<安装包>"
 ```
 
-必须 `mismatches: 0`。
+必须 `errors: []` 且 `mismatches: 0`。
 
 ## 6. 常见迁移问题
 
@@ -160,18 +173,22 @@ node "<包根>\plugins\tokens-ui-for-codex\scripts\verify-sync.mjs" --deploy "<�
 
 ## 7. 迁移后的状态目录
 
-目标机器会生成：
+目标机器会生成 `runtime-paths.json`，并按解析结果创建：
 
 ```text
-%LOCALAPPDATA%\tokens-ui-for-codex\
-├─ logs\
-├─ monitor-health.json
-├─ autostart-state.json
-├─ last-summary.json
-└─ monitor.lock
+<CODEX_HOME>\tokens-ui-for-codex\
+├─ monitor.lock
+├─ install-stage\
+└─ state\
+   ├─ logs\
+   ├─ history\
+   ├─ monitor-health.json
+   ├─ autostart-state.json
+   └─ last-summary.json
 ```
 
-这些文件不要从旧机器覆盖。
+`runtime-paths.json` 位于插件目录。新机器的状态文件应由新安装器生成，不要把旧机器的
+健康文件、锁、线程映射或本机绝对路径配置直接覆盖到目标机器。
 
 ## 8. 卸载和重新迁移
 
@@ -197,6 +214,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<包根>\plugins\tokens
 - 页面负载只有数值、时间和有限摘要
 - 不包含会话路径、线程 ID、消息正文、密钥或 Token
 - 本地 CDP 通信不经过网络
-- schema v3 必须通过 HMAC、时间窗、nonce 与 seq 校验
+- schema v4 / auth v2 必须通过 HMAC、时间窗、nonce、keyId 与 seq 校验
 - 不注册键盘监听
 - 不修改 Codex React bundle

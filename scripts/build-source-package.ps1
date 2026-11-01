@@ -22,7 +22,7 @@ if (-not $RepoRoot) {
 $resolvedRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 # 必需文件（缺任一即中止，避免打出残缺包）
-foreach ($required in @("README.md", "LICENSE", "package.json", "token-stats.mjs", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js", "schemas\payload-v3.schema.json", "skills\tokens-ui-for-codex\SKILL.md")) {
+foreach ($required in @("README.md", "README.en.md", "README.agent.md", "DEPLOYMENT.md", "LICENSE", "package.json", "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js", "readme01.png", "readme02.png", "readme03.png", "schemas\payload-v4.schema.json", "docs\auth-v2.md", "docs\watchdog.md", "docs\context-estimation.md", "docs\context-and-resources.md", "docs\history-ranges.md", "docs\metric-scopes.md", "skills\tokens-ui-for-codex\SKILL.md", "scripts\verify-watchdog.ps1", "rust-launcher\Cargo.toml", "rust-launcher\README.md", "rust-launcher\build-and-package.ps1", "rust-launcher\tests\supervisor_integration.rs")) {
   $requiredPath = Join-Path $resolvedRoot $required
   if (-not (Test-Path -LiteralPath $requiredPath)) { throw "缺少文件: $requiredPath" }
 }
@@ -38,8 +38,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # 排除：版本库、备份、依赖、构建产物、日志与临时文件；以及本脚本自己的产物。
 $prefix = "Tokens UI For Codex-Source/"
-$excludeDirNames = @(".git", "backups", "node_modules", "dist", "build", "release")
-$excludeFilePatterns = @("*.bak", "*.log", "*.tmp", "Tokens UI For Codex-Source-*.zip")
+$excludeDirNames = @(".git", ".tmp-node-runtime", "backups", "node_modules", "dist", "build", "release", "target", "artifacts")
+$excludeFilePatterns = @("*.bak", "*.log", "*.tmp", "runtime-paths.json", "Tokens UI For Codex-Source-*.zip")
 
 $files = Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File -Force | Where-Object {
   $relative = $_.FullName.Substring($resolvedRoot.Length).TrimStart("\")

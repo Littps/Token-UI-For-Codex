@@ -43,6 +43,12 @@
     "claimedModern": 0
   },
   "contextUsed": 160,
+  "contextBreakdown": null,
+  "sessionWallMs": 2000,
+  "sessionToolWallMs": null,
+  "sessionToolCallCount": 0,
+  "sessionTtftAvgMs": null,
+  "sessionTimingSampleCount": 0,
   "turns": [
     {
       "turnId": "turn-1",
@@ -82,7 +88,13 @@
       "input": 130,
       "output": 30,
       "cached": 70,
-      "total": 160
+      "total": 160,
+      "wallMs": 2000,
+      "toolWallMs": 0,
+      "toolCallCount": 0,
+      "ttftMs": null,
+      "timingCoverage": null,
+      "timingQuality": "low"
     }
   ]
 }
