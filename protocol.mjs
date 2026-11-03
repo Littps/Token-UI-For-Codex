@@ -1,7 +1,10 @@
+import { getSupportedModels } from "./openrouter-pricing.mjs";
+import { MODEL_COST_STATUSES } from "./model-usage.mjs";
+
 export const PROTOCOL_NAME = "tokens-ui-for-codex";
 // v4 起只接受 auth v2：正文、版本、时间戳、nonce、keyId 与 seq 全部进入 HMAC。
 // 旧监控会因 supportedSchemaVersions 不含 4 而明确失败，安装器负责先停旧进程。
-export const PROTOCOL_SCHEMA_VERSION = 4;
+export const PROTOCOL_SCHEMA_VERSION = 5;
 export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([PROTOCOL_SCHEMA_VERSION]);
 export const AUTH_VERSION = 2;
 export const AUTH_DOMAIN = "tokens-ui-for-codex/auth-v2";
@@ -28,6 +31,8 @@ export const PROTOCOL_CAPABILITIES = Object.freeze([
   "timing-v1",
   "history-range-v1",
   "context-breakdown-estimated-v1",
+  "model-usage-v1",
+  "public-price-reference-v1",
 ]);
 
 export const HEALTH_STATUSES = Object.freeze([
@@ -63,6 +68,66 @@ function isNullableNonNegativeNumber(value) {
 
 function isNullableString(value) {
   return value == null || typeof value === "string";
+}
+
+const modelLabels = new Map(getSupportedModels().map((model) => [model.modelId, model.modelLabel]));
+
+function validateModelIdentity(value) {
+  return value.modelId === null
+    ? value.modelLabel === "未知模型"
+    : modelLabels.has(value.modelId) && modelLabels.get(value.modelId) === value.modelLabel;
+}
+
+function validPriceTimestamp(value) {
+  return value === null || (typeof value === "string" && Number.isFinite(Date.parse(value)));
+}
+
+export function validateModelUsage(rows, label = "modelUsage") {
+  if (!Array.isArray(rows) || rows.length > 9) return [label + " must be an array of at most 9 models"];
+  const errors = [];
+  const seen = new Set();
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      errors.push(label + " entry is invalid");
+      continue;
+    }
+    if (!validateModelIdentity(row) || seen.has(row.modelId))
+      errors.push(label + " model identity is invalid or repeated");
+    seen.add(row.modelId);
+    for (const key of ["input", "cached", "output", "total"]) {
+      if (row[key] !== null && (!Number.isSafeInteger(row[key]) || row[key] < 0))
+        errors.push(label + "." + key + " is invalid");
+    }
+    if (row.openRouterReferenceUsd !== null && !isNonNegativeNumber(row.openRouterReferenceUsd))
+      errors.push(label + ".openRouterReferenceUsd is invalid");
+    for (const key of ["requestCount", "pricedRequestCount", "unpricedRequestCount"]) {
+      if (!Number.isSafeInteger(row[key]) || row[key] < 0) errors.push(label + "." + key + " is invalid");
+    }
+    if (row.pricedRequestCount + row.unpricedRequestCount !== row.requestCount)
+      errors.push(label + " cost coverage is invalid");
+    const status = row.pricedRequestCount === 0 ? "unavailable" : row.unpricedRequestCount > 0 ? "partial" : "priced";
+    if (row.costStatus !== status || (row.pricedRequestCount === 0) !== (row.openRouterReferenceUsd === null))
+      errors.push(label + " cost status is inconsistent");
+    if (row.modelId === null && row.pricedRequestCount !== 0) errors.push(label + " unknown model cannot be priced");
+    if (!validPriceTimestamp(row.pricingFetchedAt)) errors.push(label + " pricingFetchedAt is invalid");
+    if (row.input !== null && row.cached !== null && row.cached > row.input)
+      errors.push(label + " cached exceeds input");
+  }
+  return errors;
+}
+
+function validateRequestCost(request) {
+  const errors = [];
+  if (!validateModelIdentity(request)) errors.push("request model identity is invalid");
+  if (request.openRouterReferenceUsd !== null && !isNonNegativeNumber(request.openRouterReferenceUsd))
+    errors.push("request cost is invalid");
+  if (!MODEL_COST_STATUSES.includes(request.costStatus)) errors.push("request costStatus is invalid");
+  if (["priced", "stale-price"].includes(request.costStatus) !== (request.openRouterReferenceUsd !== null))
+    errors.push("request cost status is inconsistent");
+  if (!validPriceTimestamp(request.pricingFetchedAt)) errors.push("request pricingFetchedAt is invalid");
+  if (request.modelId === null && request.openRouterReferenceUsd !== null)
+    errors.push("unknown request model cannot be priced");
+  return errors;
 }
 
 export function canonicalJson(value, stack = new Set()) {
@@ -197,6 +262,12 @@ function validateTurn(turn, index) {
     errors.push("turn.timingQuality is invalid");
   }
   if (turn.input != null && turn.cached != null && turn.cached > turn.input) errors.push("turn.cached exceeds input");
+  errors.push(...validateModelUsage(turn.modelUsage, "turn.modelUsage"));
+  if (
+    Array.isArray(turn.modelUsage) &&
+    turn.modelUsage.reduce((count, row) => count + (row?.requestCount || 0), 0) !== turn.requests
+  )
+    errors.push("turn.modelUsage request count mismatch");
   return errors;
 }
 
@@ -224,6 +295,12 @@ function validateRangeSummary(summary) {
     return ["rangeSummary must be null or an object"];
   }
   const errors = [];
+  errors.push(...validateModelUsage(summary.modelUsage, "rangeSummary.modelUsage"));
+  if (
+    Array.isArray(summary.modelUsage) &&
+    summary.modelUsage.reduce((count, row) => count + (row?.requestCount || 0), 0) !== summary.requestCount
+  )
+    errors.push("rangeSummary.modelUsage request count mismatch");
   if (!["today", "3d", "7d", "30d", "all"].includes(summary.range)) {
     errors.push("rangeSummary.range is invalid");
   }
@@ -270,6 +347,7 @@ function validateRequest(request, index) {
   if (request.input != null && request.cached != null && request.cached > request.input) {
     errors.push("request.cached exceeds input");
   }
+  errors.push(...validateRequestCost(request));
   return errors;
 }
 
@@ -300,6 +378,19 @@ export function validatePayload(payload, { allowLegacy = true, requireAuth = fal
     errors.push("unsupported schemaVersion: " + String(payload.schemaVersion));
   }
   if (payload.authRequired !== true) errors.push("authRequired must be true");
+  errors.push(...validateModelUsage(payload.modelUsage));
+  if (
+    Array.isArray(payload.modelUsage) &&
+    payload.modelUsage.reduce((count, row) => count + (row?.requestCount || 0), 0) !== payload.requestCount
+  )
+    errors.push("modelUsage request count mismatch");
+  if (
+    !payload.pricing ||
+    !["fresh", "stale", "unavailable"].includes(payload.pricing.status) ||
+    !validPriceTimestamp(payload.pricing.fetchedAt) ||
+    payload.pricing.sourceUrl !== "https://openrouter.ai/api/v1/models"
+  )
+    errors.push("pricing is invalid");
   if (requireAuth) errors.push(...validateAuth(payload.auth));
   if (!Array.isArray(payload.capabilities) || payload.capabilities.some((item) => typeof item !== "string")) {
     errors.push("capabilities must be an array of strings");

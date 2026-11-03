@@ -143,7 +143,21 @@ const fixtures = {
 };
 
 function normalizedStats(stats) {
-  const stable = { ...stats };
+  // Keep the original v4 numeric baseline unchanged. v5 model/cost additions
+  // have independent parser, history, protocol and UI assertions; only these
+  // named additions are omitted here, never an existing statistic or value.
+  const modelCostFields = new Set([
+    "modelUsage",
+    "modelId",
+    "modelLabel",
+    "openRouterReferenceUsd",
+    "pricingFetchedAt",
+    "costStatus",
+    "cacheWrite",
+    "cacheWrite30m",
+    "cacheWrite12h",
+  ]);
+  const stable = JSON.parse(JSON.stringify(stats, (key, value) => (modelCostFields.has(key) ? undefined : value)));
   delete stable.file;
   delete stable.threadId;
   delete stable.date;

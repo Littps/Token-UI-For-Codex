@@ -15,11 +15,11 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check token-stats.mjs && node --check runtime-paths.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check tokens-ui-for-codex-panel.js && npm run lint && npm run format:check",
+    "check": "node --check token-stats.mjs && node --check runtime-paths.mjs && node --check protocol.mjs && node --check speed-stats.mjs && node --check history-archive.mjs && node --check openrouter-pricing.mjs && node --check service-tier-pricing.mjs && node --check model-usage.mjs && node --check tokens-ui-for-codex-panel.js && npm run lint && npm run format:check",
     "lint": "eslint .",
     "format:check": "prettier --check \"*.js\" \"*.mjs\" \"scripts/*.mjs\" \"test/*.mjs\"",
     "format": "prettier --write \"*.js\" \"*.mjs\" \"scripts/*.mjs\" \"test/*.mjs\"",
-    "test": "node --test --test-force-exit test/runtime-paths.test.mjs test/token-stats.test.mjs test/history-archive.test.mjs && npm run test:snapshots",
+    "test": "node --test --test-force-exit test/runtime-paths.test.mjs test/token-stats.test.mjs test/history-archive.test.mjs test/openrouter-pricing.test.mjs test/service-tier-pricing.test.mjs test/pricing-packaging.test.mjs && npm run test:snapshots",
     "test:snapshots": "node scripts/stats-snapshot.mjs --check",
     "test:auth-ui": "node --test --test-force-exit test/auth-ui.playwright.test.mjs",
     "test:watchdog": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-watchdog.ps1",

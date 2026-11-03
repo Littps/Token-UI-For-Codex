@@ -1,8 +1,8 @@
 // Tokens UI For Codex —— Codex++ 用户脚本（统计条 + 详情弹层）
-// 作者：Littps · 许可：MIT · 协议：tokens-ui-for-codex（签名 schema v4）
+// 作者：Littps · 许可：MIT · 协议：tokens-ui-for-codex（签名 schema v5）
 //
 // 作用：把紧凑的 Token 统计条挂到输入区右下的「上下文用量圆圈」左侧，并提供左键单击打开的详情弹层。
-// 依赖：本地监控进程 `node token-stats.mjs --watch --cdp`（经本地 CDP 推送签名 schema v4 负载）。
+// 依赖：本地监控进程 `node token-stats.mjs --watch --cdp`（经本地 CDP 推送签名 schema v5 负载）。
 // 边界：不修改 Codex 的 React bundle、不注册任何键盘监听、不读取或展示用户消息正文。
 // 安装：把本文件放入 %APPDATA%\Codex++\user_scripts\ ，并在 Codex++ 中启用用户脚本。
 (() => {
@@ -11,7 +11,28 @@
   // The widget is inserted beside Codex's native context ring. It deliberately
   // avoids patching React internals or showing a floating panel.
   const PROTOCOL_NAME = "tokens-ui-for-codex";
-  const PROTOCOL_SCHEMA_VERSION = 4;
+  const PROTOCOL_SCHEMA_VERSION = 5;
+  const MODEL_LABELS = {
+    "openai/gpt-6.1-sol": "GPT-6.1 Sol",
+    "openai/gpt-6-astra": "GPT-6 Astra",
+    "openai/gpt-6.1-terra": "GPT-6.1 Terra",
+    "openai/gpt-6-sol": "GPT-6 Sol",
+    "openai/gpt-6-luna": "GPT-6 Luna",
+    "openai/gpt-5.6-sol": "GPT-5.6 Sol",
+    "openai/gpt-5.6-terra": "GPT-5.6 Terra",
+    "openai/gpt-5.6-luna": "GPT-5.6 Luna",
+  };
+  const COST_STATUSES = [
+    "priced",
+    "partial",
+    "unknown-model",
+    "missing-usage",
+    "missing-price",
+    "stale-price",
+    "unavailable",
+    "unsupported-tier",
+    "unknown-mode",
+  ];
   const AUTH_VERSION = 2;
   const AUTH_DOMAIN = "tokens-ui-for-codex/auth-v2";
   const AUTH_KEY_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -35,6 +56,8 @@
     "timing-v1",
     "history-range-v1",
     "context-breakdown-estimated-v1",
+    "model-usage-v1",
+    "public-price-reference-v1",
   ];
   const INSTALL_FLAG = "__tuiForCodexNativeUiInstalled";
   if (window[INSTALL_FLAG]) return;
@@ -331,6 +354,47 @@
         return `rangeSummary.${key} 字段无效`;
       }
     }
+    return validateModelUsage(summary.modelUsage, summary.requestCount);
+  }
+
+  function validModelIdentity(item) {
+    return (
+      item &&
+      (item.modelId === null
+        ? item.modelLabel === "未知模型"
+        : Object.hasOwn(MODEL_LABELS, item.modelId) && item.modelLabel === MODEL_LABELS[item.modelId])
+    );
+  }
+
+  function validateModelUsage(usage, expectedCount) {
+    if (!Array.isArray(usage) || usage.length > 9) return "模型汇总数量无效";
+    const seen = new Set();
+    for (const item of usage) {
+      if (!validModelIdentity(item) || seen.has(item.modelId)) return "模型归属无效或重复";
+      seen.add(item.modelId);
+      for (const key of ["requestCount", "pricedRequestCount", "unpricedRequestCount"]) {
+        if (!Number.isSafeInteger(item[key]) || item[key] < 0) return `模型 ${key} 无效`;
+      }
+      for (const key of ["input", "cached", "output", "total"]) {
+        if (item[key] !== null && (!Number.isSafeInteger(item[key]) || item[key] < 0)) return `模型 ${key} 无效`;
+      }
+      if (!isValidCachePair(item.input, item.cached)) return "模型缓存超过输入";
+      if (item.openRouterReferenceUsd !== null && !isNonNegativeNumber(item.openRouterReferenceUsd))
+        return "模型费用无效";
+      if (item.modelId === null && item.pricedRequestCount !== 0) return "未知模型不可计价";
+      if (
+        item.pricingFetchedAt !== null &&
+        (typeof item.pricingFetchedAt !== "string" || !Number.isFinite(Date.parse(item.pricingFetchedAt)))
+      )
+        return "模型计价时间无效";
+      if (item.pricedRequestCount + item.unpricedRequestCount !== item.requestCount) return "模型计价覆盖无效";
+      const status =
+        item.pricedRequestCount === 0 ? "unavailable" : item.unpricedRequestCount > 0 ? "partial" : "priced";
+      if (item.costStatus !== status || (item.pricedRequestCount === 0) !== (item.openRouterReferenceUsd === null))
+        return "模型计价状态无效";
+    }
+    if (expectedCount !== undefined && usage.reduce((sum, item) => sum + item.requestCount, 0) !== expectedCount)
+      return "模型请求数与汇总不一致";
     return "";
   }
 
@@ -339,6 +403,17 @@
     if (data.protocolName !== PROTOCOL_NAME) return { ok: false, error: "统计协议名称不匹配" };
     if (data.schemaVersion !== PROTOCOL_SCHEMA_VERSION) return { ok: false, error: "统计协议版本不匹配" };
     if (data.authRequired !== true) return { ok: false, error: "统计协议要求签名负载" };
+    const modelError = validateModelUsage(data.modelUsage, data.requestCount);
+    if (modelError) return { ok: false, error: modelError };
+    if (
+      !data.pricing ||
+      !["fresh", "stale", "unavailable"].includes(data.pricing.status) ||
+      data.pricing.sourceUrl !== "https://openrouter.ai/api/v1/models" ||
+      (data.pricing.fetchedAt !== null &&
+        (typeof data.pricing.fetchedAt !== "string" || !Number.isFinite(Date.parse(data.pricing.fetchedAt))))
+    ) {
+      return { ok: false, error: "价格快照无效" };
+    }
     if (
       !Array.isArray(data.capabilities) ||
       !data.capabilities.includes("health-snapshot") ||
@@ -449,6 +524,8 @@
     if (!Array.isArray(data.requestDetails) || data.requestDetails.length > 500)
       return { ok: false, error: "请求明细超出限制" };
     for (const turn of data.turns) {
+      const modelError = validateModelUsage(turn && turn.modelUsage, turn && turn.requests);
+      if (modelError) return { ok: false, error: modelError };
       if (
         !turn ||
         !Number.isInteger(turn.index) ||
@@ -479,6 +556,21 @@
       }
     }
     for (const request of data.requestDetails) {
+      if (
+        !validModelIdentity(request) ||
+        !COST_STATUSES.includes(request.costStatus) ||
+        (request.openRouterReferenceUsd !== null && !isNonNegativeNumber(request.openRouterReferenceUsd))
+      ) {
+        return { ok: false, error: "请求模型费用无效" };
+      }
+      if (
+        ["priced", "stale-price"].includes(request.costStatus) !== (request.openRouterReferenceUsd !== null) ||
+        (request.modelId === null && request.openRouterReferenceUsd !== null) ||
+        (request.pricingFetchedAt !== null &&
+          (typeof request.pricingFetchedAt !== "string" || !Number.isFinite(Date.parse(request.pricingFetchedAt))))
+      ) {
+        return { ok: false, error: "请求计价状态或时间无效" };
+      }
       if (!request || !Number.isInteger(request.index) || request.index < 1 || typeof request.time !== "string") {
         return { ok: false, error: "请求明细字段无效" };
       }
@@ -579,6 +671,8 @@
     state.payloadDataStale = validation.ok && !nextData.snapshot && Date.now() - Date.parse(nextData.updatedAt) > 90000;
     if (!validation.ok) return;
     if (nextData.sessionChanged === true) {
+      if (state.dialog && state.dialog.__tuiParts && state.dialog.__tuiParts.models)
+        state.dialog.__tuiParts.models.selectedModel = null;
       state.lastExpandedData = null;
       state.lastExpandedAt = 0;
       state.detailRenderFromCache = false;
@@ -732,6 +826,12 @@
       data.sessionOutput,
       data.contextUsed,
       data.contextBreakdown && JSON.stringify(data.contextBreakdown),
+      JSON.stringify(data.modelUsage),
+      JSON.stringify(data.pricing),
+      JSON.stringify(data.turns.map((turn) => turn.modelUsage)),
+      JSON.stringify(
+        data.requestDetails.map((request) => [request.modelId, request.openRouterReferenceUsd, request.costStatus]),
+      ),
       data.sessionWallMs,
       data.sessionToolWallMs,
       data.sessionToolCallCount,
@@ -1245,6 +1345,14 @@
   font-size: 10px;
 }
 #${DIALOG_ID} .tui-dialog-list-total { font-variant-numeric: tabular-nums; font-weight: 550; text-align: right; }
+#${DIALOG_ID} .tui-model-list { display: grid; gap: 5px; margin: 8px 0; }
+#${DIALOG_ID} .tui-model-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 10px; padding: 8px 10px; border: 1px solid var(--tui-border,rgba(127,127,127,.2)); border-radius: 8px; background: var(--tui-surface-2); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+#${DIALOG_ID} .tui-model-row[aria-pressed="true"] { outline: 1px solid var(--tui-text-dim); }
+#${DIALOG_ID} .tui-model-row small { grid-column: 1 / -1; font-size: 10px; color: var(--tui-text-dim); }
+#${DIALOG_ID} .tui-model-scope { font: inherit; color: inherit; background: var(--tui-surface-2); border: 1px solid var(--tui-border,rgba(127,127,127,.25)); border-radius: 6px; padding: 4px 7px; margin: 7px 0; }
+#${DIALOG_ID} .tui-model-detail { margin-top: 10px; }
+#${DIALOG_ID} .tui-model-detail h4 { margin: 6px 0; font-size: 12px; }
+#${DIALOG_ID} .tui-model-pricing, #${DIALOG_ID} .tui-model-cost-summary, #${DIALOG_ID} .tui-model-records { white-space: pre-line; overflow-wrap: anywhere; font-size: 10px; line-height: 1.6; color: var(--tui-text-dim); }
 #${DIALOG_ID} .tui-dialog-muted {
   color: var(--tui-text-dim);
   font-size: 11px;
@@ -1486,7 +1594,7 @@
   }
 
   function requestNoteText(request) {
-    return `${request.time || "时间未知"} · 输入 ${fmtShort(request.input)} · 命中 ${fmtShort(request.cached)} · 未命中 ${fmtShort(request.uncached)} · 输出 ${fmtShort(request.output)}`;
+    return `${request.time || "时间未知"} · ${request.modelLabel} · 输入 ${fmtShort(request.input)} · 命中 ${fmtShort(request.cached)} · 未命中 ${fmtShort(request.uncached)} · 输出 ${fmtShort(request.output)} · 参考 ${usdText(request.openRouterReferenceUsd)}${request.openRouterReferenceUsd == null ? "（未知）" : ""}`;
   }
 
   function buildRequestRow(request) {
@@ -1509,7 +1617,191 @@
   }
 
   function turnNoteText(turn) {
-    return `${turn.startLabel || "时间未知"} · ${fmtInt(turn.requests)} 次请求 · 输入 ${fmtShort(turn.input)} · 输出 ${fmtShort(turn.output)}`;
+    return `${turn.startLabel || "时间未知"} · ${fmtInt(turn.requests)} 次请求 · 输入 ${fmtShort(turn.input)} · 输出 ${fmtShort(turn.output)} · ${modelCostText(turn.modelUsage)}`;
+  }
+
+  function usdText(value) {
+    if (value == null || !Number.isFinite(value)) return "--";
+    if (value > 0 && value < 0.000001) return "<$0.000001";
+    return "$" + value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+  }
+
+  function buildModelParts() {
+    const node = textNode("div", "tui-models");
+    const pricing = textNode("div", "tui-model-pricing");
+    const costSummary = textNode("div", "tui-model-cost-summary");
+    const scope = document.createElement("select");
+    scope.className = "tui-model-scope";
+    scope.setAttribute("aria-label", "模型统计范围");
+    for (const [value, label] of [
+      ["session", "当前会话"],
+      ["turn", "当前提问"],
+      ["range", "已选时间范围"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      scope.append(option);
+    }
+    const list = textNode("div", "tui-model-list");
+    const detail = textNode("div", "tui-model-detail");
+    const title = textNode("h4", "", "单模型详情");
+    const grid = dialogGrid([
+      ["输入", "--"],
+      ["缓存命中", "--"],
+      ["输出", "--"],
+      ["总量", "--"],
+      ["请求数", "--"],
+      ["参考费用", "--"],
+    ]);
+    const coverage = textNode("div", "tui-model-records");
+    const records = textNode("div", "tui-model-records");
+    detail.append(title, grid, coverage, records);
+    node.append(
+      pricing,
+      costSummary,
+      scope,
+      list,
+      detail,
+      textNode(
+        "div",
+        "tui-dialog-muted",
+        "按 OpenRouter 公开价折算，单位 USD；不是 Codex 实际账单或订阅剩余额度。缺少模型、价格或用量时显示未知；Fast、Batch、12h 等未核验档位不猜价。",
+      ),
+    );
+    const parts = {
+      node,
+      pricing,
+      costSummary,
+      scope,
+      list,
+      detail,
+      title,
+      coverage,
+      records,
+      cells: [...grid.querySelectorAll(".tui-dialog-card-value")],
+      selectedModel: null,
+      listKey: "",
+      rows: new Map(),
+      data: null,
+      rangeSummary: null,
+    };
+    scope.addEventListener("change", () => {
+      parts.selectedModel = null;
+      updateModelParts(parts, parts.data, parts.rangeSummary);
+    });
+    return parts;
+  }
+
+  function updateModelParts(parts, data, rangeSummary) {
+    parts.data = data;
+    parts.rangeSummary = rangeSummary;
+    const current = currentTurnOf(data);
+    const usage =
+      parts.scope.value === "range"
+        ? rangeSummary && rangeSummary.modelUsage
+        : parts.scope.value === "turn"
+          ? current && current.modelUsage
+          : data.modelUsage;
+    const items = usage || [];
+    const pricing = data.pricing;
+    setCellText(
+      parts.pricing,
+      `按 OpenRouter 公开价折算 · ${pricing.status === "fresh" ? "价目有效" : pricing.status === "stale" ? "陈旧缓存价目" : "价目不可用"} · 价目更新 ${pricing.fetchedAt ? new Date(pricing.fetchedAt).toLocaleString() : "--"}`,
+    );
+    setCellText(
+      parts.costSummary,
+      `会话：${modelCostText(data.modelUsage)}\n当前提问：${modelCostText(current && current.modelUsage)}\n${RANGE_LABELS[state.range]}：${rangeSummary ? modelCostText(rangeSummary.modelUsage) : "等待范围统计"}`,
+    );
+    const key = items.map((item) => item.modelId || "unknown").join("|");
+    if (parts.listKey !== key || !parts.rows.size) {
+      parts.listKey = key;
+      parts.rows.clear();
+      parts.list.replaceChildren();
+      for (const item of items) {
+        const button = textNode("button", "tui-model-row");
+        button.type = "button";
+        button.setAttribute("aria-label", item.modelLabel + " · 详情");
+        const label = textNode("span", "", item.modelLabel);
+        const cost = textNode("span");
+        const note = textNode("small");
+        button.append(label, cost, note);
+        button.addEventListener("click", () => {
+          parts.selectedModel = item.modelId || "unknown";
+          updateModelParts(parts, parts.data, parts.rangeSummary);
+        });
+        parts.rows.set(item.modelId || "unknown", { button, cost, note });
+        parts.list.append(button);
+      }
+      if (!items.length) parts.list.append(textNode("div", "tui-dialog-muted", "暂无模型记录 / 等待结构化数据"));
+    }
+    if (!items.some((item) => (item.modelId || "unknown") === parts.selectedModel))
+      parts.selectedModel = items.length ? items[0].modelId || "unknown" : null;
+    for (const item of items) {
+      const row = parts.rows.get(item.modelId || "unknown");
+      row.button.setAttribute("aria-pressed", String((item.modelId || "unknown") === parts.selectedModel));
+      setCellText(
+        row.cost,
+        usdText(item.openRouterReferenceUsd) +
+          (item.costStatus === "partial" ? " 部分" : item.costStatus === "unavailable" ? " 未知" : ""),
+      );
+      setCellText(
+        row.note,
+        `${fmtInt(item.requestCount)} 次请求 · 输入 ${item.input == null ? "--" : fmtInt(item.input)} · 命中 ${item.cached == null ? "--" : fmtInt(item.cached)} · 输出 ${item.output == null ? "--" : fmtInt(item.output)} · 总量 ${item.total == null ? "--" : fmtInt(item.total)}`,
+      );
+    }
+    const selected = items.find((item) => (item.modelId || "unknown") === parts.selectedModel);
+    parts.detail.hidden = !selected;
+    if (!selected) return;
+    setCellText(parts.title, selected.modelLabel + " · 单模型详情");
+    const values = [selected.input, selected.cached, selected.output, selected.total, selected.requestCount].map(
+      (value) => (value == null ? "--" : fmtInt(value)),
+    );
+    values.push(usdText(selected.openRouterReferenceUsd));
+    parts.cells.forEach((cell, index) => setCellText(cell, values[index]));
+    setCellText(
+      parts.coverage,
+      modelCostText([selected]) +
+        `\n历史计价快照：${selected.pricingFetchedAt ? new Date(selected.pricingFetchedAt).toLocaleString() : "未知 / 混合快照"}`,
+    );
+    if (parts.scope.value === "range") {
+      setCellText(
+        parts.records,
+        "历史范围按已归档数值汇总；旧记录缺少归属或历史价格时保持未知，不用当前价格回填。\n请求明细与各轮摘要仅展示当前会话已加载部分。",
+      );
+      return;
+    }
+    const requests = data.requestDetails
+      .filter((request) => request.modelId === selected.modelId)
+      .slice()
+      .reverse();
+    const turns = data.turns
+      .filter((turn) => turn.modelUsage.some((item) => item.modelId === selected.modelId))
+      .slice()
+      .reverse();
+    const turnText = turns
+      .map((turn) => {
+        const item = turn.modelUsage.find((entry) => entry.modelId === selected.modelId);
+        return `第 ${turn.index} 轮：${item.total == null ? "--" : fmtInt(item.total)} tokens / ${fmtInt(item.requestCount)} 次 / ${usdText(item.openRouterReferenceUsd)}`;
+      })
+      .join("；");
+    setCellText(
+      parts.records,
+      `请求（当前提问已加载部分）：${requests.map((request) => `#${request.index} · ${fmtInt(request.total)} tokens · ${usdText(request.openRouterReferenceUsd)}`).join("；") || "--"}\n轮次（当前会话已加载部分）：${turnText || "--"}`,
+    );
+  }
+
+  function modelCostText(usage) {
+    if (!Array.isArray(usage) || !usage.length) return "参考费用 --（未知）";
+    let sum = 0;
+    let priced = 0;
+    let count = 0;
+    for (const item of usage) {
+      if (item.openRouterReferenceUsd != null) sum += item.openRouterReferenceUsd;
+      priced += item.pricedRequestCount;
+      count += item.requestCount;
+    }
+    return `参考费用 ${priced ? usdText(sum) : "--"}${priced && priced < count ? "（部分小计）" : priced ? "" : "（未知）"} · 已计价 ${fmtInt(priced)}/${fmtInt(count)} 次请求`;
   }
 
   function buildTurnRow(turn, index, isCurrent) {
@@ -1639,6 +1931,9 @@
     parts.turn.timing = turnTiming.values;
     parts.turn.timingNode = turnTiming.node;
     parts.sections.push(dialogSection("当前提问统计", turnBody));
+
+    parts.models = buildModelParts();
+    parts.sections.push(dialogSection("GPT 模型与参考费用", parts.models.node));
 
     // 上下文使用
     const contextValue = textNode("span", "tui-dialog-context-value", fmtInt(m.contextUsed));
@@ -1844,6 +2139,7 @@
     const rangeCapable = Array.isArray(data.capabilities) && data.capabilities.includes("history-range-v1");
     const rangeState = rangeCapable ? effectiveRangeSummary(data) : null;
     const rangeSummary = rangeState ? rangeState.summary : null;
+    updateModelParts(parts.models, data, rangeSummary);
     if (parts.session.rangeControl) {
       parts.session.rangeControl.select.value = state.range;
       parts.session.rangeControl.select.disabled = !rangeCapable;

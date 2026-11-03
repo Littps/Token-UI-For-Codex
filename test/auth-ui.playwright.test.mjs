@@ -42,11 +42,14 @@ function launchOptions() {
 const { chromium } = loadPlaywright();
 const panelSource = fs.readFileSync(new URL("../tokens-ui-for-codex-panel.js", import.meta.url), "utf8");
 let browser;
+let browserServer;
 let page;
 let server;
+const artifactDir = process.env.TUI_UI_ARTIFACT_DIR || os.tmpdir();
+fs.mkdirSync(artifactDir, { recursive: true });
 
 function basePayload() {
-  return {
+  const payload = {
     protocolName: PROTOCOL_NAME,
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
     authRequired: true,
@@ -153,6 +156,46 @@ function basePayload() {
     },
     updatedAt: new Date().toISOString(),
   };
+  payload.pricing = {
+    status: "fresh",
+    fetchedAt: new Date().toISOString(),
+    sourceUrl: "https://openrouter.ai/api/v1/models",
+  };
+  payload.modelUsage = [modelUsageFixture()];
+  for (const turn of payload.turns) {
+    turn.modelUsage = [modelUsageFixture({ ...turn, requestCount: turn.requests })];
+  }
+  for (const request of payload.requestDetails) {
+    Object.assign(request, {
+      modelId: "openai/gpt-6.1-sol",
+      modelLabel: "GPT-6.1 Sol",
+      openRouterReferenceUsd: 0.001,
+      costStatus: "priced",
+      pricingFetchedAt: null,
+    });
+  }
+  return payload;
+}
+
+function modelUsageFixture(overrides = {}) {
+  const requestCount = overrides.requestCount ?? 3;
+  return {
+    modelId: "openai/gpt-6.1-sol",
+    modelLabel: "GPT-6.1 Sol",
+    input: 240,
+    cached: 120,
+    output: 60,
+    total: 300,
+    requestCount,
+    openRouterReferenceUsd: 0.003,
+    pricedRequestCount: requestCount,
+    unpricedRequestCount: 0,
+    costStatus: "priced",
+    pricingFetchedAt: null,
+    ...Object.fromEntries(
+      Object.entries(overrides).filter(([key]) => !["index", "startLabel", "requests", "uncached"].includes(key)),
+    ),
+  };
 }
 
 function rangeSummaryFixture(range, total) {
@@ -181,6 +224,7 @@ function rangeSummaryFixture(range, total) {
     effectiveTps: 12.5,
     timingSampleCount: 4,
     ttftSampleCount: 4,
+    modelUsage: [modelUsageFixture({ input: total - 100, cached: total - 200, output: 100, total, requestCount: 6 })],
   };
 }
 
@@ -197,7 +241,8 @@ function sign(body, signer, { ts = Date.now(), seq = 1, nonce = crypto.randomByt
 }
 
 before(async () => {
-  browser = await chromium.launch(launchOptions());
+  browserServer = await chromium.launchServer(launchOptions());
+  browser = await chromium.connect(browserServer.wsEndpoint());
   page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
   const html = `
     <!doctype html>
@@ -235,7 +280,11 @@ before(async () => {
 
 after(async () => {
   if (browser) await browser.close();
-  if (server) await new Promise((resolve) => server.close(resolve));
+  if (browserServer) await browserServer.kill();
+  if (server) {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("本地隔离页：auth v2 接受有效负载并拒绝正文/seq/重放/过期篡改", async () => {
@@ -510,5 +559,227 @@ test("本地隔离页：健康灯悬浮提示包含错误码、原因、恢复�
   }, unknown);
   assert.match(String(unknownTitle), /其他（OTHER_UNCLASSIFIED）/);
   assert.match(String(unknownTitle), /检查本地 watch 日志/);
+  await page.evaluate(() => document.querySelector("#tui-detail-dialog .tui-dialog-close")?.click());
+});
+
+test("本地隔离页：模型列表与单模型详情覆盖会话、轮次、请求及范围，未知费用不作零", async () => {
+  const signer = makeSigner(0x66);
+  const body = basePayload();
+  body.pricing.status = "stale";
+  body.modelUsage = [
+    modelUsageFixture({ input: 140, cached: 60, output: 40, total: 180, requestCount: 2 }),
+    modelUsageFixture({
+      modelId: "openai/gpt-6-luna",
+      modelLabel: "GPT-6 Luna",
+      input: 100,
+      cached: 60,
+      output: 20,
+      total: 120,
+      requestCount: 1,
+      openRouterReferenceUsd: null,
+      pricedRequestCount: 0,
+      unpricedRequestCount: 1,
+      costStatus: "unavailable",
+    }),
+  ];
+  body.rangeSummary = rangeSummaryFixture("all", 123456);
+  const payload = sign(body, signer, { seq: 1 });
+  await page.evaluate(
+    async ({ payload, keyHex, keyId }) => {
+      window.__tuiForCodexAuthBootstrap = { key: keyHex, keyId };
+      window.__tuiForCodex = payload;
+      window.dispatchEvent(new Event("tokens-ui-for-codex"));
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      if (!document.getElementById("tui-detail-dialog")) document.getElementById("tui-native")?.click();
+    },
+    { payload, keyHex: signer.key.toString("hex"), keyId: signer.keyId },
+  );
+  await page.waitForSelector(".tui-model-list button", { timeout: 2500 });
+  assert.equal(await page.locator(".tui-model-list button").count(), 2);
+  assert.match(await page.locator(".tui-model-pricing").textContent(), /陈旧缓存.*价目/);
+  assert.match(await page.locator(".tui-model-cost-summary").textContent(), /部分.*2\/3/);
+  await page.getByRole("button", { name: /GPT-6 Luna.*详情/ }).click();
+  assert.match(await page.locator(".tui-model-detail").textContent(), /GPT-6 Luna/);
+  assert.match(await page.locator(".tui-model-detail").textContent(), /参考费用\s*--/);
+  assert.match(await page.locator(".tui-model-detail").textContent(), /缓存命中\s*60/);
+  await page.locator(".tui-model-scope").selectOption("turn");
+  assert.equal(await page.locator(".tui-model-list button").count(), 1);
+  await page.getByRole("button", { name: /GPT-6.1 Sol.*详情/ }).click();
+  assert.match(await page.locator(".tui-model-detail").textContent(), /请求.*#3.*#2/);
+  await page.locator(".tui-model-scope").selectOption("range");
+  assert.match(await page.locator(".tui-model-detail").textContent(), /123,456/);
+  await page.locator(".tui-model-scope").selectOption("session");
+  await page.getByRole("button", { name: /GPT-6 Luna.*详情/ }).click();
+  await page.setViewportSize({ width: 1200, height: 1200 });
+  await page.locator(".tui-models").scrollIntoViewIfNeeded();
+  await page.locator(".tui-models").screenshot({ path: path.join(artifactDir, "tokens-ui-gpt-model-cost-light.png") });
+  await page.evaluate(() => {
+    document.documentElement.setAttribute("data-theme", "dark");
+    document.body.style.background = "#171717";
+    document.body.style.color = "#eeeeee";
+  });
+  await page.waitForFunction(
+    () => document.getElementById("tui-detail-dialog")?.getAttribute("data-tui-theme") === "dark",
+  );
+  await page.locator(".tui-models").screenshot({ path: path.join(artifactDir, "tokens-ui-gpt-model-cost-dark.png") });
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.evaluate(() => {
+    document.querySelector(".tui-model-row").__identityMarker = "stable";
+  });
+  body.modelUsage[0].openRouterReferenceUsd = 0.004;
+  body.updatedAt = new Date().toISOString();
+  const updatedPayload = sign(body, signer, { seq: 2 });
+  await page.evaluate(async (payload) => {
+    window.__tuiForCodex = payload;
+    window.dispatchEvent(new Event("tokens-ui-for-codex"));
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }, updatedPayload);
+  assert.equal(
+    await page.evaluate(() => document.querySelector(".tui-model-row").__identityMarker),
+    "stable",
+    "模型结构未变应复用原行",
+  );
+  assert.match(await page.locator(".tui-model-list").textContent(), /\$0\.004/);
+  await page.evaluate(() => document.querySelector("#tui-detail-dialog .tui-dialog-close")?.click());
+});
+
+test("本地隔离页：未知模型与无价目保持未知，会话切换清除旧模型详情", async () => {
+  const signer = makeSigner(0x68);
+  const body = basePayload();
+  const unknown = {
+    modelId: null,
+    modelLabel: "未知模型",
+    input: null,
+    cached: null,
+    output: null,
+    total: null,
+    openRouterReferenceUsd: null,
+    pricedRequestCount: 0,
+    costStatus: "unavailable",
+  };
+  body.pricing = { ...body.pricing, status: "unavailable", fetchedAt: null };
+  body.sessionChanged = true;
+  body.modelUsage = [modelUsageFixture({ ...unknown, requestCount: 3, unpricedRequestCount: 3 })];
+  body.turns.forEach((turn) => {
+    turn.modelUsage = [
+      modelUsageFixture({ ...unknown, requestCount: turn.requests, unpricedRequestCount: turn.requests }),
+    ];
+  });
+  body.requestDetails.forEach((request) => {
+    Object.assign(request, {
+      modelId: null,
+      modelLabel: "未知模型",
+      openRouterReferenceUsd: null,
+      costStatus: "unknown-model",
+    });
+  });
+  body.rangeSummary = rangeSummaryFixture("all", 123456);
+  body.rangeSummary.modelUsage = [modelUsageFixture({ ...unknown, requestCount: 6, unpricedRequestCount: 6 })];
+  const payload = sign(body, signer, { seq: 1 });
+  await page.evaluate(
+    async ({ payload, keyHex, keyId }) => {
+      document.documentElement.setAttribute("data-theme", "light");
+      document.body.style.background = "#ffffff";
+      document.body.style.color = "#111111";
+      window.__tuiForCodexAuthBootstrap = { key: keyHex, keyId };
+      window.__tuiForCodex = payload;
+      window.dispatchEvent(new Event("tokens-ui-for-codex"));
+      await new Promise((resolve) => setTimeout(resolve, 220));
+      if (!document.getElementById("tui-detail-dialog")) document.getElementById("tui-native")?.click();
+    },
+    { payload, keyHex: signer.key.toString("hex"), keyId: signer.keyId },
+  );
+  await page.waitForSelector(".tui-model-list button");
+  assert.equal(await page.locator(".tui-model-list button").count(), 1);
+  assert.match(await page.locator(".tui-model-detail").textContent(), /未知模型.*输入\s*--/s);
+  assert.match(await page.locator(".tui-model-cost-summary").textContent(), /已计价 0\/3/);
+  assert.doesNotMatch(await page.locator(".tui-models").textContent(), /GPT-6\.1 Sol|\$0\.00/);
+  await page.setViewportSize({ width: 1200, height: 1200 });
+  await page.locator(".tui-models").scrollIntoViewIfNeeded();
+  await page
+    .locator(".tui-models")
+    .screenshot({ path: path.join(artifactDir, "tokens-ui-gpt-model-cost-unknown.png") });
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.evaluate(() => document.querySelector("#tui-detail-dialog .tui-dialog-close")?.click());
+});
+
+test("本地隔离页：有效签名也拒绝非法模型费用字段与旧schema", async () => {
+  const signer = makeSigner(0x77);
+  for (const [index, mutate] of [
+    (body) => {
+      body.modelUsage[0].openRouterReferenceUsd = -1;
+    },
+    (body) => {
+      body.modelUsage[0].modelId = "openai/other";
+    },
+    (body) => {
+      body.modelUsage.push({ ...body.modelUsage[0] });
+    },
+    (body) => {
+      body.modelUsage[0].pricedRequestCount = 4;
+    },
+    (body) => {
+      body.modelUsage[0].requestCount = 4;
+      body.modelUsage[0].unpricedRequestCount = 1;
+      body.modelUsage[0].costStatus = "partial";
+    },
+    (body) => {
+      delete body.requestDetails[0].pricingFetchedAt;
+    },
+    (body) => {
+      body.schemaVersion = 4;
+    },
+  ].entries()) {
+    const body = basePayload();
+    mutate(body);
+    const payload = sign(body, signer, { seq: index + 1 });
+    const result = await page.evaluate(
+      async ({ payload, keyHex, keyId }) => {
+        window.__tuiForCodexAuthBootstrap = { key: keyHex, keyId };
+        window.__tuiForCodex = payload;
+        window.dispatchEvent(new Event("tokens-ui-for-codex"));
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        return {
+          aria: document.getElementById("tui-native")?.getAttribute("aria-label"),
+          security: Number(document.documentElement.getAttribute("data-tui-security") || "0"),
+        };
+      },
+      { payload, keyHex: signer.key.toString("hex"), keyId: signer.keyId },
+    );
+    if (body.schemaVersion === 4) assert.ok(result.security > 0, "旧schema应在认证层拒绝");
+    else assert.match(String(result.aria), /协议不匹配/, `非法用例 ${index} 未拒绝`);
+  }
+});
+
+test("本地隔离页：极小正数费用不显示为免费，真实零与未知保持区别", async () => {
+  const signer = makeSigner(0x88);
+  const cases = [
+    { value: 0.0000000001, expected: "<$0.000001" },
+    { value: 0, expected: "$0.00" },
+    { value: null, expected: "--" },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const body = basePayload();
+    Object.assign(body.modelUsage[0], {
+      openRouterReferenceUsd: item.value,
+      pricedRequestCount: item.value === null ? 0 : 3,
+      unpricedRequestCount: item.value === null ? 3 : 0,
+      costStatus: item.value === null ? "unavailable" : "priced",
+    });
+    const payload = sign(body, signer, { seq: index + 1 });
+    assert.equal(validatePayload(payload, { allowLegacy: false, requireAuth: true }).ok, true);
+    await page.evaluate(
+      async ({ payload, keyHex, keyId }) => {
+        window.__tuiForCodexAuthBootstrap = { key: keyHex, keyId };
+        window.__tuiForCodex = payload;
+        window.dispatchEvent(new Event("tokens-ui-for-codex"));
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        if (!document.getElementById("tui-detail-dialog")) document.getElementById("tui-native")?.click();
+      },
+      { payload, keyHex: signer.key.toString("hex"), keyId: signer.keyId },
+    );
+    await page.waitForSelector(".tui-model-detail .tui-dialog-card-value");
+    assert.equal(await page.locator(".tui-model-detail .tui-dialog-card-value").last().textContent(), item.expected);
+  }
   await page.evaluate(() => document.querySelector("#tui-detail-dialog .tui-dialog-close")?.click());
 });

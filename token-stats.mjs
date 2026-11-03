@@ -38,6 +38,14 @@ import {
 import { robustSpeedSummary, unionDurationMs, SPEED_SAMPLE_WINDOW } from "./speed-stats.mjs";
 import { HISTORY_RANGE_KEYS, UsageHistoryArchive } from "./history-archive.mjs";
 import { resolveRuntimePaths } from "./runtime-paths.mjs";
+import { estimateRequestCost, loadOpenRouterCatalog } from "./openrouter-pricing.mjs";
+import {
+  aggregateModelUsage,
+  mergeModelUsage,
+  modelIdentity,
+  requestModelMetadata,
+  unknownModelUsage,
+} from "./model-usage.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME_PATHS = resolveRuntimePaths({
@@ -47,6 +55,82 @@ const RUNTIME_PATHS = resolveRuntimePaths({
   scriptDir: SCRIPT_DIR,
 });
 const MONITOR_STARTED_AT = new Date().toISOString();
+let pricingSnapshot = { catalog: null, status: "unavailable", fetchedAt: null, errorCode: null };
+const PRICING_REFRESH_MS = 24 * 60 * 60 * 1000;
+let pricingRefreshPromise = null;
+let pricingRefreshAt = 0;
+
+function setPricingSnapshot(snapshot) {
+  pricingSnapshot = snapshot || { catalog: null, status: "unavailable", fetchedAt: null, errorCode: null };
+}
+
+async function refreshPricingIfDue(now = Date.now(), options = {}) {
+  if (pricingRefreshPromise) return pricingRefreshPromise;
+  if (now < pricingRefreshAt) return pricingSnapshot;
+  pricingRefreshAt = now + PRICING_REFRESH_MS;
+  pricingRefreshPromise = loadOpenRouterCatalog({
+    cacheFile: path.join(RUNTIME_PATHS.stateDir, "pricing", "openrouter-catalog.json"),
+    now,
+    ...options,
+  })
+    .then((snapshot) => {
+      setPricingSnapshot(snapshot);
+      const expiresAt = Date.parse(snapshot.fetchedAt) + PRICING_REFRESH_MS;
+      if (snapshot.status === "fresh" && Number.isFinite(expiresAt))
+        pricingRefreshAt = Math.min(now + PRICING_REFRESH_MS, expiresAt);
+      return snapshot;
+    })
+    .finally(() => {
+      pricingRefreshPromise = null;
+    });
+  return pricingRefreshPromise;
+}
+
+function pricingPayload() {
+  const expired =
+    pricingSnapshot.status === "fresh" && Date.now() - Date.parse(pricingSnapshot.fetchedAt) >= PRICING_REFRESH_MS;
+  return {
+    status: expired ? "stale" : pricingSnapshot.status,
+    fetchedAt: pricingSnapshot.fetchedAt || null,
+    sourceUrl: "https://openrouter.ai/api/v1/models",
+  };
+}
+
+function priceRequest(record, snapshot = pricingSnapshot) {
+  const identity = modelIdentity(record.model);
+  // A newly fetched rate is not evidence of the rate for earlier requests.
+  // Previously archived costs are restored independently by UsageHistoryArchive.
+  const requestAt = Date.parse(record.ts);
+  const fetchedAt = Date.parse(snapshot.fetchedAt);
+  if (identity.modelId && Number.isFinite(fetchedAt) && (!Number.isFinite(requestAt) || requestAt < fetchedAt)) {
+    return { ...identity, openRouterReferenceUsd: null, costStatus: "missing-price", pricingFetchedAt: null };
+  }
+  const cost = estimateRequestCost(record, snapshot.catalog?.modelsById?.[identity.modelId], {
+    pricingStatus: snapshot.status,
+  });
+  return {
+    ...identity,
+    openRouterReferenceUsd: cost.openRouterReferenceUsd,
+    costStatus: cost.status,
+    pricingFetchedAt: snapshot.fetchedAt || null,
+  };
+}
+
+function cacheWriteUsage(usage) {
+  return {
+    cacheWrite: Number.isFinite(usage.cache_write_input_tokens) ? usage.cache_write_input_tokens : null,
+    cacheWrite30m: Number.isFinite(usage.cache_write_30m_input_tokens) ? usage.cache_write_30m_input_tokens : null,
+    cacheWrite12h: Number.isFinite(usage.cache_write_12h_input_tokens) ? usage.cache_write_12h_input_tokens : null,
+  };
+}
+
+function cacheWriteUsageFromRecord(record) {
+  return {
+    cacheWrite: record.cacheWrite ?? null,
+    cacheWrite30m: record.cacheWrite30m ?? null,
+    cacheWrite12h: record.cacheWrite12h ?? null,
+  };
+}
 const heartbeatIntervalOverride = Number(process.env.TUI_MONITOR_HEARTBEAT_INTERVAL_MS);
 const MONITOR_HEARTBEAT_INTERVAL_MS =
   Number.isFinite(heartbeatIntervalOverride) && heartbeatIntervalOverride >= 1000 ? heartbeatIntervalOverride : 10000;
@@ -725,6 +809,7 @@ function captureModernUsage(state, event, timestamp) {
     responseId,
     turnId: typeof payload.turn_id === "string" ? payload.turn_id : "",
     model: state.currentModel,
+    ...cacheWriteUsage(usage),
     input: Number.isFinite(usage.input_tokens) ? usage.input_tokens : null,
     output: Number.isFinite(usage.output_tokens) ? usage.output_tokens : null,
     cached: Number.isFinite(usage.cached_input_tokens) ? usage.cached_input_tokens : null,
@@ -749,6 +834,8 @@ function captureLegacyTokenCount(state, event, payload, timestamp) {
   if (Number.isFinite(info.model_context_window)) state.modelContextWindow = info.model_context_window;
   const last = info.last_token_usage || {};
   const count = {
+    model: state.currentModel,
+    ...cacheWriteUsage(last),
     ts: timestamp,
     ordinal: Number.isFinite(event.ordinal) ? event.ordinal : null,
     genMs: takeGenWindow(state),
@@ -1143,6 +1230,7 @@ function requestPayloadFor(request, index) {
     uncached: input != null && cached != null ? Math.max(0, input - cached) : null,
     output: request.output != null ? request.output : null,
     total: request.lastTotal != null ? request.lastTotal : null,
+    ...requestModelMetadata(request),
   };
 }
 
@@ -1305,7 +1393,8 @@ function collectUnifiedRecords(parsed) {
         total: count.total,
       },
       turnUsage: null,
-      model: null,
+      model: count.model || null,
+      ...cacheWriteUsageFromRecord(count),
     });
   }
 
@@ -1329,6 +1418,7 @@ function collectUnifiedRecords(parsed) {
       threadUsage: record.threadUsage || null,
       turnUsage: record.turnUsage || null,
       model: record.model || null,
+      ...cacheWriteUsageFromRecord(record),
     });
   }
 
@@ -1667,7 +1757,7 @@ function locateTurnIndexByTimestamp(turnStarts, ts) {
   return found >= 0 ? found : 0;
 }
 
-function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
+function assignRecordsToTurns(records, turns, turnIndexById, retainRequests, pricing) {
   const turnCounters = new Map();
   const threadCounters = createCumulativeCounters();
   const turnStarts = turns.map((turn) => turn.start || "");
@@ -1680,6 +1770,7 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
   let currentModel = null;
   const rawSpeedSamples = [];
   const requestRingStarts = new Map();
+  const modelRequests = turns.map(() => []);
 
   for (const record of records) {
     const mappedTurnIndex = record.turnId ? turnIndexById.get(record.turnId) : null;
@@ -1755,7 +1846,11 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
       lastTotal: record.requestTotal != null ? record.requestTotal : null,
       totalInfo: normalizedThreadUsage,
       model: record.model || null,
+      ...cacheWriteUsageFromRecord(record),
+      ...priceRequest(record, pricing),
     };
+    Object.assign(record, requestModelMetadata(request));
+    modelRequests[turnIndex].push(record);
     turn.lastTs = record.ts || turn.lastTs;
     if (retainRequests) {
       turn.requests.push(request);
@@ -1811,6 +1906,10 @@ function assignRecordsToTurns(records, turns, turnIndexById, retainRequests) {
       turn.requests = turn.requests.slice(ringStart).concat(turn.requests.slice(0, ringStart));
     }
   }
+
+  turns.forEach((turn, index) => {
+    turn.modelUsage = aggregateModelUsage(modelRequests[index]);
+  });
 
   return {
     turnCounters,
@@ -1934,7 +2033,10 @@ function buildSpeedMetrics(turns, recordMetrics, threadCounters, turnCounters) {
   };
 }
 
-function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecords = false } = {}) {
+function buildStatsUnified(
+  parsed,
+  { retainRequests = true, includeArchiveRecords = false, pricing = pricingSnapshot } = {},
+) {
   const collected = collectUnifiedRecords(parsed);
   const records = collected.records;
   const { turns, turnIndexById } = seedTurnList(parsed, records);
@@ -1943,6 +2045,7 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     turns,
     turnIndexById,
     retainRequests,
+    pricing,
   );
 
   const latestGenSample = attachTurnTimings(parsed, turns);
@@ -1973,6 +2076,7 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
     date: parsed.date,
     modelContextWindow: parsed.modelContextWindow,
     requestCount: records.length,
+    modelUsage: mergeModelUsage(turns.flatMap((turn) => turn.modelUsage)),
     sessionTotal: threadUsage.total != null ? threadUsage.total : null,
     sessionInput: threadUsage.input != null ? threadUsage.input : null,
     sessionCached: threadUsage.cached != null ? threadUsage.cached : null,
@@ -2012,6 +2116,7 @@ function buildStatsUnified(parsed, { retainRequests = true, includeArchiveRecord
       startLabel: turn.startLabel,
       requests: turn.requests,
       requestCount: turn.requestCount,
+      modelUsage: turn.modelUsage,
       input: turn.input,
       output: turn.output,
       cached: turn.cacheAvailable ? turn.cached : null,
@@ -2030,6 +2135,7 @@ function turnPayloadFor(turn, index) {
     index: index + 1,
     startLabel: turn.startLabel,
     requests: turn.requestCount != null ? turn.requestCount : turn.requests.length,
+    modelUsage: turn.modelUsage || unknownModelUsage(turn),
     input: turn.input,
     cached: turn.cached,
     uncached: turn.input != null && turn.cached != null ? Math.max(0, turn.input - turn.cached) : null,
@@ -2079,6 +2185,16 @@ function payloadFor(
     schemaVersion: PROTOCOL_SCHEMA_VERSION,
     capabilities: PROTOCOL_CAPABILITIES,
     authRequired: true,
+    modelUsage:
+      stats.modelUsage ||
+      unknownModelUsage({
+        input: stats.sessionInput,
+        cached: stats.sessionCached,
+        output: stats.sessionOutput,
+        total: stats.sessionTotal,
+        requestCount: stats.requestCount,
+      }),
+    pricing: pricingPayload(),
     modelContextWindow: stats.modelContextWindow,
     requestCount: stats.requestCount,
     sessionTotal: stats.sessionTotal,
@@ -2103,6 +2219,7 @@ function payloadFor(
       rangeSummary && typeof rangeSummary === "object"
         ? {
             ...rangeSummary,
+            modelUsage: rangeSummary.modelUsage || unknownModelUsage(rangeSummary),
           }
         : null,
     turnTotal: currentTurn ? currentTurn.total : 0,
@@ -3109,6 +3226,7 @@ function resolveFile(threadId) {
 // Stats for a conversation that exists but has no data yet (shows zeros).
 function emptyStats(threadId, file) {
   return {
+    modelUsage: [],
     threadId: threadId || "",
     file: file || "",
     date: file ? fileDate(file) : "",
@@ -3161,6 +3279,8 @@ function writeLastSummary(session, stats, threadId) {
     sessionInput: stats.sessionInput,
     sessionCached: stats.sessionCached,
     sessionOutput: stats.sessionOutput,
+    modelUsage: stats.modelUsage || [],
+    turnModelUsage: currentTurn?.modelUsage || [],
     requestCount: stats.requestCount,
     currentTurnRequestCount: currentTurn ? currentTurn.requestCount : 0,
     contextUsed: stats.contextUsed,
@@ -3226,6 +3346,15 @@ function snapshotStatsFrom(summary) {
     sessionInput: summary.sessionInput,
     sessionCached: summary.sessionCached,
     sessionOutput: summary.sessionOutput,
+    modelUsage:
+      summary.modelUsage ||
+      unknownModelUsage({
+        input: summary.sessionInput,
+        cached: summary.sessionCached,
+        output: summary.sessionOutput,
+        total: summary.sessionTotal,
+        requestCount: summary.requestCount,
+      }),
     requestCount: summary.requestCount,
     contextUsed: summary.contextUsed,
     contextBreakdown: summary.contextBreakdown || null,
@@ -3254,6 +3383,15 @@ function snapshotStatsFrom(summary) {
       start: "",
       startLabel: "上次数据",
       requests: [],
+      modelUsage:
+        summary.turnModelUsage ||
+        unknownModelUsage({
+          input: summary.turnInput,
+          cached: summary.turnCached,
+          output: summary.turnOutput,
+          total: summary.turnTotal,
+          requestCount: summary.currentTurnRequestCount || 0,
+        }),
       requestCount: Number.isFinite(summary.currentTurnRequestCount) ? summary.currentTurnRequestCount : 0,
       input: Number.isFinite(summary.turnInput) ? summary.turnInput : 0,
       cached: Number.isFinite(summary.turnCached) ? summary.turnCached : 0,
@@ -4273,7 +4411,6 @@ async function publishWatchRound(args, session, context) {
   const currentTurn = stats.turns.length ? stats.turns[stats.turns.length - 1] : null;
   const lastRequest =
     currentTurn && currentTurn.requests.length ? currentTurn.requests[currentTurn.requests.length - 1] : null;
-  writeLastSummary(session, stats, resolvedThreadId);
   if (resolvedThreadId && resolvedThreadId !== NEW_THREAD && stats.archiveRecords) {
     try {
       usageHistoryArchive.archiveSession({
@@ -4282,6 +4419,7 @@ async function publishWatchRound(args, session, context) {
         records: stats.archiveRecords,
         now: Date.now(),
       });
+      stats.modelUsage = mergeModelUsage(stats.turns.flatMap((turn) => turn.modelUsage || []));
       session.lastArchiveErrorAt = 0;
     } catch (error) {
       const now = Date.now();
@@ -4292,6 +4430,7 @@ async function publishWatchRound(args, session, context) {
     }
   }
 
+  writeLastSummary(session, stats, resolvedThreadId);
   session.health = nextWatchHealth(args, session, context.parsed, rawThread, connectionState);
   // 健康快照每个巡检周期都落盘（运行中 1s、空闲 5s），即使本周期没有向页面推送。
   // 这样 monitor-health.json 的 mtime 与 lastSuccessAt 才能真正反映监控存活。
@@ -4499,6 +4638,12 @@ async function runWatchLoop(args) {
     }
   });
   const session = createWatchSession(args);
+  // Fetch once on startup, then on a separate 24-hour timer; never per heartbeat.
+  await refreshPricingIfDue();
+  const pricingTimer = setInterval(() => {
+    refreshPricingIfDue().catch(() => {});
+  }, 60 * 1000);
+  pricingTimer.unref();
   persistMonitorHeartbeat(session, { force: true, phase: "starting" });
   persistMonitorHealth(session.health);
   pruneMonitorLogs();
@@ -4568,6 +4713,8 @@ async function main() {
     await runWatchLoop(args);
     return;
   }
+
+  if (args.cdp) await refreshPricingIfDue();
 
   const files = args.thread
     ? locateThreadFiles(findRolloutFiles(), args.thread)
@@ -4647,6 +4794,8 @@ export {
   parseFile,
   buildStats,
   payloadFor,
+  setPricingSnapshot,
+  refreshPricingIfDue,
   signPayloadWithAuth,
   snapshotStatsFrom,
   monitorHealthFor,

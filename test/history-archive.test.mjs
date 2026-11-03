@@ -20,6 +20,131 @@ function record(index, turnId, baseMs) {
   };
 }
 
+test("模型历史费用冻结且范围只合并结构化模型统计", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-model-history-"));
+  try {
+    const now = Date.parse("2026-11-03T10:00:00Z");
+    const turns = [
+      {
+        turnId: "T1",
+        start: new Date(now - 1000).toISOString(),
+        requestCount: 1,
+        input: 1000,
+        cached: 800,
+        output: 100,
+        total: 1100,
+      },
+    ];
+    const request = {
+      ...record(0, "T1", now - 1000),
+      model: "gpt-6.1-sol",
+      modelId: "openai/gpt-6.1-sol",
+      openRouterReferenceUsd: 0.002,
+      costStatus: "priced",
+      pricingFetchedAt: new Date(now).toISOString(),
+    };
+    const archived = new UsageHistoryArchive(root).archiveSession({
+      threadId: "fixture",
+      now,
+      turns,
+      records: [request],
+    });
+    assert.equal(archived.appended, 1);
+    const nextTurns = structuredClone(turns);
+    const repriced = { ...request, openRouterReferenceUsd: 99 };
+    const archive = new UsageHistoryArchive(root);
+    assert.equal(
+      archive.archiveSession({ threadId: "fixture", now: now + 1000, turns: nextTurns, records: [repriced] }).appended,
+      0,
+    );
+    assert.equal(nextTurns[0].modelUsage[0].openRouterReferenceUsd, 0.002);
+    for (const range of ["today", "3d", "7d", "30d", "all"]) {
+      const summary = archive.aggregateRange(range, now + 1000);
+      assert.equal(summary.modelUsage[0].openRouterReferenceUsd, 0.002);
+      assert.equal(summary.modelUsage[0].requestCount, 1);
+    }
+    const snapshot = fs.readFileSync(path.join(root, "sessions", archived.sessionHash, "turns.json"), "utf8");
+    assert.equal(snapshot.includes('"turnId"'), false);
+    assert.equal(snapshot.includes('"model":"'), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("旧历史模型与费用保持未知不以当前价重估", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-old-model-history-"));
+  try {
+    const now = Date.parse("2026-11-03T10:00:00Z");
+    const archive = new UsageHistoryArchive(root);
+    const result = archive.archiveSession({
+      threadId: "fixture",
+      now,
+      turns: [
+        { start: new Date(now).toISOString(), requestCount: 2, input: 100, cached: null, output: 10, total: 110 },
+      ],
+      records: [],
+    });
+    const file = path.join(root, "sessions", result.sessionHash, "turns.json");
+    const snapshot = JSON.parse(fs.readFileSync(file, "utf8"));
+    delete snapshot.turns[0].modelUsage;
+    fs.writeFileSync(file, JSON.stringify(snapshot), "utf8");
+    const summary = new UsageHistoryArchive(root).aggregateRange("all", now);
+    assert.equal(summary.modelUsage[0].modelId, null);
+    assert.equal(summary.modelUsage[0].openRouterReferenceUsd, null);
+    assert.equal(summary.modelUsage[0].unpricedRequestCount, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("历史归档：旧格式请求键不同，重新读取也不重复追加或重写原文件", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-history-v2-"));
+  try {
+    const now = Date.parse("2026-11-03T10:00:00Z");
+    const ts = new Date(now - 1000).toISOString();
+    const turns = [{ start: ts, requestCount: 1, input: 100, cached: 40, output: 20, total: 120 }];
+    const saved = new UsageHistoryArchive(root).archiveSession({ threadId: "fixture", now, turns, records: [] });
+    const file = path.join(root, "sessions", saved.sessionHash, "requests-202611.jsonl");
+    const original =
+      JSON.stringify({
+        v: 2,
+        kind: "request",
+        key: "a".repeat(24),
+        sessionHash: saved.sessionHash,
+        turnIndex: 1,
+        requestIndex: 1,
+        ts,
+        input: 100,
+        cached: 40,
+        output: 20,
+        total: 120,
+        threadTotal: 120,
+        turnTotal: 120,
+      }) + "\n";
+    fs.writeFileSync(file, original, "utf8");
+    const result = new UsageHistoryArchive(root).archiveSession({
+      threadId: "fixture",
+      now,
+      turns,
+      records: [
+        {
+          ts,
+          input: 100,
+          cached: 40,
+          output: 20,
+          requestTotal: 120,
+          threadUsage: { total: 120 },
+          turnUsage: { total: 120 },
+        },
+      ],
+    });
+    assert.equal(result.appended, 0);
+    assert.equal(fs.readFileSync(file, "utf8"), original);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("历史归档：超过 500 条仍全部写入本地，重复刷新不重复追加", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-history-"));
   try {

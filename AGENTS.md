@@ -50,7 +50,7 @@
 - 读取本地 Codex rollout JSONL
 - 增量解析与分片合并
 - 统计请求、轮次、缓存、速度和上下文
-- 通过本机 CDP 推送签名 schema v4 / auth v2 负载
+- 通过本机 CDP 推送签名 schema v5 / auth v2 负载
 - 写入健康快照、简略快照和日志
 
 会话身份约束：
@@ -65,7 +65,7 @@
 ### 协议
 
 - `protocol.mjs`
-- `schemas/payload-v4.schema.json`
+- `schemas/payload-v5.schema.json`
 - `docs/auth-v2.md`
 - 页面事件：`tokens-ui-for-codex`
 - 页面全局：`window.__tuiForCodex`
@@ -112,7 +112,7 @@ Codex rollout JSONL
 
 ## 4. 协议约束
 
-schema v4 / auth v2 是严格签名-only：
+schema v5 / auth v2 是严格签名-only：
 
 - 必须 `authRequired: true`
 - 必须有 `auth.v=2`
@@ -132,7 +132,7 @@ schema v4 / auth v2 是严格签名-only：
 - nonce 重放
 - seq 倒退
 - `authRequired !== true`
-- 旧 schema v3 / auth v1
+- 旧 schema v4/v3 或 auth v1
 
 ## 5. 统计口径
 

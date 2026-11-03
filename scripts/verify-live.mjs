@@ -135,15 +135,15 @@ try {
 
   record("协议已注册", snapshot.protocolName === "tokens-ui-for-codex", snapshot.protocolName);
   record(
-    "支持 schema v4",
-    Array.isArray(snapshot.supportedSchemaVersions) && snapshot.supportedSchemaVersions.includes(4),
+    "支持 schema v5",
+    Array.isArray(snapshot.supportedSchemaVersions) && snapshot.supportedSchemaVersions.includes(5),
     snapshot.supportedSchemaVersions,
   );
   record("统计条唯一", snapshot.panelCount === 1, snapshot.panelCount);
   record("样式表唯一", snapshot.styleCount === 1, snapshot.styleCount);
   record("统计条位于上下文圆圈左侧", snapshot.panelLeftOfRing, { panel: snapshot.panelRect, ring: snapshot.ringRect });
   record("负载协议名匹配", snapshot.payloadProtocolName === "tokens-ui-for-codex", snapshot.payloadProtocolName);
-  record("负载 schema v4", snapshot.payloadSchemaVersion === 4, snapshot.payloadSchemaVersion);
+  record("负载 schema v5", snapshot.payloadSchemaVersion === 5, snapshot.payloadSchemaVersion);
   record(
     "timing-v1 能力已注册",
     Array.isArray(snapshot.payloadCapabilities) && snapshot.payloadCapabilities.includes("timing-v1"),

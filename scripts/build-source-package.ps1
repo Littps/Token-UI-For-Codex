@@ -22,7 +22,7 @@ if (-not $RepoRoot) {
 $resolvedRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 # 必需文件（缺任一即中止，避免打出残缺包）
-foreach ($required in @("README.md", "README.en.md", "README.agent.md", "DEPLOYMENT.md", "LICENSE", "package.json", "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js", "readme01.png", "readme02.png", "readme03.png", "schemas\payload-v4.schema.json", "docs\auth-v2.md", "docs\watchdog.md", "docs\context-estimation.md", "docs\context-and-resources.md", "docs\history-ranges.md", "docs\metric-scopes.md", "skills\tokens-ui-for-codex\SKILL.md", "scripts\verify-watchdog.ps1", "rust-launcher\Cargo.toml", "rust-launcher\README.md", "rust-launcher\build-and-package.ps1", "rust-launcher\tests\supervisor_integration.rs")) {
+foreach ($required in @("README.md", "README.en.md", "README.agent.md", "DEPLOYMENT.md", "LICENSE", "package.json", "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "openrouter-pricing.mjs", "service-tier-pricing.mjs", "model-usage.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js", "readme01.png", "readme02.png", "readme03.png", "schemas\payload-v5.schema.json", "docs\auth-v2.md", "docs\watchdog.md", "docs\context-estimation.md", "docs\context-and-resources.md", "docs\history-ranges.md", "docs\metric-scopes.md", "skills\tokens-ui-for-codex\SKILL.md", "scripts\verify-watchdog.ps1", "rust-launcher\Cargo.toml", "rust-launcher\README.md", "rust-launcher\build-and-package.ps1", "rust-launcher\tests\supervisor_integration.rs")) {
   $requiredPath = Join-Path $resolvedRoot $required
   if (-not (Test-Path -LiteralPath $requiredPath)) { throw "缺少文件: $requiredPath" }
 }

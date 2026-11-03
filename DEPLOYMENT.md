@@ -35,7 +35,7 @@ node plugins\tokens-ui-for-codex\scripts\check-page-state.mjs
 node plugins\tokens-ui-for-codex\scripts\verify-live.mjs
 ```
 
-页面应只有一个 `#tui-native` 面板，协议为 schema v4 / auth v2。
+页面应只有一个 `#tui-native` 面板，协议为 schema v5 / auth v2。新旧面板与监控必须成套替换。
 
 ## 更新
 

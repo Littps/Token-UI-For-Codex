@@ -1,0 +1,973 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tokens UI For Codex signed schema v5 payload",
+  "type": "object",
+  "required": [
+    "protocolName",
+    "schemaVersion",
+    "authRequired",
+    "auth",
+    "capabilities",
+    "modelContextWindow",
+    "requestCount",
+    "currentTurnRequestCount",
+    "sessionTotal",
+    "sessionInput",
+    "sessionCached",
+    "sessionOutput",
+    "sessionCacheHitRate",
+    "sessionTps",
+    "contextUsed",
+    "contextBreakdown",
+    "sessionWallMs",
+    "sessionToolWallMs",
+    "sessionToolCallCount",
+    "sessionTtftAvgMs",
+    "sessionTimingSampleCount",
+    "rangeSummary",
+    "turnTotal",
+    "turnInput",
+    "turnWallMs",
+    "turnToolWallMs",
+    "turnToolCallCount",
+    "turnTtftMs",
+    "turnTimingCoverage",
+    "turnTimingQuality",
+    "turnCached",
+    "turnOutput",
+    "turnCacheHitRate",
+    "lastRequestTps",
+    "turnTps",
+    "turnWallTps",
+    "genEstimateTps",
+    "compactTps",
+    "compactSpeedSampleCount",
+    "compactSpeedWindow",
+    "compactSpeedConfidence",
+    "effectiveTps",
+    "turnEffectiveTps",
+    "effectiveSampleCount",
+    "effectiveWindow",
+    "speedTimingConfidence",
+    "turnsLimit",
+    "requestsLimit",
+    "sessionChanged",
+    "snapshot",
+    "currentTurnIndex",
+    "turnTotalCount",
+    "turnsTruncated",
+    "turns",
+    "requestDetailsTruncated",
+    "requestDetails",
+    "requestDetailTotal",
+    "modelSwitchCount",
+    "cumulativeResetCount",
+    "health",
+    "updatedAt",
+    "modelUsage",
+    "pricing"
+  ],
+  "properties": {
+    "protocolName": {
+      "const": "tokens-ui-for-codex"
+    },
+    "schemaVersion": {
+      "const": 5
+    },
+    "authRequired": {
+      "const": true
+    },
+    "auth": {
+      "type": "object",
+      "required": ["v", "keyId", "ts", "nonce", "seq", "mac"],
+      "properties": {
+        "v": {
+          "const": 2
+        },
+        "keyId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mac": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "contains": {
+        "const": "auth-v2"
+      }
+    },
+    "modelContextWindow": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "requestCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "currentTurnRequestCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "sessionTotal": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "sessionInput": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "sessionCached": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "sessionOutput": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "sessionCacheHitRate": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "sessionTps": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "contextUsed": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "contextBreakdown": {
+      "type": ["object", "null"],
+      "required": [
+        "estimated",
+        "estimatorVersion",
+        "systemPromptTokens",
+        "toolDefinitionTokens",
+        "conversationTokens",
+        "otherTokens"
+      ],
+      "properties": {
+        "estimated": {
+          "const": true
+        },
+        "estimatorVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "systemPromptTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "toolDefinitionTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "conversationTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "otherTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionWallMs": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "sessionToolWallMs": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "sessionToolCallCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "sessionTtftAvgMs": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "sessionTimingSampleCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "rangeSummary": {
+      "type": ["object", "null"],
+      "required": [
+        "range",
+        "available",
+        "retentionDays",
+        "cutoffAt",
+        "generatedAt",
+        "availableFrom",
+        "availableThrough",
+        "sessionCount",
+        "turnCount",
+        "requestCount",
+        "input",
+        "cached",
+        "output",
+        "total",
+        "cacheComplete",
+        "wallMs",
+        "toolWallMs",
+        "toolCallCount",
+        "ttftAvgMs",
+        "effectiveMs",
+        "effectiveTps",
+        "timingSampleCount",
+        "ttftSampleCount",
+        "modelUsage"
+      ],
+      "properties": {
+        "range": {
+          "enum": ["today", "3d", "7d", "30d", "all"]
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "retentionDays": {
+          "type": "number",
+          "minimum": 1
+        },
+        "cutoffAt": {
+          "type": ["string", "null"]
+        },
+        "generatedAt": {
+          "type": "string"
+        },
+        "availableFrom": {
+          "type": ["string", "null"]
+        },
+        "availableThrough": {
+          "type": ["string", "null"]
+        },
+        "sessionCount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "turnCount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "requestCount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "input": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cached": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output": {
+          "type": "number",
+          "minimum": 0
+        },
+        "total": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cacheComplete": {
+          "type": "boolean"
+        },
+        "wallMs": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "toolWallMs": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "toolCallCount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ttftAvgMs": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "effectiveMs": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "effectiveTps": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "timingSampleCount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ttftSampleCount": {
+          "type": "number",
+          "minimum": 0
+        },
+        "modelUsage": {
+          "type": "array",
+          "maxItems": 9,
+          "items": {
+            "type": "object",
+            "required": [
+              "modelId",
+              "modelLabel",
+              "openRouterReferenceUsd",
+              "pricingFetchedAt",
+              "costStatus",
+              "input",
+              "cached",
+              "output",
+              "total",
+              "requestCount",
+              "pricedRequestCount",
+              "unpricedRequestCount"
+            ],
+            "properties": {
+              "modelId": {
+                "enum": [
+                  "openai/gpt-6.1-sol",
+                  "openai/gpt-6-astra",
+                  "openai/gpt-6.1-terra",
+                  "openai/gpt-6-sol",
+                  "openai/gpt-6-luna",
+                  "openai/gpt-5.6-sol",
+                  "openai/gpt-5.6-terra",
+                  "openai/gpt-5.6-luna",
+                  null
+                ]
+              },
+              "modelLabel": {
+                "type": "string"
+              },
+              "openRouterReferenceUsd": {
+                "type": ["number", "null"],
+                "minimum": 0
+              },
+              "pricingFetchedAt": {
+                "type": ["string", "null"],
+                "format": "date-time"
+              },
+              "costStatus": {
+                "enum": ["priced", "partial", "unavailable"]
+              },
+              "input": {
+                "type": ["number", "null"],
+                "minimum": 0
+              },
+              "cached": {
+                "type": ["number", "null"],
+                "minimum": 0
+              },
+              "output": {
+                "type": ["number", "null"],
+                "minimum": 0
+              },
+              "total": {
+                "type": ["number", "null"],
+                "minimum": 0
+              },
+              "requestCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "pricedRequestCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unpricedRequestCount": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "turnTotal": {
+      "type": "number",
+      "minimum": 0
+    },
+    "turnInput": {
+      "type": "number",
+      "minimum": 0
+    },
+    "turnWallMs": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "turnToolWallMs": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "turnToolCallCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "turnTtftMs": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "turnTimingCoverage": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "turnTimingQuality": {
+      "enum": ["high", "medium", "low"]
+    },
+    "turnCached": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "turnOutput": {
+      "type": "number",
+      "minimum": 0
+    },
+    "turnCacheHitRate": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "lastRequestTps": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "turnTps": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "turnWallTps": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "当前轮输出 tokens ÷ 整轮墙钟耗时；包含工具与网络等待"
+    },
+    "genEstimateTps": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "compactTps": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "紧凑条稳健估算：最近有效请求生成速度的中位数；样本不足时为 null"
+    },
+    "compactSpeedSampleCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "compactSpeedWindow": {
+      "type": "number",
+      "minimum": 0
+    },
+    "compactSpeedConfidence": {
+      "type": ["string", "null"],
+      "enum": ["high", "medium", "low", null]
+    },
+    "effectiveTps": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "turnEffectiveTps": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "effectiveSampleCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "effectiveWindow": {
+      "type": "number",
+      "minimum": 0
+    },
+    "speedTimingConfidence": {
+      "type": ["string", "null"],
+      "enum": ["high", "medium", "low", null]
+    },
+    "turnsLimit": {
+      "type": "number",
+      "minimum": 0
+    },
+    "requestsLimit": {
+      "type": "number",
+      "minimum": 0
+    },
+    "sessionChanged": {
+      "type": "boolean"
+    },
+    "snapshot": {
+      "type": "boolean"
+    },
+    "currentTurnIndex": {
+      "type": "number",
+      "minimum": 0
+    },
+    "turnTotalCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "turnsTruncated": {
+      "type": "boolean"
+    },
+    "turns": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": ["index", "startLabel", "requests", "input", "cached", "uncached", "output", "total", "modelUsage"],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "startLabel": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "number",
+            "minimum": 0
+          },
+          "input": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cached": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "uncached": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "output": {
+            "type": "number",
+            "minimum": 0
+          },
+          "total": {
+            "type": "number",
+            "minimum": 0
+          },
+          "wallMs": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "toolWallMs": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "toolCallCount": {
+            "type": "number",
+            "minimum": 0
+          },
+          "ttftMs": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "timingCoverage": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "timingQuality": {
+            "enum": ["high", "medium", "low"]
+          },
+          "modelUsage": {
+            "type": "array",
+            "maxItems": 9,
+            "items": {
+              "type": "object",
+              "required": [
+                "modelId",
+                "modelLabel",
+                "openRouterReferenceUsd",
+                "pricingFetchedAt",
+                "costStatus",
+                "input",
+                "cached",
+                "output",
+                "total",
+                "requestCount",
+                "pricedRequestCount",
+                "unpricedRequestCount"
+              ],
+              "properties": {
+                "modelId": {
+                  "enum": [
+                    "openai/gpt-6.1-sol",
+                    "openai/gpt-6-astra",
+                    "openai/gpt-6.1-terra",
+                    "openai/gpt-6-sol",
+                    "openai/gpt-6-luna",
+                    "openai/gpt-5.6-sol",
+                    "openai/gpt-5.6-terra",
+                    "openai/gpt-5.6-luna",
+                    null
+                  ]
+                },
+                "modelLabel": {
+                  "type": "string"
+                },
+                "openRouterReferenceUsd": {
+                  "type": ["number", "null"],
+                  "minimum": 0
+                },
+                "pricingFetchedAt": {
+                  "type": ["string", "null"],
+                  "format": "date-time"
+                },
+                "costStatus": {
+                  "enum": ["priced", "partial", "unavailable"]
+                },
+                "input": {
+                  "type": ["number", "null"],
+                  "minimum": 0
+                },
+                "cached": {
+                  "type": ["number", "null"],
+                  "minimum": 0
+                },
+                "output": {
+                  "type": ["number", "null"],
+                  "minimum": 0
+                },
+                "total": {
+                  "type": ["number", "null"],
+                  "minimum": 0
+                },
+                "requestCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "pricedRequestCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "unpricedRequestCount": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "requestDetailsTruncated": {
+      "type": "boolean"
+    },
+    "requestDetailTotal": {
+      "type": "number",
+      "minimum": 0
+    },
+    "requestDetails": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": [
+          "index",
+          "time",
+          "input",
+          "cached",
+          "uncached",
+          "output",
+          "total",
+          "modelId",
+          "modelLabel",
+          "openRouterReferenceUsd",
+          "pricingFetchedAt",
+          "costStatus"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "time": {
+            "type": "string"
+          },
+          "input": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "cached": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "uncached": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "output": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "total": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "modelId": {
+            "enum": [
+              "openai/gpt-6.1-sol",
+              "openai/gpt-6-astra",
+              "openai/gpt-6.1-terra",
+              "openai/gpt-6-sol",
+              "openai/gpt-6-luna",
+              "openai/gpt-5.6-sol",
+              "openai/gpt-5.6-terra",
+              "openai/gpt-5.6-luna",
+              null
+            ]
+          },
+          "modelLabel": {
+            "type": "string"
+          },
+          "openRouterReferenceUsd": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "pricingFetchedAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "costStatus": {
+            "enum": [
+              "priced",
+              "partial",
+              "unknown-model",
+              "missing-price",
+              "missing-usage",
+              "stale-price",
+              "unavailable",
+              "unsupported-tier",
+              "unknown-mode"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "modelSwitchCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "cumulativeResetCount": {
+      "type": "number",
+      "minimum": 0
+    },
+    "updatedAt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "health": {
+      "type": "object",
+      "required": [
+        "status",
+        "recoveryState",
+        "platform",
+        "platformSupported",
+        "nodeSupported",
+        "cdpReachable",
+        "pageAttached",
+        "targetMode",
+        "targetSelection",
+        "targetCount",
+        "dataFresh",
+        "lastSuccessAt",
+        "lastErrorCode",
+        "lastErrorAt",
+        "monitorRunning",
+        "autostartInstalled",
+        "installationState"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "starting",
+            "healthy",
+            "waiting-for-cdp",
+            "waiting-for-page",
+            "waiting-for-data",
+            "target-selection-required",
+            "protocol-mismatch",
+            "stale-data",
+            "recovering",
+            "failed"
+          ]
+        },
+        "recoveryState": {
+          "enum": ["idle", "retrying", "recovered", "failed"]
+        },
+        "platform": {
+          "const": "windows"
+        },
+        "platformSupported": {
+          "type": "boolean"
+        },
+        "nodeSupported": {
+          "type": "boolean"
+        },
+        "cdpReachable": {
+          "type": "boolean"
+        },
+        "pageAttached": {
+          "type": "boolean"
+        },
+        "targetMode": {
+          "enum": ["auto", "focused", "manual"]
+        },
+        "targetSelection": {
+          "enum": ["unknown", "single", "focused", "visible", "manual", "required"]
+        },
+        "targetCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dataFresh": {
+          "type": "boolean"
+        },
+        "lastSuccessAt": {
+          "type": ["string", "null"]
+        },
+        "lastErrorCode": {
+          "type": ["string", "null"]
+        },
+        "lastErrorAt": {
+          "type": ["string", "null"]
+        },
+        "monitorRunning": {
+          "type": "boolean"
+        },
+        "autostartInstalled": {
+          "type": ["boolean", "null"]
+        },
+        "installationState": {
+          "enum": ["unknown", "missing", "ready", "invalid"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "modelUsage": {
+      "type": "array",
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "required": [
+          "modelId",
+          "modelLabel",
+          "openRouterReferenceUsd",
+          "pricingFetchedAt",
+          "costStatus",
+          "input",
+          "cached",
+          "output",
+          "total",
+          "requestCount",
+          "pricedRequestCount",
+          "unpricedRequestCount"
+        ],
+        "properties": {
+          "modelId": {
+            "enum": [
+              "openai/gpt-6.1-sol",
+              "openai/gpt-6-astra",
+              "openai/gpt-6.1-terra",
+              "openai/gpt-6-sol",
+              "openai/gpt-6-luna",
+              "openai/gpt-5.6-sol",
+              "openai/gpt-5.6-terra",
+              "openai/gpt-5.6-luna",
+              null
+            ]
+          },
+          "modelLabel": {
+            "type": "string"
+          },
+          "openRouterReferenceUsd": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "pricingFetchedAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "costStatus": {
+            "enum": ["priced", "partial", "unavailable"]
+          },
+          "input": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "cached": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "output": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "total": {
+            "type": ["number", "null"],
+            "minimum": 0
+          },
+          "requestCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pricedRequestCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unpricedRequestCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "required": ["status", "fetchedAt", "sourceUrl"],
+      "properties": {
+        "status": {
+          "enum": ["fresh", "stale", "unavailable"]
+        },
+        "fetchedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "sourceUrl": {
+          "const": "https://openrouter.ai/api/v1/models"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

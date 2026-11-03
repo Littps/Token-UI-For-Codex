@@ -1,7 +1,7 @@
 # HMAC auth v2
 
 本文描述当前工作树的本地推送认证协议。已发布的 1.0.2 标签仍使用
-schema v3 / auth v1；当前未发布源码升级为 schema v4 / auth v2。
+schema v3 / auth v1；当前未发布源码升级为 schema v5 / auth v2。
 
 ## 目标
 
@@ -14,7 +14,7 @@ schema v3 / auth v1；当前未发布源码升级为 schema v4 / auth v2。
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "authRequired": true,
   "auth": {
     "v": 2,
@@ -47,7 +47,7 @@ tokens-ui-for-codex/auth-v2
 
 页面必须同时满足：
 
-- `schemaVersion=4`
+- `schemaVersion=5`（v4 及更早版本不接受；v5 新增模型与费用结构，认证算法不变）
 - `auth.v=2`
 - `keyId` 与 `nonce` 为 32 位小写十六进制
 - `mac` 为 64 位小写十六进制
@@ -91,11 +91,12 @@ WebCrypto `CryptoKey`。
 
 ## 兼容性
 
-schema v4 与 schema v3 不兼容：
+schema v5 与 schema v4/v3 不兼容。即使同为 auth v2，业务 schema 不匹配也拒绝：
 
 | 面板 | 监控 | 结果 |
 | --- | --- | --- |
-| auth v2 | auth v2 | 正常 |
+| schema v5 / auth v2 | schema v5 / auth v2 | 正常 |
+| schema v5 / auth v2 | schema v4 / auth v2 | `protocol-mismatch` |
 | auth v1 | auth v2 | `protocol-mismatch` |
 | auth v2 | auth v1 | `protocol-mismatch` |
 

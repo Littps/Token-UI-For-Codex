@@ -33,7 +33,7 @@ description: 安装、更新、验证、备份、恢复和排查 Tokens UI For C
 - 将紧凑统计条放在上下文用量圆圈左侧
 - 左键打开详情弹层
 - 跟随 Codex 浅色/深色主题
-- 验证 HMAC schema v4 / auth v2 负载
+- 验证 HMAC schema v5 / auth v2 负载
 - 增量更新 DOM
 
 ### 监控
@@ -42,7 +42,7 @@ description: 安装、更新、验证、备份、恢复和排查 Tokens UI For C
 
 - 读取本地 Codex rollout JSONL
 - 增量解析、分片合并、统计
-- 通过本机 CDP 推送签名 schema v4 / auth v2 负载
+- 通过本机 CDP 推送签名 schema v5 / auth v2 负载
 - 会话候选需存在对应 rollout 并稳定 2.5 秒后才切换
 - 新对话 placeholder 不允许映射到任意旧文件
 - 写入健康快照、简略快照和日志
@@ -152,7 +152,7 @@ watchdog 保持常驻；进程消失或连续心跳停滞时才重启。原地�
 
 ## 协议安全
 
-页面只接受签名 schema v4：
+页面只接受签名 schema v5：
 
 - `authRequired=true`
 - `auth.v=2`

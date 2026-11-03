@@ -69,6 +69,8 @@ const PAYLOAD_WHITELIST = new Set([
   "sessionTtftAvgMs",
   "sessionTimingSampleCount",
   "rangeSummary",
+  "modelUsage",
+  "pricing",
   "turnTotal",
   "turnInput",
   "turnWallMs",
@@ -213,7 +215,7 @@ test("实机：负载协议与隐私白名单", async (t) => {
       transientKeys,
     }),
   );
-  assert.equal(payload.schemaVersion, 4, "schema 版本应为 4");
+  assert.equal(payload.schemaVersion, 5, "schema 版本应为 5");
   assert.equal(payload.authRequired, true, "v4 负载必须声明 authRequired=true");
   assert.equal(payload.auth && payload.auth.v, 2, "认证版本应为 2");
   assert.ok(payload.auth && /^[0-9a-f]{32}$/.test(payload.auth.keyId), "keyId 格式无效");
@@ -507,7 +509,7 @@ test("实机：Esc 不再关闭弹层（插件不注册键盘监听）", async (
   assert.equal(stillOpen, true, "按当前设计 Esc 不应关闭弹层（键盘监听已按用户要求移除）");
 });
 
-test("实机：无 auth 的伪造 schema v4 负载会被拒绝", async (t) => {
+test("实机：无 auth 的伪造 schema v5 负载会被拒绝", async (t) => {
   const result = await state.page.evaluate(async () => {
     const backup = window.__tuiForCodex;
     const forged = JSON.parse(JSON.stringify(backup));

@@ -197,7 +197,7 @@ fallback command. The PowerShell confirmation window still requires `Y`.
 Codex rollout JSONL
   → incremental parser and statistics
   → local CDP with dynamic port discovery
-  → signed schema v4 / auth v2 payload
+  → signed schema v5 / auth v2 payload
   → HMAC verification in the Codex++ script
   → incremental bar/dialog rendering
 ```
@@ -242,7 +242,7 @@ view does not depend on a heartbeat.
 
 ## Security and privacy
 
-- Signed-only schema v4 / auth v2
+- Signed-only schema v5 / auth v2
 - HMAC authenticates integrity and origin; it does not encrypt data
 - Random 256-bit per-monitor session key
 - HMAC-SHA256 over the payload, auth version, key ID, timestamp, nonce and sequence

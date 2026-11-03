@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { aggregateModelUsage, mergeModelUsage, requestModelMetadata, unknownModelUsage } from "./model-usage.mjs";
 
 export const HISTORY_RETENTION_DAYS = 60;
 export const HISTORY_FILE_MAX_BYTES = 32 * 1024 * 1024;
@@ -75,8 +76,76 @@ function readKeys(file) {
     const pattern = /"key":"([0-9a-f]{24})"/g;
     let match;
     while ((match = pattern.exec(text))) keys.push(match[1]);
+    // Earlier request archives used a different key. Recognize their numeric
+    // usage identity in memory only; never migrate or rewrite the old file.
+    for (const line of text.split(/\r?\n/)) {
+      try {
+        const row = JSON.parse(line);
+        if (row.v !== 2 || row.kind !== "request" || !/^[a-f0-9]{32}$/.test(row.sessionHash)) continue;
+        if (!Number.isSafeInteger(row.turnIndex) || row.turnIndex < 1 || typeof row.ts !== "string") continue;
+        keys.push(
+          hashKey([
+            row.sessionHash,
+            String(row.turnIndex),
+            row.ts,
+            String(row.input),
+            String(row.cached),
+            String(row.output),
+            String(row.total),
+            String(row.threadTotal),
+            String(row.turnTotal),
+          ]),
+        );
+      } catch {}
+    }
   } catch {}
   return keys;
+}
+
+function requestArchiveKey(record, sessionHash, turnIndex) {
+  return hashKey([
+    sessionHash,
+    String(turnIndex + 1),
+    record.ts || "",
+    String(record.input),
+    String(record.cached),
+    String(record.output),
+    String(record.requestTotal),
+    String(record.threadUsage?.total ?? null),
+    String(record.turnUsage?.total ?? null),
+  ]);
+}
+
+function readArchivedMetadata(file, metadata) {
+  try {
+    for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+      try {
+        const row = JSON.parse(line);
+        if (
+          row.kind !== "request" ||
+          !Number.isSafeInteger(row.turnIndex) ||
+          row.turnIndex < 1 ||
+          !/^[a-f0-9]{32}$/.test(row.sessionHash)
+        )
+          continue;
+        const key = requestArchiveKey(
+          {
+            ts: row.ts,
+            input: row.input,
+            cached: row.cached,
+            output: row.output,
+            requestTotal: row.total,
+            threadUsage: { total: row.threadTotal },
+            turnUsage: { total: row.turnTotal },
+          },
+          row.sessionHash,
+          row.turnIndex - 1,
+        );
+        // Only sanitized numeric metadata is recovered; never reprice old rows.
+        if (!metadata.has(key)) metadata.set(key, requestModelMetadata(row));
+      } catch {}
+    }
+  } catch {}
 }
 
 export class UsageHistoryArchive {
@@ -130,14 +199,17 @@ export class UsageHistoryArchive {
     const dir = path.join(this.root, "sessions", hash);
     fs.mkdirSync(dir, { recursive: true });
     const seen = new Set();
+    const requestMetadata = new Map();
     for (const name of fs.readdirSync(dir)) {
       if (!/^requests-\d{6}(?:-\d{3})?\.jsonl$/.test(name)) continue;
       for (const key of readKeys(path.join(dir, name))) seen.add(key);
+      readArchivedMetadata(path.join(dir, name), requestMetadata);
     }
     const state = {
       hash,
       dir,
       seen,
+      requestMetadata,
       turnCounts: new Map(),
       lastRecordCount: 0,
       lastTurnsJson: "",
@@ -171,6 +243,7 @@ export class UsageHistoryArchive {
           start: turn.start || "",
           startLabel: turn.startLabel || "",
           requests: turn.requestCount || 0,
+          modelUsage: turn.modelUsage || unknownModelUsage(turn),
           input: turn.input || 0,
           cached: turn.cached == null ? null : turn.cached,
           output: turn.output || 0,
@@ -207,6 +280,32 @@ export class UsageHistoryArchive {
     if (!this.lastCleanupAt || now - this.lastCleanupAt >= this.cleanupIntervalMs) this.cleanup(now);
 
     const state = this.loadSession(threadId);
+    const modelRequests = turns.map(() => []);
+    for (const record of records) {
+      const turnIndex = locateTurnIndex(turns, record);
+      if (turnIndex < 0) continue;
+      const key = requestArchiveKey(record, state.hash, turnIndex);
+      const frozen = state.requestMetadata.get(key);
+      if (frozen) Object.assign(record, frozen);
+      else state.requestMetadata.set(key, requestModelMetadata(record));
+      modelRequests[turnIndex].push(record);
+    }
+    turns.forEach((turn, index) => {
+      turn.modelUsage = modelRequests[index].length
+        ? aggregateModelUsage(modelRequests[index])
+        : turn.modelUsage || unknownModelUsage(turn);
+      // Retained UI rows must use the same frozen metadata as the archive.
+      const lookup = new Map(
+        modelRequests[index].map((record) => [
+          JSON.stringify([record.ts, record.input, record.output, record.requestTotal]),
+          record,
+        ]),
+      );
+      for (const request of Array.isArray(turn.requests) ? turn.requests : []) {
+        const match = lookup.get(JSON.stringify([request.ts, request.input, request.output, request.lastTotal]));
+        if (match) Object.assign(request, requestModelMetadata(match));
+      }
+    });
     const cutoffMs = now - this.retentionDays * 24 * 60 * 60 * 1000;
     const shrink = records.length < state.lastRecordCount;
     const periodicFullScan = state.archiveCalls > 0 && state.archiveCalls % 100 === 0;
@@ -255,6 +354,7 @@ export class UsageHistoryArchive {
           total: record.requestTotal == null ? null : record.requestTotal,
           threadTotal,
           turnTotal,
+          ...requestModelMetadata(record),
         }),
       );
     }
@@ -307,6 +407,7 @@ export class UsageHistoryArchive {
       effectiveMs: null,
       effectiveTps: null,
       timingSampleCount: 0,
+      modelUsage: [],
     };
 
     const sessionsRoot = path.join(this.root, "sessions");
@@ -342,6 +443,10 @@ export class UsageHistoryArchive {
         summary.input += Number.isFinite(turn.input) ? turn.input : 0;
         summary.output += Number.isFinite(turn.output) ? turn.output : 0;
         summary.total += Number.isFinite(turn.total) ? turn.total : 0;
+        summary.modelUsage = mergeModelUsage([
+          ...summary.modelUsage,
+          ...(Array.isArray(turn.modelUsage) ? turn.modelUsage : unknownModelUsage(turn)),
+        ]);
         if (Number.isFinite(turn.cached)) summary.cached += turn.cached;
         else if (Number.isFinite(turn.input) && turn.input > 0) summary.cacheComplete = false;
         if (Number.isFinite(turn.wallMs)) {

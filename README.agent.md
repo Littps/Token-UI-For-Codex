@@ -12,7 +12,7 @@
 | --- | --- |
 | 插件标识 | `tokens-ui-for-codex@tokens-ui-for-codex-local` |
 | 插件版本 | 1.0.2 本地发布候选；包含未提交到 Git 的 auth v2/context/range 更新 |
-| 页面协议 | 签名 schema v4 / auth v2 |
+| 页面协议 | 签名 schema v5 / auth v2 |
 | 页面事件 | `tokens-ui-for-codex` |
 | 页面全局 | `window.__tuiForCodex` |
 | 用户脚本 | `%APPDATA%\Codex++\user_scripts\tokens-ui-for-codex-panel.js` |
@@ -98,8 +98,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<包根>\install.ps1"
 3. 用户脚本存在，并与部署文件 SHA-256 一致
 4. `codex plugin list` 显示插件为 installed/enabled
 5. 页面 `panelCount=1`
-6. `window.__tuiForCodexProtocol.supportedSchemaVersions` 包含 `4`
-7. `window.__tuiForCodex.schemaVersion === 4`
+6. `window.__tuiForCodexProtocol.supportedSchemaVersions` 包含 `5`
+7. `window.__tuiForCodex.schemaVersion === 5`
 8. `window.__tuiForCodex.auth.v === 2`，`keyId`/`nonce` 各 32 位十六进制
 9. `window.__tuiForCodex.auth.mac` 为 64 位十六进制字符串
 10. `__tuiForCodexAuthBootstrap` 与历史 `__tuiForCodexAuthKey` 均不存在
@@ -210,7 +210,7 @@ Get-ChildItem ((Get-Content -Raw -Encoding UTF8 .\runtime-paths.json | ConvertFr
 | 两条统计条 | 用户脚本目录是否有旧 `.js` | 保留新脚本，把其他面板脚本改为 `.bak` |
 | 等待数据 | 健康文件、日志、当前对话 | 切到有内容的会话，或重启监控 |
 | 数字停止 | 分片、定位预警、文件 mtime | 合并分片逻辑；必要时重载页面 |
-| 详情不更新 | 对话 ID、schema v4 / auth v2 | 检查控制台安全计数和监控日志 |
+| 详情不更新 | 对话 ID、schema v5 / auth v2 | 检查控制台安全计数和监控日志 |
 | 主题不跟随 | `<html data-theme>` | 检查页面主题观察器与宿主属性 |
 | 中文路径失败 | PS1 BOM、VBS 编码 | PS1= UTF-8 BOM；VBS= UTF-16LE |
 | 速度不动 | 数据源节奏 | 心跳不产生新数据，等待新的 usage record |
@@ -283,7 +283,7 @@ Get-ChildItem ((Get-Content -Raw -Encoding UTF8 .\runtime-paths.json | ConvertFr
 1. 校验清单缺失和哈希错误均为 0
 2. 重新运行安装器
 3. 重载页面
-4. 验证 schema v4 / auth v2 与单实例
+4. 验证 schema v5 / auth v2 与单实例
 
 ## 11. 卸载
 

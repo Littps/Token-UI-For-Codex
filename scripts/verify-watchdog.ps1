@@ -109,7 +109,7 @@ function Wait-ForDifferentHeartbeat {
 
 try {
   New-Item -ItemType Directory -Path $pluginRoot, $codexHome, $stateDir, $logDir, $historyDir -Force | Out-Null
-  foreach ($name in @("token-stats.mjs", "runtime-paths.mjs", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "monitor-watchdog.ps1")) {
+  foreach ($name in @("token-stats.mjs", "runtime-paths.mjs", "speed-stats.mjs", "history-archive.mjs", "openrouter-pricing.mjs", "service-tier-pricing.mjs", "model-usage.mjs", "protocol.mjs", "monitor-watchdog.ps1")) {
     Copy-Item -LiteralPath (Join-Path $RepoRoot $name) -Destination (Join-Path $pluginRoot $name) -Force
   }
 

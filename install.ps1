@@ -64,7 +64,7 @@ if (Test-Path -LiteralPath (Join-Path $releasePluginRoot ".codex-plugin\plugin.j
   New-Item -ItemType Directory -Path (Join-Path $stageNext ".agents\plugins") -Force | Out-Null
 
   foreach ($file in @(
-      "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js",
+      "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "openrouter-pricing.mjs", "service-tier-pricing.mjs", "model-usage.mjs", "protocol.mjs", "tokens-ui-for-codex-panel.js",
       "find-codex.ps1", "install-autostart.ps1", "uninstall-autostart.ps1",
       "install.bat", "install.ps1", "README.md", "README.en.md", "README.agent.md",
       "MIGRATION-FOR-AGENTS.md", "DEPLOYMENT.md", "AGENTS.md", "LICENSE", "CHANGELOG.md",
@@ -138,11 +138,11 @@ if (Test-Path -LiteralPath (Join-Path $releasePluginRoot ".codex-plugin\plugin.j
 
   # 先完整校验新 staging，再切换目录。失败时保留旧的 install-stage，不让半成品生效。
   $requiredStageFiles = @(
-    "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "protocol.mjs",
+    "token-stats.mjs", "runtime-paths.mjs", "monitor-watchdog.ps1", "speed-stats.mjs", "history-archive.mjs", "openrouter-pricing.mjs", "service-tier-pricing.mjs", "model-usage.mjs", "protocol.mjs",
     "tokens-ui-for-codex-panel.js", "find-codex.ps1", "install-autostart.ps1",
     "uninstall-autostart.ps1", "package.json", "DEPLOYMENT.md",
     "readme01.png", "readme02.png", "readme03.png", ".codex-plugin\plugin.json",
-    "schemas\payload-v4.schema.json"
+    "schemas\payload-v5.schema.json"
   )
   foreach ($relative in $requiredStageFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $pluginRoot $relative) -PathType Leaf)) {
@@ -334,7 +334,7 @@ if ($blocking.Count -gt 0) {
   exit 1
 }
 
-# schema v4 与旧版不兼容：必须先停旧监控，再替换用户脚本，避免旧 v3 推送持续进入新面板。
+# schema v5 与旧版不兼容：必须先停旧监控，再替换用户脚本，避免旧版推送持续进入新面板。
 $oldMonitors = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -and $_.CommandLine -match 'token-stats\.mjs' -and $_.CommandLine -match '--watch' })
 foreach ($proc in $oldMonitors) {

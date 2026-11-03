@@ -147,7 +147,7 @@ const report = {};
 
 // ---- F4：schema 三份实现 ----
 {
-  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v4.schema.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v5.schema.json", import.meta.url), "utf8"));
   const required = schema.required || [];
   const alwaysProduced = [
     "protocolName",

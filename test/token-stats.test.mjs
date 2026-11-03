@@ -25,6 +25,143 @@ after(() => {
 const stats = await import("../token-stats.mjs");
 const protocol = await import("../protocol.mjs");
 const speedStats = await import("../speed-stats.mjs");
+const pricing = await import("../openrouter-pricing.mjs");
+
+function testPriceCatalog(at = Date.now()) {
+  return pricing.parseOpenRouterCatalog(
+    {
+      data: [
+        {
+          id: "openai/gpt-6.1-sol",
+          pricing: {
+            prompt: "0.000002",
+            completion: "0.00001",
+            input_cache_read: "0.0000001",
+            input_cache_write: "0.0000025",
+          },
+        },
+      ],
+    },
+    at,
+  );
+}
+
+test("明确缓存写入零可计价，缺失分类未知，legacy回声不重复计费", () => {
+  const modern = JSON.parse(
+    usage("2026-11-03T11:00:01Z", "priced-model", { model: "gpt-6.1-sol", input: 100, cached: 30, output: 20 }),
+  );
+  modern.payload.usage.cache_write_input_tokens = 0;
+  writeLines([
+    JSON.stringify(modern),
+    event("2026-11-03T11:00:01.010Z", "event_msg", {
+      type: "token_count",
+      info: {
+        last_token_usage: {
+          input_tokens: 100,
+          cached_input_tokens: 30,
+          output_tokens: 20,
+          total_tokens: 120,
+          cache_write_input_tokens: 0,
+        },
+        total_token_usage: { input_tokens: 100, cached_input_tokens: 30, output_tokens: 20, total_tokens: 120 },
+      },
+    }),
+    usage("2026-11-03T11:00:02Z", "missing-write", { model: "gpt-6.1-sol", input: 50, cached: 10, output: 10 }),
+  ]);
+  const catalog = testPriceCatalog(Date.parse("2026-11-03T11:00:00Z"));
+  const result = stats.buildStats(new stats.IncrementalRolloutParser(file).readAll(), {
+    pricing: { catalog, status: "fresh", fetchedAt: catalog.fetchedAt },
+  });
+  assert.equal(result.requestCount, 2);
+  assert.equal(result.modelUsage[0].pricedRequestCount, 1);
+  assert.equal(result.modelUsage[0].unpricedRequestCount, 1);
+  assert.equal(result.modelUsage[0].costStatus, "partial");
+  assert.ok(Math.abs(result.modelUsage[0].openRouterReferenceUsd - 0.000343) < 1e-12);
+  assert.equal(result.turns[0].requests[1].openRouterReferenceUsd, null);
+});
+
+test("早于价目快照的旧请求不能以当前公开价格追溯计费", () => {
+  const row = JSON.parse(usage("2026-11-03T11:00:01Z", "before-price", { model: "gpt-6.1-sol" }));
+  row.payload.usage.cache_write_input_tokens = 0;
+  writeLines([JSON.stringify(row)]);
+  const catalog = testPriceCatalog(Date.parse("2026-11-03T12:00:00Z"));
+  const result = stats.buildStats(new stats.IncrementalRolloutParser(file).readAll(), {
+    pricing: { catalog, status: "fresh", fetchedAt: catalog.fetchedAt },
+  });
+  assert.equal(result.modelUsage[0].openRouterReferenceUsd, null);
+  assert.equal(result.modelUsage[0].unpricedRequestCount, 1);
+  assert.equal(result.turns[0].requests[0].costStatus, "missing-price");
+});
+
+test("价格刷新以缓存原始时间到期，不将23小时旧快照延长至47小时", async () => {
+  const now = Date.now();
+  const hour = 60 * 60 * 1000;
+  const cacheFile = path.join(testRoot, "price-refresh", "catalog.json");
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  fs.writeFileSync(cacheFile, JSON.stringify(testPriceCatalog(now - 23 * hour)), "utf8");
+  let fetches = 0;
+  const fetchImpl = async () => {
+    fetches += 1;
+    return {
+      ok: true,
+      json: async () => ({
+        data: [{ id: "openai/gpt-6.1-sol", pricing: { prompt: "0.000002", completion: "0.00001" } }],
+      }),
+    };
+  };
+  try {
+    await stats.refreshPricingIfDue(now, { cacheFile, fetchImpl });
+    assert.equal(fetches, 0);
+    await stats.refreshPricingIfDue(now + hour - 1, { cacheFile, fetchImpl });
+    assert.equal(fetches, 0);
+    await stats.refreshPricingIfDue(now + hour + 1, { cacheFile, fetchImpl });
+    assert.equal(fetches, 1);
+  } finally {
+    stats.setPricingSnapshot(null);
+  }
+});
+
+test("模型分类按请求归属，切换和未知模型不重算或重复累计", () => {
+  writeLines([
+    model("2026-11-03T10:00:00Z", "gpt-6.1-sol"),
+    usage("2026-11-03T10:00:01Z", "model-a", { input: 100, cached: 30, output: 20 }),
+    usage("2026-11-03T10:00:01Z", "model-a", { input: 100, cached: 30, output: 20 }),
+    usage("2026-11-03T10:00:02Z", "model-b", { model: "gpt-6-astra", input: 50, cached: 10, output: 10 }),
+    usage("2026-11-03T10:00:03Z", "model-c", { model: "gpt-6-astra-unlisted", input: 10, cached: 0, output: 1 }),
+  ]);
+  const result = stats.buildStats(new stats.IncrementalRolloutParser(file).readAll());
+  assert.equal(result.requestCount, 3);
+  assert.equal(result.modelUsage.length, 3);
+  assert.deepEqual(
+    result.modelUsage.map((row) => [row.modelId, row.input, row.cached, row.output, row.total, row.requestCount]),
+    [
+      ["openai/gpt-6.1-sol", 100, 30, 20, 120, 1],
+      ["openai/gpt-6-astra", 50, 10, 10, 60, 1],
+      [null, 10, 0, 1, 11, 1],
+    ],
+  );
+  assert.equal(result.modelUsage[2].openRouterReferenceUsd, null);
+  const payload = stats.payloadFor(result);
+  assert.deepEqual(payload.modelUsage, result.modelUsage);
+  assert.equal(payload.requestDetails[2].modelId, null);
+  assert.equal(JSON.stringify(payload).includes("gpt-6-astra-unlisted"), false);
+});
+
+test("模型费用未知分类不假定零，协议拒绝未知模型和坏覆盖率", () => {
+  writeLines([usage("2026-11-03T10:00:01Z", "model-unknown-cost", { model: "gpt-6.1-sol" })]);
+  const result = stats.buildStats(new stats.IncrementalRolloutParser(file).readAll());
+  assert.equal(result.modelUsage[0].openRouterReferenceUsd, null);
+  assert.equal(result.modelUsage[0].unpricedRequestCount, 1);
+  const payload = stats.payloadFor(result);
+  assert.equal(payload.schemaVersion, 5);
+  assert.equal(protocol.validatePayload(payload).ok, true);
+  const bad = structuredClone(payload);
+  bad.modelUsage[0].modelId = "openai/other";
+  assert.equal(protocol.validatePayload(bad).ok, false);
+  bad.modelUsage[0].modelId = "openai/gpt-6.1-sol";
+  bad.modelUsage[0].pricedRequestCount = 2;
+  assert.equal(protocol.validatePayload(bad).ok, false);
+});
 
 test("CDP 端口自动发现：解析命令行、去重并过滤非法值", () => {
   const text = [
@@ -378,10 +515,10 @@ test("context window is still detected when only task_started carries it", () =>
   assert.equal(stats.payloadFor(stats.buildStats(parsed)).modelContextWindow, windowSize);
 });
 
-test("payload protocol validates and negotiates signed schema v4", () => {
+test("payload protocol validates and negotiates signed schema v5", () => {
   const payload = stats.payloadFor(stats.emptyStats(threadId, file));
   assert.equal(payload.protocolName, protocol.PROTOCOL_NAME);
-  assert.equal(payload.schemaVersion, 4);
+  assert.equal(payload.schemaVersion, 5);
   assert.equal(payload.authRequired, true);
   assert.equal(protocol.validatePayload(payload, { allowLegacy: false }).ok, true);
   assert.equal(
@@ -389,7 +526,8 @@ test("payload protocol validates and negotiates signed schema v4", () => {
     false,
     "未签名模板不能作为最终负载",
   );
-  assert.equal(protocol.negotiateSchemaVersion([3, 4]), 4);
+  assert.equal(protocol.negotiateSchemaVersion([3, 4, 5]), 5);
+  assert.equal(protocol.negotiateSchemaVersion([3, 4]), null);
   assert.equal(protocol.negotiateSchemaVersion([1]), null);
   assert.equal(protocol.validatePayload({ ...payload, protocolName: "wrong" }).ok, false);
   assert.equal(protocol.validatePayload({ ...payload, health: null }).ok, false);
@@ -431,7 +569,7 @@ test("payload protocol validates and negotiates signed schema v4", () => {
 });
 
 test("checked JSON schema documents the same protocol contract", () => {
-  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v4.schema.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(fs.readFileSync(new URL("../schemas/payload-v5.schema.json", import.meta.url), "utf8"));
   const template = stats.payloadFor(stats.emptyStats(threadId, file));
   const producedKeys = [...Object.keys(template), "auth"].sort();
   assert.equal(schema.properties.protocolName.const, protocol.PROTOCOL_NAME);
@@ -483,7 +621,10 @@ test("RANGE-1 范围汇总负载通过协议校验且只包含数值与时间标
     ttftSampleCount: 4,
   };
   const payload = stats.payloadFor(stats.emptyStats(threadId, file), undefined, null, false, false, rangeSummary);
-  assert.deepEqual(payload.rangeSummary, rangeSummary);
+  const { modelUsage, ...originalRange } = payload.rangeSummary;
+  assert.deepEqual(originalRange, rangeSummary);
+  assert.equal(modelUsage[0].modelId, null);
+  assert.equal(modelUsage[0].unpricedRequestCount, rangeSummary.requestCount);
   assert.equal(protocol.validatePayload(payload, { allowLegacy: false }).ok, true);
 });
 
